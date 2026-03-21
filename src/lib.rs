@@ -26,7 +26,8 @@ pub type Tui = Terminal<CrosstermBackend<Stdout>>;
 
 pub fn run(terminal: &mut Tui, config: AppConfig) -> Result<(), Box<dyn Error>> {
     let runtime = Runtime::new()?;
-    let llm = {
+    let mut config = config;
+    let mut llm = {
         let _guard = runtime.enter();
         LlmService::from_config(&config)?
     };
@@ -35,6 +36,7 @@ pub fn run(terminal: &mut Tui, config: AppConfig) -> Result<(), Box<dyn Error>> 
         config.ui.show_thinking,
         config.ui.show_tool_output,
         config.azure.model_name.clone(),
+        config.azure.reasoning_effort,
     );
     let tick_rate = Duration::from_millis(125);
     let mut last_tick = Instant::now();
@@ -50,7 +52,16 @@ pub fn run(terminal: &mut Tui, config: AppConfig) -> Result<(), Box<dyn Error>> 
         if event::poll(timeout)? {
             if let Some(action) = input::map_event(event::read()?) {
                 if let Some(effect) = app.apply(action) {
-                    run_effect(&runtime, &llm, stream_tx.clone(), effect);
+                    if let Err(error) = run_effect(
+                        &runtime,
+                        &mut llm,
+                        &mut config,
+                        &mut app,
+                        stream_tx.clone(),
+                        effect,
+                    ) {
+                        app.push_error_message(format!("Command failed: {error}"));
+                    }
                 }
             }
         }
@@ -86,10 +97,12 @@ pub fn restore_terminal(terminal: &mut Tui) -> Result<(), Box<dyn Error>> {
 
 fn run_effect(
     runtime: &Runtime,
-    llm: &LlmService,
+    llm: &mut LlmService,
+    config: &mut AppConfig,
+    app: &mut App,
     stream_tx: mpsc::UnboundedSender<(u64, llm::StreamEvent)>,
     effect: Effect,
-) {
+) -> anyhow::Result<()> {
     match effect {
         Effect::PromptModel {
             reply_id,
@@ -101,6 +114,23 @@ fn run_effect(
                 llm.stream_prompt(reply_id, prompt, history, stream_tx)
                     .await;
             });
+            Ok(())
+        }
+        Effect::SetReasoningEffort { reasoning_effort } => {
+            let updated_config = AppConfig::set_default_reasoning_effort(reasoning_effort)?;
+            let rebuilt = {
+                let _guard = runtime.enter();
+                LlmService::from_config(&updated_config)?
+            };
+            *config = updated_config;
+            *llm = rebuilt;
+            app.set_reasoning_effort(reasoning_effort);
+            app.push_agent_message(format!(
+                "Reasoning effort set to `{}` for model `{}` and saved to `config.toml`.",
+                reasoning_effort.as_str(),
+                app.model_name()
+            ));
+            Ok(())
         }
     }
 }

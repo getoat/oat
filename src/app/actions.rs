@@ -5,6 +5,7 @@ use super::state::{
     App, ChatMessage, MessageStyle, PendingReply, SlashCommand, Speaker, ToolCall, ToolResultEntry,
     TranscriptEntry,
 };
+use crate::config::ReasoningEffort;
 use crate::llm::StreamEvent;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -33,6 +34,9 @@ pub enum Effect {
         reply_id: u64,
         prompt: String,
         history: Vec<RigMessage>,
+    },
+    SetReasoningEffort {
+        reasoning_effort: ReasoningEffort,
     },
 }
 
@@ -119,8 +123,10 @@ impl App {
 }
 
 fn submit_message(app: &mut App) -> Option<Effect> {
-    if let Some(query) = app.command_query().map(str::to_owned) {
-        return submit_command(app, &query);
+    if app.command_query().is_some() {
+        let command_name = app.command_name().unwrap_or_default().to_owned();
+        let arguments = app.command_arguments().unwrap_or_default().to_owned();
+        return submit_command(app, &command_name, &arguments);
     }
 
     if app.pending_reply.is_some() {
@@ -154,17 +160,15 @@ fn submit_message(app: &mut App) -> Option<Effect> {
     })
 }
 
-fn submit_command(app: &mut App, query: &str) -> Option<Effect> {
+fn submit_command(app: &mut App, command_name: &str, arguments: &str) -> Option<Effect> {
     let Some(command) = app.selected_command() else {
-        app.entries.push(TranscriptEntry::Message(ChatMessage {
-            speaker: Speaker::Agent,
-            text: format!("Unknown command `{query}`. Try /new or /quit."),
-            style: MessageStyle::Error,
-        }));
+        app.push_error_message(format!(
+            "Unknown command `{command_name}`. Try /new, /quit, or /effort."
+        ));
         return None;
     };
 
-    if !command.matches_exact(query) {
+    if !command.matches_exact(command_name) {
         app.set_composer_text(command.canonical_name());
         return None;
     }
@@ -178,7 +182,40 @@ fn submit_command(app: &mut App, query: &str) -> Option<Effect> {
             app.should_quit = true;
             None
         }
+        SlashCommand::Effort => submit_effort_command(app, arguments),
     }
+}
+
+fn submit_effort_command(app: &mut App, arguments: &str) -> Option<Effect> {
+    let value = arguments.trim();
+    if value.is_empty() {
+        let supported = ReasoningEffort::supported_values().join(", ");
+        app.push_error_message(format!(
+            "Usage: /effort <{supported}>. Current effort is `{}`.",
+            app.reasoning_effort().as_str()
+        ));
+        return None;
+    }
+
+    let Some(reasoning_effort) = ReasoningEffort::parse(value) else {
+        let supported = ReasoningEffort::supported_values().join(", ");
+        app.push_error_message(format!(
+            "Unknown reasoning effort `{value}`. Choose one of: {supported}."
+        ));
+        return None;
+    };
+
+    if reasoning_effort == app.reasoning_effort() {
+        app.clear_composer();
+        app.push_agent_message(format!(
+            "Reasoning effort is already set to `{}`.",
+            reasoning_effort.as_str()
+        ));
+        return None;
+    }
+
+    app.clear_composer();
+    Some(Effect::SetReasoningEffort { reasoning_effort })
 }
 
 fn on_stream_event(app: &mut App, reply_id: u64, event: StreamEvent) {
@@ -272,7 +309,7 @@ mod tests {
     use super::*;
 
     fn new_app(show_thinking: bool) -> App {
-        App::new(show_thinking, false, "gpt-5-mini")
+        App::new(show_thinking, false, "gpt-5-mini", ReasoningEffort::Medium)
     }
 
     #[test]
@@ -512,6 +549,75 @@ mod tests {
     }
 
     #[test]
+    fn effort_command_returns_effect_for_valid_value() {
+        let mut app = new_app(true);
+        app.composer.insert_str("/effort high");
+        app.sync_command_selection();
+
+        let effect = app.apply(Action::SubmitMessage);
+
+        assert_eq!(
+            effect,
+            Some(Effect::SetReasoningEffort {
+                reasoning_effort: ReasoningEffort::High,
+            })
+        );
+        assert!(!app.composer_has_content());
+    }
+
+    #[test]
+    fn effort_alias_returns_effect_for_valid_value() {
+        let mut app = new_app(true);
+        app.composer.insert_str("/thinking xhigh");
+        app.sync_command_selection();
+
+        let effect = app.apply(Action::SubmitMessage);
+
+        assert_eq!(
+            effect,
+            Some(Effect::SetReasoningEffort {
+                reasoning_effort: ReasoningEffort::XHigh,
+            })
+        );
+    }
+
+    #[test]
+    fn effort_command_rejects_invalid_value() {
+        let mut app = new_app(true);
+        app.composer.insert_str("/effort turbo");
+        app.sync_command_selection();
+
+        let effect = app.apply(Action::SubmitMessage);
+
+        assert!(effect.is_none());
+        let TranscriptEntry::Message(message) = app.entries.last().expect("error entry exists")
+        else {
+            panic!("expected message entry");
+        };
+        assert_eq!(message.style, MessageStyle::Error);
+        assert!(message.text.contains("Unknown reasoning effort"));
+        assert!(app.composer_has_content());
+    }
+
+    #[test]
+    fn effort_command_reports_noop_when_value_is_unchanged() {
+        let mut app = new_app(true);
+        app.composer.insert_str("/effort medium");
+        app.sync_command_selection();
+
+        let effect = app.apply(Action::SubmitMessage);
+
+        assert!(effect.is_none());
+        let TranscriptEntry::Message(message) = app.entries.last().expect("message entry exists")
+        else {
+            panic!("expected message entry");
+        };
+        assert_eq!(message.style, MessageStyle::Plain);
+        assert!(message.text.contains("already set"));
+        assert!(!app.composer_has_content());
+    }
+
+    #[test]
     fn clear_alias_starts_new_session() {
         let mut app = new_app(true);
         app.entries.push(TranscriptEntry::Message(ChatMessage {
@@ -542,7 +648,7 @@ mod tests {
         app.sync_command_selection();
 
         app.apply(Action::SelectPreviousCommand);
-        assert_eq!(app.selected_command(), Some(SlashCommand::Quit));
+        assert_eq!(app.selected_command(), Some(SlashCommand::Effort));
 
         app.apply(Action::SelectNextCommand);
         assert_eq!(app.selected_command(), Some(SlashCommand::NewSession));

@@ -290,8 +290,9 @@ fn render_mode(frame: &mut Frame, app: &App, area: Rect, accent: Color) {
             Style::default().fg(accent).add_modifier(Modifier::BOLD),
         ),
         Span::raw(format!(
-            "  {}  Thinking {}  Tool output {}  {}  / commands  Tab toggle  Ctrl+C clear/quit",
+            "  {}  Effort {}  Thinking {}  Tool output {}  {}  / commands  Tab toggle  Ctrl+C clear/quit",
             app.model_name(),
+            app.reasoning_effort().as_str(),
             if app.show_thinking() {
                 "visible"
             } else {
@@ -774,7 +775,7 @@ fn push_split_word(word: &str, width: usize, lines: &mut Vec<String>, current: &
 mod tests {
     use ratatui::{Terminal, backend::TestBackend};
 
-    use crate::app::Action;
+    use crate::{app::Action, config::ReasoningEffort};
 
     use super::*;
 
@@ -795,7 +796,7 @@ mod tests {
     fn render_shows_mode_line_and_initial_prompt() {
         let backend = TestBackend::new(120, 8);
         let mut terminal = Terminal::new(backend).expect("test terminal");
-        let mut app = App::new(true, false, "gpt-5-mini");
+        let mut app = App::new(true, false, "gpt-5-mini", ReasoningEffort::Medium);
 
         terminal
             .draw(|frame| render(frame, &mut app))
@@ -810,6 +811,7 @@ mod tests {
             .collect::<String>();
 
         assert!(rendered.contains("Loaded Azure model"));
+        assert!(rendered.contains("Effort medium"));
         assert!(rendered.contains("Read-only"));
         assert!(rendered.contains("Thinking visible"));
         assert!(rendered.contains("Tool output hidden"));
@@ -839,7 +841,7 @@ mod tests {
     fn render_shows_tool_calls_and_results() {
         let backend = TestBackend::new(80, 10);
         let mut terminal = Terminal::new(backend).expect("test terminal");
-        let mut app = App::new(true, true, "gpt-5-mini");
+        let mut app = App::new(true, true, "gpt-5-mini", ReasoningEffort::Medium);
         app.composer_mut().insert_str("show tools");
         app.apply(Action::SubmitMessage);
         app.apply(Action::StreamEvent {
@@ -879,7 +881,7 @@ mod tests {
     fn render_hides_tool_results_when_config_disables_them() {
         let backend = TestBackend::new(80, 10);
         let mut terminal = Terminal::new(backend).expect("test terminal");
-        let mut app = App::new(true, false, "gpt-5-mini");
+        let mut app = App::new(true, false, "gpt-5-mini", ReasoningEffort::Medium);
         app.composer_mut().insert_str("show tools");
         app.apply(Action::SubmitMessage);
         app.apply(Action::StreamEvent {
@@ -918,7 +920,7 @@ mod tests {
     fn render_collapses_long_tool_runs_to_the_last_five_entries() {
         let backend = TestBackend::new(100, 30);
         let mut terminal = Terminal::new(backend).expect("test terminal");
-        let mut app = App::new(true, false, "gpt-5-mini");
+        let mut app = App::new(true, false, "gpt-5-mini", ReasoningEffort::Medium);
         app.composer_mut().insert_str("show tools");
         app.apply(Action::SubmitMessage);
 
@@ -948,7 +950,7 @@ mod tests {
     fn render_ignores_hidden_tool_results_when_collapsing_runs() {
         let backend = TestBackend::new(100, 30);
         let mut terminal = Terminal::new(backend).expect("test terminal");
-        let mut app = App::new(true, false, "gpt-5-mini");
+        let mut app = App::new(true, false, "gpt-5-mini", ReasoningEffort::Medium);
         app.composer_mut().insert_str("show tools");
         app.apply(Action::SubmitMessage);
 
@@ -982,7 +984,7 @@ mod tests {
     fn render_collapses_each_tool_run_independently() {
         let backend = TestBackend::new(100, 40);
         let mut terminal = Terminal::new(backend).expect("test terminal");
-        let mut app = App::new(true, false, "gpt-5-mini");
+        let mut app = App::new(true, false, "gpt-5-mini", ReasoningEffort::Medium);
         app.composer_mut().insert_str("show tools");
         app.apply(Action::SubmitMessage);
 
@@ -1024,7 +1026,7 @@ mod tests {
     fn render_formats_markdown_lists_for_agent_messages() {
         let backend = TestBackend::new(80, 14);
         let mut terminal = Terminal::new(backend).expect("test terminal");
-        let mut app = App::new(true, false, "gpt-5-mini");
+        let mut app = App::new(true, false, "gpt-5-mini", ReasoningEffort::Medium);
         app.composer_mut().insert_str("render list");
         app.apply(Action::SubmitMessage);
         app.apply(Action::StreamEvent {
@@ -1053,7 +1055,7 @@ mod tests {
     fn render_preserves_markdown_bold_and_italic_modifiers() {
         let backend = TestBackend::new(100, 14);
         let mut terminal = Terminal::new(backend).expect("test terminal");
-        let mut app = App::new(true, false, "gpt-5-mini");
+        let mut app = App::new(true, false, "gpt-5-mini", ReasoningEffort::Medium);
         app.composer_mut().insert_str("render emphasis");
         app.apply(Action::SubmitMessage);
         app.apply(Action::StreamEvent {
@@ -1080,7 +1082,7 @@ mod tests {
     fn render_input_does_not_underline_the_cursor_line() {
         let backend = TestBackend::new(60, 8);
         let mut terminal = Terminal::new(backend).expect("test terminal");
-        let mut app = App::new(true, false, "gpt-5-mini");
+        let mut app = App::new(true, false, "gpt-5-mini", ReasoningEffort::Medium);
         app.composer_mut().insert_str("draft");
 
         terminal
@@ -1098,7 +1100,7 @@ mod tests {
     fn render_scrollback_reveals_older_messages() {
         let backend = TestBackend::new(60, 8);
         let mut terminal = Terminal::new(backend).expect("test terminal");
-        let mut app = App::new(true, false, "gpt-5-mini");
+        let mut app = App::new(true, false, "gpt-5-mini", ReasoningEffort::Medium);
 
         for index in 1..=8 {
             app.composer_mut().insert_str(&format!("message {index}"));
@@ -1130,7 +1132,7 @@ mod tests {
     fn render_home_and_end_jump_history_viewport() {
         let backend = TestBackend::new(100, 8);
         let mut terminal = Terminal::new(backend).expect("test terminal");
-        let mut app = App::new(true, false, "gpt-5-mini");
+        let mut app = App::new(true, false, "gpt-5-mini", ReasoningEffort::Medium);
 
         for index in 1..=8 {
             app.composer_mut().insert_str(&format!("entry {index}"));
@@ -1167,7 +1169,7 @@ mod tests {
     fn render_keeps_pinned_history_stable_while_streaming() {
         let backend = TestBackend::new(70, 10);
         let mut terminal = Terminal::new(backend).expect("test terminal");
-        let mut app = App::new(true, false, "gpt-5-mini");
+        let mut app = App::new(true, false, "gpt-5-mini", ReasoningEffort::Medium);
         app.composer_mut().insert_str("start");
         app.apply(Action::SubmitMessage);
         let initial_items = (1..=12)
@@ -1209,7 +1211,7 @@ mod tests {
     fn render_draws_accented_scrollbar_for_overflowing_history() {
         let backend = TestBackend::new(70, 10);
         let mut terminal = Terminal::new(backend).expect("test terminal");
-        let mut app = App::new(true, false, "gpt-5-mini");
+        let mut app = App::new(true, false, "gpt-5-mini", ReasoningEffort::Medium);
 
         for index in 1..=10 {
             app.composer_mut().insert_str(&format!("entry {index}"));

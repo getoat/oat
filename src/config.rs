@@ -32,6 +32,34 @@ impl AppConfig {
         Ok(config)
     }
 
+    pub fn set_default_reasoning_effort(reasoning_effort: ReasoningEffort) -> Result<Self> {
+        Self::set_reasoning_effort_at_path(Path::new(DEFAULT_CONFIG_PATH), reasoning_effort)
+    }
+
+    pub fn set_reasoning_effort_at_path(
+        path: &Path,
+        reasoning_effort: ReasoningEffort,
+    ) -> Result<Self> {
+        let raw = fs::read_to_string(path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        let mut value: toml::Value =
+            toml::from_str(&raw).with_context(|| format!("failed to parse {}", path.display()))?;
+        let azure = value
+            .get_mut("azure")
+            .and_then(toml::Value::as_table_mut)
+            .context("config.toml is missing the [azure] table")?;
+        azure.insert(
+            "reasoning_effort".into(),
+            toml::Value::String(reasoning_effort.as_str().to_string()),
+        );
+
+        let formatted = toml::to_string_pretty(&value)
+            .with_context(|| format!("failed to serialize {}", path.display()))?;
+        fs::write(path, formatted)
+            .with_context(|| format!("failed to write {}", path.display()))?;
+        Self::load_from_path(path)
+    }
+
     fn validate(&self) -> Result<()> {
         if self.azure.resource_name.trim().is_empty() {
             bail!("azure.resource_name must not be empty");
@@ -89,6 +117,7 @@ pub enum ReasoningEffort {
     Low,
     Medium,
     High,
+    XHigh,
 }
 
 impl ReasoningEffort {
@@ -98,7 +127,23 @@ impl ReasoningEffort {
             Self::Low => "low",
             Self::Medium => "medium",
             Self::High => "high",
+            Self::XHigh => "xhigh",
         }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "minimal" => Some(Self::Minimal),
+            "low" => Some(Self::Low),
+            "medium" => Some(Self::Medium),
+            "high" => Some(Self::High),
+            "xhigh" => Some(Self::XHigh),
+            _ => None,
+        }
+    }
+
+    pub fn supported_values() -> &'static [&'static str] {
+        &["minimal", "low", "medium", "high", "xhigh"]
     }
 }
 
@@ -182,5 +227,58 @@ mod tests {
         };
 
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn parses_xhigh_reasoning_effort() {
+        let config: AppConfig = toml::from_str(
+            r#"
+            [azure]
+            resource_name = "demo-resource"
+            api_key = "secret"
+            model_name = "gpt-5-mini"
+            reasoning_effort = "xhigh"
+            "#,
+        )
+        .expect("config parses");
+
+        assert_eq!(config.azure.reasoning_effort, ReasoningEffort::XHigh);
+    }
+
+    #[test]
+    fn set_reasoning_effort_updates_config_file() {
+        let path = std::env::temp_dir().join(format!(
+            "oat-config-{}-{}.toml",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("timestamp")
+                .as_nanos()
+        ));
+
+        fs::write(
+            &path,
+            r#"
+            [azure]
+            resource_name = "demo-resource"
+            api_key = "secret"
+            model_name = "gpt-5-mini"
+            reasoning_effort = "medium"
+
+            [ui]
+            show_thinking = true
+            show_tool_output = false
+            "#,
+        )
+        .expect("write temp config");
+
+        let updated = AppConfig::set_reasoning_effort_at_path(&path, ReasoningEffort::XHigh)
+            .expect("update config");
+
+        assert_eq!(updated.azure.reasoning_effort, ReasoningEffort::XHigh);
+        let raw = fs::read_to_string(&path).expect("read updated config");
+        assert!(raw.contains("reasoning_effort = \"xhigh\""));
+
+        fs::remove_file(path).expect("remove temp config");
     }
 }

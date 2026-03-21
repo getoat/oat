@@ -1,12 +1,19 @@
 use ratatui_textarea::{CursorMove, TextArea};
 use rig::completion::Message as RigMessage;
 
-const COMMANDS: [SlashCommand; 2] = [SlashCommand::NewSession, SlashCommand::Quit];
+use crate::config::ReasoningEffort;
+
+const COMMANDS: [SlashCommand; 3] = [
+    SlashCommand::NewSession,
+    SlashCommand::Quit,
+    SlashCommand::Effort,
+];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SlashCommand {
     NewSession,
     Quit,
+    Effort,
 }
 
 impl SlashCommand {
@@ -14,6 +21,7 @@ impl SlashCommand {
         match self {
             Self::NewSession => "/new",
             Self::Quit => "/quit",
+            Self::Effort => "/effort",
         }
     }
 
@@ -21,6 +29,7 @@ impl SlashCommand {
         match self {
             Self::NewSession => &["/clear"],
             Self::Quit => &["/exit"],
+            Self::Effort => &["/reasoning", "/thinking"],
         }
     }
 
@@ -28,6 +37,14 @@ impl SlashCommand {
         match self {
             Self::NewSession => "Start a new session",
             Self::Quit => "Exit the app",
+            Self::Effort => "Set reasoning effort for the current model",
+        }
+    }
+
+    pub fn usage(self) -> Option<&'static str> {
+        match self {
+            Self::Effort => Some("/effort <minimal|low|medium|high|xhigh>"),
+            Self::NewSession | Self::Quit => None,
         }
     }
 
@@ -160,6 +177,7 @@ pub struct App {
     pub(super) show_thinking: bool,
     pub(super) show_tool_output: bool,
     pub(super) model_name: String,
+    pub(super) reasoning_effort: ReasoningEffort,
     pub(super) selected_command: SlashCommand,
     pub(super) history_scroll_top: Option<usize>,
     pub(super) history_viewport_rows: usize,
@@ -167,7 +185,12 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(show_thinking: bool, show_tool_output: bool, model_name: impl Into<String>) -> Self {
+    pub fn new(
+        show_thinking: bool,
+        show_tool_output: bool,
+        model_name: impl Into<String>,
+        reasoning_effort: ReasoningEffort,
+    ) -> Self {
         let model_name = model_name.into();
         Self {
             mode: AccessMode::ReadOnly,
@@ -185,6 +208,7 @@ impl App {
             show_thinking,
             show_tool_output,
             model_name,
+            reasoning_effort,
             selected_command: SlashCommand::NewSession,
             history_scroll_top: None,
             history_viewport_rows: 1,
@@ -252,6 +276,10 @@ impl App {
         &self.model_name
     }
 
+    pub fn reasoning_effort(&self) -> ReasoningEffort {
+        self.reasoning_effort
+    }
+
     pub fn show_tool_output(&self) -> bool {
         self.show_tool_output
     }
@@ -284,8 +312,18 @@ impl App {
         line.starts_with('/').then_some(line.as_str())
     }
 
-    pub fn filtered_commands(&self) -> Vec<SlashCommand> {
+    pub fn command_name(&self) -> Option<&str> {
         self.command_query()
+            .map(|query| split_command_query(query).0)
+    }
+
+    pub fn command_arguments(&self) -> Option<&str> {
+        self.command_query()
+            .map(|query| split_command_query(query).1)
+    }
+
+    pub fn filtered_commands(&self) -> Vec<SlashCommand> {
+        self.command_name()
             .map(SlashCommand::filtered)
             .unwrap_or_default()
     }
@@ -330,6 +368,26 @@ impl App {
 
     pub(super) fn replace_session_history(&mut self, history: Vec<RigMessage>) {
         self.session_history = history;
+    }
+
+    pub(crate) fn set_reasoning_effort(&mut self, reasoning_effort: ReasoningEffort) {
+        self.reasoning_effort = reasoning_effort;
+    }
+
+    pub fn push_agent_message(&mut self, text: impl Into<String>) {
+        self.entries.push(TranscriptEntry::Message(ChatMessage {
+            speaker: Speaker::Agent,
+            text: text.into(),
+            style: MessageStyle::Plain,
+        }));
+    }
+
+    pub fn push_error_message(&mut self, text: impl Into<String>) {
+        self.entries.push(TranscriptEntry::Message(ChatMessage {
+            speaker: Speaker::Agent,
+            text: text.into(),
+            style: MessageStyle::Error,
+        }));
     }
 
     pub(super) fn move_command_selection_up(&mut self) {
@@ -448,6 +506,13 @@ fn new_composer() -> TextArea<'static> {
     new_composer_with_text("")
 }
 
+fn split_command_query(query: &str) -> (&str, &str) {
+    let mut parts = query.splitn(2, char::is_whitespace);
+    let name = parts.next().unwrap_or("");
+    let arguments = parts.next().unwrap_or("").trim();
+    (name, arguments)
+}
+
 fn new_composer_with_text(text: &str) -> TextArea<'static> {
     let mut composer = if text.is_empty() {
         TextArea::default()
@@ -483,19 +548,20 @@ mod tests {
 
     #[test]
     fn app_starts_in_read_only_mode_with_greeting() {
-        let app = App::new(true, false, "gpt-5-mini");
+        let app = App::new(true, false, "gpt-5-mini", ReasoningEffort::Medium);
 
         assert_eq!(app.mode(), AccessMode::ReadOnly);
         assert!(!app.should_quit());
         assert!(!app.has_pending_reply());
         assert_eq!(app.entries().len(), 1);
         assert_eq!(app.model_name(), "gpt-5-mini");
+        assert_eq!(app.reasoning_effort(), ReasoningEffort::Medium);
         assert!(!app.show_tool_output());
     }
 
     #[test]
     fn composer_height_grows_with_multiple_lines() {
-        let mut app = App::new(true, false, "gpt-5-mini");
+        let mut app = App::new(true, false, "gpt-5-mini", ReasoningEffort::Medium);
         app.composer.insert_str("one");
         assert_eq!(app.composer_height(), 3);
 
@@ -511,11 +577,12 @@ mod tests {
             vec![SlashCommand::NewSession]
         );
         assert_eq!(SlashCommand::filtered("/ex"), vec![SlashCommand::Quit]);
+        assert_eq!(SlashCommand::filtered("/th"), vec![SlashCommand::Effort]);
     }
 
     #[test]
     fn command_palette_only_shows_for_single_line_slash_input() {
-        let mut app = App::new(true, false, "gpt-5-mini");
+        let mut app = App::new(true, false, "gpt-5-mini", ReasoningEffort::Medium);
         app.composer.insert_str("/");
         assert!(app.command_palette_visible());
 
@@ -525,7 +592,7 @@ mod tests {
 
     #[test]
     fn history_status_defaults_to_live_follow() {
-        let app = App::new(true, false, "gpt-5-mini");
+        let app = App::new(true, false, "gpt-5-mini", ReasoningEffort::Medium);
 
         assert!(!app.history_is_pinned());
         assert_eq!(app.history_status_label(), "History live  PgUp/PgDn scroll");
@@ -533,12 +600,22 @@ mod tests {
 
     #[test]
     fn sync_history_viewport_clamps_pinned_position() {
-        let mut app = App::new(true, false, "gpt-5-mini");
+        let mut app = App::new(true, false, "gpt-5-mini", ReasoningEffort::Medium);
         app.history_scroll_top = Some(50);
 
         let start = app.sync_history_viewport(20, 6);
 
         assert_eq!(start, 14);
         assert_eq!(app.history_scroll_top, Some(14));
+    }
+
+    #[test]
+    fn command_name_and_arguments_split_on_first_space() {
+        let mut app = App::new(true, false, "gpt-5-mini", ReasoningEffort::Medium);
+        app.composer.insert_str("/effort xhigh");
+
+        assert_eq!(app.command_name(), Some("/effort"));
+        assert_eq!(app.command_arguments(), Some("xhigh"));
+        assert_eq!(app.filtered_commands(), vec![SlashCommand::Effort]);
     }
 }
