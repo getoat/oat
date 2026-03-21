@@ -13,6 +13,12 @@ pub enum Action {
     ToggleMode,
     SelectPreviousCommand,
     SelectNextCommand,
+    ScrollHistoryPageUp,
+    ScrollHistoryPageDown,
+    ScrollHistoryToTop,
+    ScrollHistoryToBottom,
+    ScrollHistoryUp { lines: usize },
+    ScrollHistoryDown { lines: usize },
     InsertComposerNewline,
     SubmitMessage,
     Editor(Input),
@@ -59,6 +65,30 @@ impl App {
                 } else {
                     self.move_composer_cursor_down();
                 }
+                None
+            }
+            Action::ScrollHistoryPageUp => {
+                self.scroll_history_page_up();
+                None
+            }
+            Action::ScrollHistoryPageDown => {
+                self.scroll_history_page_down();
+                None
+            }
+            Action::ScrollHistoryToTop => {
+                self.scroll_history_to_top();
+                None
+            }
+            Action::ScrollHistoryToBottom => {
+                self.resume_history_follow();
+                None
+            }
+            Action::ScrollHistoryUp { lines } => {
+                self.scroll_history_up(lines);
+                None
+            }
+            Action::ScrollHistoryDown { lines } => {
+                self.scroll_history_down(lines);
                 None
             }
             Action::InsertComposerNewline => {
@@ -108,6 +138,7 @@ fn submit_message(app: &mut App) -> Option<Effect> {
         text: prompt.clone(),
         style: MessageStyle::Plain,
     }));
+    app.resume_history_follow();
     app.clear_composer();
     let reply_id = app.next_reply_id();
     app.pending_reply = Some(PendingReply {
@@ -300,6 +331,17 @@ mod tests {
         }
         assert!(app.pending_reply.is_some());
         assert!(!app.composer_has_content());
+    }
+
+    #[test]
+    fn submit_message_resumes_live_history_follow() {
+        let mut app = new_app(true);
+        app.history_scroll_top = Some(3);
+        app.composer.insert_str("hello");
+
+        let _ = app.apply(Action::SubmitMessage);
+
+        assert!(!app.history_is_pinned());
     }
 
     #[test]
@@ -504,6 +546,52 @@ mod tests {
 
         app.apply(Action::SelectNextCommand);
         assert_eq!(app.selected_command(), Some(SlashCommand::NewSession));
+    }
+
+    #[test]
+    fn page_up_pins_history_above_live_tail() {
+        let mut app = new_app(true);
+        app.sync_history_viewport(30, 5);
+
+        app.apply(Action::ScrollHistoryPageUp);
+
+        assert_eq!(app.history_scroll_top, Some(20));
+        assert!(app.history_is_pinned());
+    }
+
+    #[test]
+    fn page_down_clamps_at_bottom_without_resuming_follow() {
+        let mut app = new_app(true);
+        app.sync_history_viewport(30, 5);
+        app.history_scroll_top = Some(24);
+
+        app.apply(Action::ScrollHistoryPageDown);
+
+        assert_eq!(app.history_scroll_top, Some(25));
+        assert!(app.history_is_pinned());
+    }
+
+    #[test]
+    fn jump_to_bottom_resumes_live_follow() {
+        let mut app = new_app(true);
+        app.history_scroll_top = Some(7);
+
+        app.apply(Action::ScrollHistoryToBottom);
+
+        assert!(!app.history_is_pinned());
+    }
+
+    #[test]
+    fn line_scroll_clamps_to_history_bounds() {
+        let mut app = new_app(true);
+        app.sync_history_viewport(18, 6);
+        app.history_scroll_top = Some(2);
+
+        app.apply(Action::ScrollHistoryUp { lines: 10 });
+        assert_eq!(app.history_scroll_top, Some(0));
+
+        app.apply(Action::ScrollHistoryDown { lines: 20 });
+        assert_eq!(app.history_scroll_top, Some(12));
     }
 
     #[test]

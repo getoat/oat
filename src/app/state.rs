@@ -161,6 +161,9 @@ pub struct App {
     pub(super) show_tool_output: bool,
     pub(super) model_name: String,
     pub(super) selected_command: SlashCommand,
+    pub(super) history_scroll_top: Option<usize>,
+    pub(super) history_viewport_rows: usize,
+    pub(super) history_total_lines: usize,
 }
 
 impl App {
@@ -183,6 +186,9 @@ impl App {
             show_tool_output,
             model_name,
             selected_command: SlashCommand::NewSession,
+            history_scroll_top: None,
+            history_viewport_rows: 1,
+            history_total_lines: 0,
         }
     }
 
@@ -258,6 +264,18 @@ impl App {
         self.command_query().is_some()
     }
 
+    pub fn history_is_pinned(&self) -> bool {
+        self.history_scroll_top.is_some()
+    }
+
+    pub fn history_status_label(&self) -> &'static str {
+        if self.history_is_pinned() {
+            "History pinned  End latest"
+        } else {
+            "History live  PgUp/PgDn scroll"
+        }
+    }
+
     pub fn command_query(&self) -> Option<&str> {
         let [line] = self.composer.lines() else {
             return None;
@@ -305,6 +323,8 @@ impl App {
         })];
         self.session_history.clear();
         self.pending_reply = None;
+        self.resume_history_follow();
+        self.history_total_lines = 0;
         self.clear_composer();
     }
 
@@ -333,6 +353,60 @@ impl App {
         self.sync_command_selection();
     }
 
+    pub(crate) fn sync_history_viewport(
+        &mut self,
+        total_lines: usize,
+        viewport_rows: usize,
+    ) -> usize {
+        self.history_total_lines = total_lines;
+        self.history_viewport_rows = viewport_rows.max(1);
+        let max_start = self.history_max_start();
+        if let Some(top) = self.history_scroll_top.as_mut() {
+            *top = (*top).min(max_start);
+            *top
+        } else {
+            max_start
+        }
+    }
+
+    pub(crate) fn history_total_lines(&self) -> usize {
+        self.history_total_lines
+    }
+
+    pub(crate) fn history_viewport_rows(&self) -> usize {
+        self.history_viewport_rows
+    }
+
+    pub(crate) fn history_scroll_position(&self) -> usize {
+        self.history_current_start()
+    }
+
+    pub(super) fn scroll_history_page_up(&mut self) {
+        self.scroll_history_up(self.history_page_rows());
+    }
+
+    pub(super) fn scroll_history_page_down(&mut self) {
+        self.scroll_history_down(self.history_page_rows());
+    }
+
+    pub(super) fn scroll_history_up(&mut self, lines: usize) {
+        let current = self.history_current_start();
+        self.history_scroll_top = Some(current.saturating_sub(lines));
+    }
+
+    pub(super) fn scroll_history_down(&mut self, lines: usize) {
+        let current = self.history_current_start();
+        self.history_scroll_top = Some(current.saturating_add(lines).min(self.history_max_start()));
+    }
+
+    pub(super) fn scroll_history_to_top(&mut self) {
+        self.history_scroll_top = Some(0);
+    }
+
+    pub(super) fn resume_history_follow(&mut self) {
+        self.history_scroll_top = None;
+    }
+
     fn move_command_selection(&mut self, direction: isize) {
         let commands = self.filtered_commands();
         if commands.is_empty() {
@@ -354,6 +428,19 @@ impl App {
                 self.selected_command = command;
             }
         }
+    }
+
+    fn history_current_start(&self) -> usize {
+        self.history_scroll_top.unwrap_or(self.history_max_start())
+    }
+
+    fn history_max_start(&self) -> usize {
+        self.history_total_lines
+            .saturating_sub(self.history_viewport_rows.max(1))
+    }
+
+    fn history_page_rows(&self) -> usize {
+        self.history_viewport_rows.max(1)
     }
 }
 
@@ -434,5 +521,24 @@ mod tests {
 
         app.composer.insert_newline();
         assert!(!app.command_palette_visible());
+    }
+
+    #[test]
+    fn history_status_defaults_to_live_follow() {
+        let app = App::new(true, false, "gpt-5-mini");
+
+        assert!(!app.history_is_pinned());
+        assert_eq!(app.history_status_label(), "History live  PgUp/PgDn scroll");
+    }
+
+    #[test]
+    fn sync_history_viewport_clamps_pinned_position() {
+        let mut app = App::new(true, false, "gpt-5-mini");
+        app.history_scroll_top = Some(50);
+
+        let start = app.sync_history_viewport(20, 6);
+
+        assert_eq!(start, 14);
+        assert_eq!(app.history_scroll_top, Some(14));
     }
 }

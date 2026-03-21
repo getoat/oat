@@ -13,7 +13,7 @@ use std::{
 
 use app::{Action, App, Effect};
 use crossterm::{
-    event::{self},
+    event::{self, DisableMouseCapture, EnableMouseCapture},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -67,7 +67,7 @@ pub fn run(terminal: &mut Tui, config: AppConfig) -> Result<(), Box<dyn Error>> 
 pub fn setup_terminal() -> Result<Tui, Box<dyn Error>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend)?;
     Ok(terminal)
@@ -75,7 +75,11 @@ pub fn setup_terminal() -> Result<Tui, Box<dyn Error>> {
 
 pub fn restore_terminal(terminal: &mut Tui) -> Result<(), Box<dyn Error>> {
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    )?;
     terminal.show_cursor()?;
     Ok(())
 }

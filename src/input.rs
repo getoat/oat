@@ -1,11 +1,16 @@
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
+};
 use ratatui_textarea::Input;
 
 use crate::app::Action;
 
+const MOUSE_SCROLL_LINES: usize = 3;
+
 pub fn map_event(event: Event) -> Option<Action> {
     match event {
         Event::Key(key) if key.kind == KeyEventKind::Press => Some(map_key_event(key)),
+        Event::Mouse(mouse) => map_mouse_event(mouse),
         Event::Paste(text) => Some(Action::Paste(text)),
         _ => None,
     }
@@ -19,6 +24,10 @@ fn map_key_event(key: KeyEvent) -> Action {
         (KeyCode::Tab, _) => Action::ToggleMode,
         (KeyCode::Up, KeyModifiers::NONE) => Action::SelectPreviousCommand,
         (KeyCode::Down, KeyModifiers::NONE) => Action::SelectNextCommand,
+        (KeyCode::PageUp, _) => Action::ScrollHistoryPageUp,
+        (KeyCode::PageDown, _) => Action::ScrollHistoryPageDown,
+        (KeyCode::Home, _) => Action::ScrollHistoryToTop,
+        (KeyCode::End, _) => Action::ScrollHistoryToBottom,
         (KeyCode::Enter, modifiers) if modifiers.contains(KeyModifiers::ALT) => {
             Action::InsertComposerNewline
         }
@@ -30,9 +39,30 @@ fn map_key_event(key: KeyEvent) -> Action {
     }
 }
 
+fn map_mouse_event(mouse: MouseEvent) -> Option<Action> {
+    match mouse.kind {
+        MouseEventKind::ScrollUp => Some(Action::ScrollHistoryUp {
+            lines: MOUSE_SCROLL_LINES,
+        }),
+        MouseEventKind::ScrollDown => Some(Action::ScrollHistoryDown {
+            lines: MOUSE_SCROLL_LINES,
+        }),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn mouse(kind: MouseEventKind) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
 
     fn key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
         KeyEvent::new(code, modifiers)
@@ -69,9 +99,45 @@ mod tests {
     }
 
     #[test]
+    fn page_up_maps_to_history_scroll() {
+        let action = map_event(Event::Key(key(KeyCode::PageUp, KeyModifiers::NONE)));
+        assert_eq!(action, Some(Action::ScrollHistoryPageUp));
+    }
+
+    #[test]
+    fn page_down_maps_to_history_scroll() {
+        let action = map_event(Event::Key(key(KeyCode::PageDown, KeyModifiers::NONE)));
+        assert_eq!(action, Some(Action::ScrollHistoryPageDown));
+    }
+
+    #[test]
+    fn home_maps_to_history_top() {
+        let action = map_event(Event::Key(key(KeyCode::Home, KeyModifiers::NONE)));
+        assert_eq!(action, Some(Action::ScrollHistoryToTop));
+    }
+
+    #[test]
+    fn end_maps_to_history_bottom() {
+        let action = map_event(Event::Key(key(KeyCode::End, KeyModifiers::NONE)));
+        assert_eq!(action, Some(Action::ScrollHistoryToBottom));
+    }
+
+    #[test]
     fn paste_maps_to_paste_action() {
         let action = map_event(Event::Paste("hello".into()));
         assert_eq!(action, Some(Action::Paste("hello".into())));
+    }
+
+    #[test]
+    fn mouse_wheel_up_maps_to_history_scroll() {
+        let action = map_event(Event::Mouse(mouse(MouseEventKind::ScrollUp)));
+        assert_eq!(action, Some(Action::ScrollHistoryUp { lines: 3 }));
+    }
+
+    #[test]
+    fn mouse_wheel_down_maps_to_history_scroll() {
+        let action = map_event(Event::Mouse(mouse(MouseEventKind::ScrollDown)));
+        assert_eq!(action, Some(Action::ScrollHistoryDown { lines: 3 }));
     }
 
     #[test]
@@ -94,5 +160,11 @@ mod tests {
                 KeyModifiers::NONE
             ))))
         );
+    }
+
+    #[test]
+    fn non_scroll_mouse_events_are_ignored() {
+        let action = map_event(Event::Mouse(mouse(MouseEventKind::Moved)));
+        assert_eq!(action, None);
     }
 }
