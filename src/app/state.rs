@@ -1,4 +1,5 @@
 use ratatui_textarea::{CursorMove, TextArea};
+use rig::completion::Message as RigMessage;
 
 const COMMANDS: [SlashCommand; 2] = [SlashCommand::NewSession, SlashCommand::Quit];
 
@@ -152,6 +153,7 @@ pub struct App {
     pub(super) should_quit: bool,
     pub(super) composer: TextArea<'static>,
     pub(super) entries: Vec<TranscriptEntry>,
+    pub(super) session_history: Vec<RigMessage>,
     pub(super) pending_reply: Option<PendingReply>,
     pub(super) next_reply_id: u64,
     pub(super) tick_count: usize,
@@ -173,6 +175,7 @@ impl App {
                 text: welcome_message(&model_name),
                 style: MessageStyle::Plain,
             })],
+            session_history: Vec::new(),
             pending_reply: None,
             next_reply_id: 1,
             tick_count: 0,
@@ -201,6 +204,10 @@ impl App {
 
     pub fn entries(&self) -> &[TranscriptEntry] {
         &self.entries
+    }
+
+    pub fn session_history(&self) -> &[RigMessage] {
+        &self.session_history
     }
 
     pub fn has_pending_reply(&self) -> bool {
@@ -296,8 +303,13 @@ impl App {
             text: welcome_message(&self.model_name),
             style: MessageStyle::Plain,
         })];
+        self.session_history.clear();
         self.pending_reply = None;
         self.clear_composer();
+    }
+
+    pub(super) fn replace_session_history(&mut self, history: Vec<RigMessage>) {
+        self.session_history = history;
     }
 
     pub(super) fn move_command_selection_up(&mut self) {

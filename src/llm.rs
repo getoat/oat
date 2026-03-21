@@ -5,9 +5,12 @@ use futures_util::StreamExt;
 use rig::{
     agent::MultiTurnStreamItem,
     client::CompletionClient,
-    completion::message::{ToolResult, ToolResultContent},
+    completion::{
+        Message as RigMessage,
+        message::{ToolResult, ToolResultContent},
+    },
     providers::azure::{self, AzureOpenAIAuth},
-    streaming::{StreamedAssistantContent, StreamedUserContent, StreamingPrompt},
+    streaming::{StreamedAssistantContent, StreamedUserContent, StreamingChat},
 };
 use serde_json::json;
 use tokio::sync::mpsc::UnboundedSender;
@@ -17,13 +20,13 @@ use crate::tools::{GrepTool, ListTool, ReadFileTool};
 
 const MAX_TOOL_STEPS_PER_TURN: usize = 64;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum StreamEvent {
     TextDelta(String),
     ReasoningDelta(String),
     ToolCall { name: String, arguments: String },
     ToolResult { name: String, output: String },
-    Finished,
+    Finished { history: Option<Vec<RigMessage>> },
     Failed(String),
 }
 
@@ -65,11 +68,12 @@ rely on memory from previous turns.",
         &self,
         reply_id: u64,
         prompt: String,
+        history: Vec<RigMessage>,
         events: UnboundedSender<(u64, StreamEvent)>,
     ) {
         let mut stream = self
             .agent
-            .stream_prompt(prompt)
+            .stream_chat(prompt, history)
             .multi_turn(MAX_TOOL_STEPS_PER_TURN)
             .await;
         let mut tool_calls = HashMap::<String, String>::new();
@@ -106,7 +110,9 @@ rely on memory from previous turns.",
                         .unwrap_or_else(|| tool_result.id.clone()),
                     output: format_tool_result(&tool_result),
                 }),
-                Ok(MultiTurnStreamItem::FinalResponse(_)) => None,
+                Ok(MultiTurnStreamItem::FinalResponse(response)) => Some(StreamEvent::Finished {
+                    history: response.history().map(ToOwned::to_owned),
+                }),
                 Ok(_) => None,
                 Err(error) => {
                     let _ = events.send((reply_id, StreamEvent::Failed(error.to_string())));
@@ -120,8 +126,6 @@ rely on memory from previous turns.",
                 return;
             }
         }
-
-        let _ = events.send((reply_id, StreamEvent::Finished));
     }
 }
 

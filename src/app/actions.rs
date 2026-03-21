@@ -1,4 +1,5 @@
 use ratatui_textarea::Input;
+use rig::completion::Message as RigMessage;
 
 use super::state::{
     App, ChatMessage, MessageStyle, PendingReply, SlashCommand, Speaker, ToolCall, ToolResultEntry,
@@ -6,7 +7,7 @@ use super::state::{
 };
 use crate::llm::StreamEvent;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Action {
     ClearComposerOrQuit,
     ToggleMode,
@@ -20,9 +21,13 @@ pub enum Action {
     Tick,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
-    PromptModel { reply_id: u64, prompt: String },
+    PromptModel {
+        reply_id: u64,
+        prompt: String,
+        history: Vec<RigMessage>,
+    },
 }
 
 impl App {
@@ -111,7 +116,11 @@ fn submit_message(app: &mut App) -> Option<Effect> {
         text_entry_index: None,
     });
 
-    Some(Effect::PromptModel { reply_id, prompt })
+    Some(Effect::PromptModel {
+        reply_id,
+        prompt,
+        history: app.session_history().to_vec(),
+    })
 }
 
 fn submit_command(app: &mut App, query: &str) -> Option<Effect> {
@@ -162,7 +171,10 @@ fn on_stream_event(app: &mut App, reply_id: u64, event: StreamEvent) {
                     output,
                 }));
         }
-        StreamEvent::Finished => {
+        StreamEvent::Finished { history } => {
+            if let Some(history) = history {
+                app.replace_session_history(history);
+            }
             app.pending_reply = None;
         }
         StreamEvent::Failed(error) => {
@@ -275,6 +287,7 @@ mod tests {
             Some(Effect::PromptModel {
                 reply_id: 1,
                 prompt: "hello\nworld".into(),
+                history: Vec::new(),
             })
         );
         assert_eq!(app.entries.len(), 2);
@@ -304,6 +317,24 @@ mod tests {
         assert_eq!(app.entries.len(), 1);
         assert!(app.composer_has_content());
         assert!(effect.is_none());
+    }
+
+    #[test]
+    fn submit_message_clones_canonical_history_into_effect() {
+        let mut app = new_app(true);
+        app.replace_session_history(vec![RigMessage::assistant("previous")]);
+        app.composer.insert_str("next");
+
+        let effect = app.apply(Action::SubmitMessage);
+
+        assert_eq!(
+            effect,
+            Some(Effect::PromptModel {
+                reply_id: 1,
+                prompt: "next".into(),
+                history: vec![RigMessage::assistant("previous")],
+            })
+        );
     }
 
     #[test]
@@ -490,6 +521,7 @@ mod tests {
     #[test]
     fn stale_stream_events_are_ignored_after_new_session() {
         let mut app = new_app(true);
+        app.replace_session_history(vec![RigMessage::assistant("previous")]);
         app.pending_reply = Some(PendingReply {
             id: 11,
             reasoning_entry_index: None,
@@ -510,5 +542,51 @@ mod tests {
         });
 
         assert_eq!(app.entries.len(), 1);
+        assert!(app.session_history().is_empty());
+    }
+
+    #[test]
+    fn finished_stream_replaces_canonical_history() {
+        let mut app = new_app(true);
+        app.pending_reply = Some(PendingReply {
+            id: 2,
+            reasoning_entry_index: None,
+            text_entry_index: None,
+        });
+        app.replace_session_history(vec![RigMessage::assistant("old")]);
+
+        app.apply(Action::StreamEvent {
+            reply_id: 2,
+            event: StreamEvent::Finished {
+                history: Some(vec![
+                    RigMessage::user("hello"),
+                    RigMessage::assistant("world"),
+                ]),
+            },
+        });
+
+        assert!(app.pending_reply.is_none());
+        assert_eq!(
+            app.session_history(),
+            &[RigMessage::user("hello"), RigMessage::assistant("world")]
+        );
+    }
+
+    #[test]
+    fn failed_stream_keeps_previous_canonical_history() {
+        let mut app = new_app(true);
+        app.pending_reply = Some(PendingReply {
+            id: 2,
+            reasoning_entry_index: None,
+            text_entry_index: None,
+        });
+        app.replace_session_history(vec![RigMessage::assistant("stable")]);
+
+        app.apply(Action::StreamEvent {
+            reply_id: 2,
+            event: StreamEvent::Failed("boom".into()),
+        });
+
+        assert_eq!(app.session_history(), &[RigMessage::assistant("stable")]);
     }
 }

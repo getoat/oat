@@ -87,10 +87,15 @@ fn run_effect(
     effect: Effect,
 ) {
     match effect {
-        Effect::PromptModel { reply_id, prompt } => {
+        Effect::PromptModel {
+            reply_id,
+            prompt,
+            history,
+        } => {
             let llm = llm.clone();
             runtime.spawn(async move {
-                llm.stream_prompt(reply_id, prompt, stream_tx).await;
+                llm.stream_prompt(reply_id, prompt, history, stream_tx)
+                    .await;
             });
         }
     }
