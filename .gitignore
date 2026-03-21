@@ -1,0 +1,5 @@
+/target/
+/config.toml
+
+# rustfmt can leave backup files behind during some editor integrations.
+**/*.rs.bk

@@ -1,0 +1,17 @@
+[azure]
+resource_name = "your-azure-openai-resource"
+api_key = "paste-your-azure-openai-api-key-here"
+
+# This should be the Azure deployment name you want to call.
+# In many setups it matches the model name, but Azure routes by deployment.
+model_name = "gpt-5-mini"
+
+# One of: minimal, low, medium, high
+reasoning_effort = "medium"
+
+# Override only if your deployment needs a different Azure OpenAI API version.
+api_version = "2025-01-01-preview"
+
+[ui]
+show_thinking = true
+show_tool_output = false

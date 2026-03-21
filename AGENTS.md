@@ -1,0 +1,16 @@
+# Oat Agent Guidelines
+
+This file applies to everything under `/root/oat`.
+
+## Workflow
+
+- Keep `Cargo.lock` committed for this application crate.
+- Prefer focused, local changes over broad refactors unless the task requires it.
+- Before finishing Rust changes, run `cargo fmt --check` and `cargo test`.
+
+## Testing
+
+- Add unit tests where behavior can be exercised directly, especially for state transitions, input handling, parsing/formatting helpers, and regression-prone edge cases.
+- Keep tests proportional to the logic. Thin glue code and brittle terminal rendering details do not need exhaustive unit coverage unless they hide meaningful behavior.
+- Prefer colocated `#[cfg(test)]` modules near the code they validate.
+- When fixing a bug, add or update a test when practical so the failure mode stays covered.
