@@ -16,7 +16,7 @@ use serde_json::json;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::config::AppConfig;
-use crate::tools::{GrepTool, ListTool, ReadFileTool};
+use crate::tools::{GrepTool, ListTool, ReadFileTool, ReadFilesTool};
 
 const MAX_TOOL_STEPS_PER_TURN: usize = 64;
 
@@ -58,6 +58,7 @@ rely on memory from previous turns.",
             .additional_params(reasoning_params(config))
             .tool(ListTool::new(workspace_root.clone()))
             .tool(ReadFileTool::new(workspace_root.clone()))
+            .tool(ReadFilesTool::new(workspace_root.clone()))
             .tool(GrepTool::new(workspace_root))
             .build();
 
