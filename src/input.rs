@@ -1,5 +1,5 @@
 use crossterm::event::{
-    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui_textarea::Input;
 
@@ -18,6 +18,7 @@ pub fn map_event(event: Event) -> Option<Action> {
 
 fn map_key_event(key: KeyEvent) -> Action {
     match (key.code, key.modifiers) {
+        (KeyCode::Esc, _) => Action::CancelPendingReply,
         (KeyCode::Char('c'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
             Action::ClearComposerOrQuit
         }
@@ -41,6 +42,18 @@ fn map_key_event(key: KeyEvent) -> Action {
 
 fn map_mouse_event(mouse: MouseEvent) -> Option<Action> {
     match mouse.kind {
+        MouseEventKind::Down(MouseButton::Left) => Some(Action::StartHistorySelection {
+            column: mouse.column,
+            row: mouse.row,
+        }),
+        MouseEventKind::Drag(MouseButton::Left) => Some(Action::UpdateHistorySelection {
+            column: mouse.column,
+            row: mouse.row,
+        }),
+        MouseEventKind::Up(MouseButton::Left) => Some(Action::FinishHistorySelection {
+            column: mouse.column,
+            row: mouse.row,
+        }),
         MouseEventKind::ScrollUp => Some(Action::ScrollHistoryUp {
             lines: MOUSE_SCROLL_LINES,
         }),
@@ -72,6 +85,12 @@ mod tests {
     fn ctrl_c_maps_to_clear_or_quit() {
         let action = map_event(Event::Key(key(KeyCode::Char('c'), KeyModifiers::CONTROL)));
         assert_eq!(action, Some(Action::ClearComposerOrQuit));
+    }
+
+    #[test]
+    fn escape_maps_to_cancel_pending_reply() {
+        let action = map_event(Event::Key(key(KeyCode::Esc, KeyModifiers::NONE)));
+        assert_eq!(action, Some(Action::CancelPendingReply));
     }
 
     #[test]
@@ -132,6 +151,33 @@ mod tests {
     fn mouse_wheel_up_maps_to_history_scroll() {
         let action = map_event(Event::Mouse(mouse(MouseEventKind::ScrollUp)));
         assert_eq!(action, Some(Action::ScrollHistoryUp { lines: 3 }));
+    }
+
+    #[test]
+    fn left_mouse_down_starts_history_selection() {
+        let action = map_event(Event::Mouse(mouse(MouseEventKind::Down(MouseButton::Left))));
+        assert_eq!(
+            action,
+            Some(Action::StartHistorySelection { column: 0, row: 0 })
+        );
+    }
+
+    #[test]
+    fn left_mouse_drag_updates_history_selection() {
+        let action = map_event(Event::Mouse(mouse(MouseEventKind::Drag(MouseButton::Left))));
+        assert_eq!(
+            action,
+            Some(Action::UpdateHistorySelection { column: 0, row: 0 })
+        );
+    }
+
+    #[test]
+    fn left_mouse_up_finishes_history_selection() {
+        let action = map_event(Event::Mouse(mouse(MouseEventKind::Up(MouseButton::Left))));
+        assert_eq!(
+            action,
+            Some(Action::FinishHistorySelection { column: 0, row: 0 })
+        );
     }
 
     #[test]

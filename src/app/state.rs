@@ -1,3 +1,4 @@
+use ratatui::layout::Rect;
 use ratatui_textarea::{CursorMove, TextArea};
 use rig::completion::Message as RigMessage;
 
@@ -164,6 +165,12 @@ pub(super) struct PendingReply {
     pub(super) text_entry_index: Option<usize>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct HistorySelectionPoint {
+    row: usize,
+    column: usize,
+}
+
 #[derive(Debug)]
 pub struct App {
     pub(super) mode: AccessMode,
@@ -182,6 +189,10 @@ pub struct App {
     pub(super) history_scroll_top: Option<usize>,
     pub(super) history_viewport_rows: usize,
     pub(super) history_total_lines: usize,
+    pub(super) history_snapshot_area: Rect,
+    pub(super) history_snapshot_lines: Vec<String>,
+    history_selection_anchor: Option<HistorySelectionPoint>,
+    history_selection_focus: Option<HistorySelectionPoint>,
 }
 
 impl App {
@@ -213,6 +224,10 @@ impl App {
             history_scroll_top: None,
             history_viewport_rows: 1,
             history_total_lines: 0,
+            history_snapshot_area: Rect::default(),
+            history_snapshot_lines: Vec::new(),
+            history_selection_anchor: None,
+            history_selection_focus: None,
         }
     }
 
@@ -374,6 +389,11 @@ impl App {
         self.reasoning_effort = reasoning_effort;
     }
 
+    pub(crate) fn cancel_pending_reply(&mut self) {
+        self.pending_reply = None;
+        self.push_error_message("Request cancelled.");
+    }
+
     pub fn push_agent_message(&mut self, text: impl Into<String>) {
         self.entries.push(TranscriptEntry::Message(ChatMessage {
             speaker: Speaker::Agent,
@@ -439,6 +459,11 @@ impl App {
         self.history_current_start()
     }
 
+    pub(crate) fn update_history_snapshot(&mut self, area: Rect, lines: Vec<String>) {
+        self.history_snapshot_area = area;
+        self.history_snapshot_lines = lines;
+    }
+
     pub(super) fn scroll_history_page_up(&mut self) {
         self.scroll_history_up(self.history_page_rows());
     }
@@ -463,6 +488,49 @@ impl App {
 
     pub(super) fn resume_history_follow(&mut self) {
         self.history_scroll_top = None;
+    }
+
+    pub(super) fn start_history_selection(&mut self, column: u16, row: u16) {
+        let point = self.history_selection_point(column, row, false);
+        self.history_selection_anchor = point;
+        self.history_selection_focus = point;
+    }
+
+    pub(super) fn update_history_selection(&mut self, column: u16, row: u16) {
+        if self.history_selection_anchor.is_none() {
+            return;
+        }
+        self.history_selection_focus = self.history_selection_point(column, row, true);
+    }
+
+    pub(super) fn finish_history_selection(&mut self, column: u16, row: u16) -> Option<String> {
+        let anchor = self.history_selection_anchor?;
+        let focus = self
+            .history_selection_point(column, row, true)
+            .or(self.history_selection_focus)?;
+        self.history_selection_anchor = None;
+        self.history_selection_focus = None;
+        (anchor != focus).then(|| self.selected_history_text(anchor, focus))
+    }
+
+    pub(crate) fn history_selection_span_for_row(&self, row: usize) -> Option<(usize, usize)> {
+        let (start, end) = self.ordered_history_selection_points()?;
+        if row < start.row || row > end.row {
+            return None;
+        }
+
+        let line_width = self.history_snapshot_lines.get(row)?.chars().count().max(1);
+        let span = if start.row == end.row {
+            (start.column, end.column + 1)
+        } else if row == start.row {
+            (start.column, line_width)
+        } else if row == end.row {
+            (0, end.column + 1)
+        } else {
+            (0, line_width)
+        };
+
+        Some((span.0.min(line_width), span.1.min(line_width)))
     }
 
     fn move_command_selection(&mut self, direction: isize) {
@@ -500,6 +568,96 @@ impl App {
     fn history_page_rows(&self) -> usize {
         self.history_viewport_rows.max(1)
     }
+
+    fn history_selection_point(
+        &self,
+        column: u16,
+        row: u16,
+        clamp: bool,
+    ) -> Option<HistorySelectionPoint> {
+        if self.history_snapshot_lines.is_empty() || self.history_snapshot_area.width == 0 {
+            return None;
+        }
+
+        let area = self.history_snapshot_area;
+        let min_row = area.y;
+        let max_row = area
+            .y
+            .saturating_add(self.history_snapshot_lines.len().saturating_sub(1) as u16);
+        let row = if clamp {
+            row.clamp(min_row, max_row)
+        } else if row < min_row || row > max_row {
+            return None;
+        } else {
+            row
+        };
+
+        let min_column = area.x;
+        let max_column = area.x.saturating_add(area.width.saturating_sub(1));
+        let column = if clamp {
+            column.clamp(min_column, max_column)
+        } else if column < min_column || column > max_column {
+            return None;
+        } else {
+            column
+        };
+
+        let row_index = row.saturating_sub(area.y) as usize;
+        let line_width = self.history_snapshot_lines[row_index].chars().count();
+        let column_index = column.saturating_sub(area.x) as usize;
+
+        Some(HistorySelectionPoint {
+            row: row_index,
+            column: column_index.min(line_width.saturating_sub(1)),
+        })
+    }
+
+    fn ordered_history_selection_points(
+        &self,
+    ) -> Option<(HistorySelectionPoint, HistorySelectionPoint)> {
+        let anchor = self.history_selection_anchor?;
+        let focus = self.history_selection_focus?;
+        if anchor == focus {
+            return None;
+        }
+
+        Some(
+            if (anchor.row, anchor.column) <= (focus.row, focus.column) {
+                (anchor, focus)
+            } else {
+                (focus, anchor)
+            },
+        )
+    }
+
+    fn selected_history_text(
+        &self,
+        anchor: HistorySelectionPoint,
+        focus: HistorySelectionPoint,
+    ) -> String {
+        let (start, end) = if (anchor.row, anchor.column) <= (focus.row, focus.column) {
+            (anchor, focus)
+        } else {
+            (focus, anchor)
+        };
+
+        let mut lines = Vec::new();
+        for row in start.row..=end.row {
+            let line = &self.history_snapshot_lines[row];
+            let segment = if start.row == end.row {
+                slice_line(line, start.column, end.column + 1)
+            } else if row == start.row {
+                slice_line(line, start.column, line.chars().count())
+            } else if row == end.row {
+                slice_line(line, 0, end.column + 1)
+            } else {
+                line.clone()
+            };
+            lines.push(segment);
+        }
+
+        lines.join("\n")
+    }
 }
 
 fn new_composer() -> TextArea<'static> {
@@ -521,6 +679,13 @@ fn new_composer_with_text(text: &str) -> TextArea<'static> {
     };
     composer.set_placeholder_text("Send a message...");
     composer
+}
+
+fn slice_line(line: &str, start: usize, end: usize) -> String {
+    line.chars()
+        .skip(start)
+        .take(end.saturating_sub(start))
+        .collect()
 }
 
 fn welcome_message(model_name: &str) -> String {
@@ -617,5 +782,24 @@ mod tests {
         assert_eq!(app.command_name(), Some("/effort"));
         assert_eq!(app.command_arguments(), Some("xhigh"));
         assert_eq!(app.filtered_commands(), vec![SlashCommand::Effort]);
+    }
+
+    #[test]
+    fn history_selection_extracts_visible_text_across_rows() {
+        let mut app = App::new(true, false, "gpt-5-mini", ReasoningEffort::Medium);
+        app.update_history_snapshot(
+            Rect {
+                x: 4,
+                y: 2,
+                width: 20,
+                height: 2,
+            },
+            vec!["alpha".into(), "beta".into()],
+        );
+
+        app.start_history_selection(5, 2);
+        let selected = app.finish_history_selection(6, 3);
+
+        assert_eq!(selected.as_deref(), Some("lpha\nbet"));
     }
 }

@@ -7,18 +7,19 @@ pub mod ui;
 
 use std::{
     error::Error,
-    io::{self, Stdout},
+    io::{self, Stdout, Write},
     time::{Duration, Instant},
 };
 
 use app::{Action, App, Effect};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
-use tokio::{runtime::Runtime, sync::mpsc};
+use tokio::{runtime::Runtime, sync::mpsc, task::JoinHandle};
 
 use crate::{config::AppConfig, llm::LlmService};
 
@@ -40,9 +41,19 @@ pub fn run(terminal: &mut Tui, config: AppConfig) -> Result<(), Box<dyn Error>> 
     );
     let tick_rate = Duration::from_millis(125);
     let mut last_tick = Instant::now();
+    let mut active_reply_task: Option<(u64, JoinHandle<()>)> = None;
 
     while !app.should_quit() {
         while let Ok((reply_id, event)) = stream_rx.try_recv() {
+            if matches!(
+                event,
+                llm::StreamEvent::Finished { .. } | llm::StreamEvent::Failed(_)
+            ) && active_reply_task
+                .as_ref()
+                .is_some_and(|(active_reply_id, _)| *active_reply_id == reply_id)
+            {
+                active_reply_task = None;
+            }
             app.apply(Action::StreamEvent { reply_id, event });
         }
 
@@ -54,6 +65,8 @@ pub fn run(terminal: &mut Tui, config: AppConfig) -> Result<(), Box<dyn Error>> 
                 if let Some(effect) = app.apply(action) {
                     if let Err(error) = run_effect(
                         &runtime,
+                        terminal,
+                        &mut active_reply_task,
                         &mut llm,
                         &mut config,
                         &mut app,
@@ -97,6 +110,8 @@ pub fn restore_terminal(terminal: &mut Tui) -> Result<(), Box<dyn Error>> {
 
 fn run_effect(
     runtime: &Runtime,
+    terminal: &mut Tui,
+    active_reply_task: &mut Option<(u64, JoinHandle<()>)>,
     llm: &mut LlmService,
     config: &mut AppConfig,
     app: &mut App,
@@ -109,11 +124,15 @@ fn run_effect(
             prompt,
             history,
         } => {
+            if let Some((_, task)) = active_reply_task.take() {
+                task.abort();
+            }
             let llm = llm.clone();
-            runtime.spawn(async move {
+            let task = runtime.spawn(async move {
                 llm.stream_prompt(reply_id, prompt, history, stream_tx)
                     .await;
             });
+            *active_reply_task = Some((reply_id, task));
             Ok(())
         }
         Effect::SetReasoningEffort { reasoning_effort } => {
@@ -132,5 +151,38 @@ fn run_effect(
             ));
             Ok(())
         }
+        Effect::CopyToClipboard { text } => {
+            write!(terminal.backend_mut(), "{}", osc52_copy_sequence(&text))?;
+            terminal.backend_mut().flush()?;
+            let line_count = text.lines().count().max(1);
+            app.push_agent_message(format!(
+                "Copied {line_count} line{} to the terminal clipboard.",
+                if line_count == 1 { "" } else { "s" }
+            ));
+            Ok(())
+        }
+        Effect::CancelPendingReply => {
+            if let Some((_, task)) = active_reply_task.take() {
+                task.abort();
+            }
+            Ok(())
+        }
+    }
+}
+
+fn osc52_copy_sequence(text: &str) -> String {
+    format!("\u{1b}]52;c;{}\u{7}", STANDARD.encode(text))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn osc52_sequence_base64_encodes_selection_text() {
+        assert_eq!(
+            osc52_copy_sequence("copy me"),
+            "\u{1b}]52;c;Y29weSBtZQ==\u{7}"
+        );
     }
 }

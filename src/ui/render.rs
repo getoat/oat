@@ -16,6 +16,7 @@ use super::theme::accent_color;
 
 const LOADING_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const MAX_VISIBLE_TOOL_ACTIVITY: usize = 5;
+const CODE_BLOCK_HORIZONTAL_PADDING: usize = 1;
 
 pub fn render(frame: &mut Frame, app: &mut App) {
     let screen = frame.area();
@@ -96,7 +97,13 @@ fn render_history(frame: &mut Frame, app: &mut App, area: Rect, accent: Color) {
 
     let visible_count = content_area.height as usize;
     let start = app.sync_history_viewport(lines.len(), visible_count);
-    let visible_lines = history_viewport_lines(lines, start, visible_count);
+    let mut visible_lines = history_viewport_lines(lines, start, visible_count);
+    let history_snapshot = visible_lines
+        .iter()
+        .map(rendered_line_text)
+        .collect::<Vec<_>>();
+    app.update_history_snapshot(content_area, history_snapshot);
+    apply_history_selection_highlight(&mut visible_lines, app, accent);
     let history = Paragraph::new(visible_lines);
     frame.render_widget(history, content_area);
 
@@ -115,6 +122,74 @@ fn history_viewport_lines(
     }
 
     lines.into_iter().skip(start).take(visible_count).collect()
+}
+
+fn apply_history_selection_highlight(lines: &mut [Line<'static>], app: &App, accent: Color) {
+    let highlight = Style::default().bg(accent);
+    for (row, line) in lines.iter_mut().enumerate() {
+        if let Some((start, end)) = app.history_selection_span_for_row(row) {
+            *line = highlight_line_range(line.clone(), start, end, highlight);
+        }
+    }
+}
+
+fn highlight_line_range(
+    line: Line<'static>,
+    start: usize,
+    end: usize,
+    highlight: Style,
+) -> Line<'static> {
+    if start >= end {
+        return line;
+    }
+
+    let mut spans = Vec::new();
+    let mut offset = 0;
+
+    for span in line.spans {
+        let content = span.content.into_owned();
+        let width = content.chars().count();
+        let span_start = offset;
+        let span_end = offset + width;
+
+        if width == 0 || end <= span_start || start >= span_end {
+            spans.push(Span::styled(content, span.style));
+            offset = span_end;
+            continue;
+        }
+
+        let local_start = start.saturating_sub(span_start).min(width);
+        let local_end = end.saturating_sub(span_start).min(width);
+
+        let before = slice_chars(&content, 0, local_start);
+        let selected = slice_chars(&content, local_start, local_end);
+        let after = slice_chars(&content, local_end, width);
+
+        if !before.is_empty() {
+            spans.push(Span::styled(before, span.style));
+        }
+        if !selected.is_empty() {
+            spans.push(Span::styled(selected, span.style.patch(highlight)));
+        }
+        if !after.is_empty() {
+            spans.push(Span::styled(after, span.style));
+        }
+
+        offset = span_end;
+    }
+
+    Line {
+        style: line.style,
+        alignment: line.alignment,
+        spans,
+    }
+}
+
+fn slice_chars(text: &str, start: usize, end: usize) -> String {
+    text.chars()
+        .skip(start)
+        .take(end.saturating_sub(start))
+        .collect()
 }
 
 fn render_history_scrollbar(frame: &mut Frame, area: Rect, app: &App, accent: Color) {
@@ -171,6 +246,15 @@ enum VisibleEntry<'a> {
     Message(&'a ChatMessage),
     ToolCall(&'a ToolCall),
     ToolResult(&'a ToolResultEntry),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum MarkdownSegment {
+    Markdown(String),
+    CodeBlock {
+        language: Option<String>,
+        code: String,
+    },
 }
 
 impl VisibleEntry<'_> {
@@ -290,20 +374,9 @@ fn render_mode(frame: &mut Frame, app: &App, area: Rect, accent: Color) {
             Style::default().fg(accent).add_modifier(Modifier::BOLD),
         ),
         Span::raw(format!(
-            "  {}  Effort {}  Thinking {}  Tool output {}  {}  / commands  Tab toggle  Ctrl+C clear/quit",
+            "  {} • {}",
             app.model_name(),
             app.reasoning_effort().as_str(),
-            if app.show_thinking() {
-                "visible"
-            } else {
-                "hidden"
-            },
-            if app.show_tool_output() {
-                "visible"
-            } else {
-                "hidden"
-            },
-            app.history_status_label(),
         )),
     ]));
     frame.render_widget(mode, area);
@@ -391,8 +464,8 @@ fn push_markdown_message_lines(
     accent: Color,
 ) {
     let content_width = width.saturating_sub(prefix_width(message.speaker)).max(1);
-    let wrapped = wrap_styled_lines(markdown_lines(&message.text), content_width);
-    push_prefixed_styled_lines(lines, wrapped, message.speaker, accent);
+    let rendered = render_markdown_message_lines(&message.text, content_width);
+    push_prefixed_styled_lines(lines, rendered, message.speaker, accent);
 }
 
 fn should_render_markdown(message: &ChatMessage) -> bool {
@@ -411,6 +484,245 @@ fn markdown_lines(text: &str) -> Vec<Line<'static>> {
     }
 
     lines
+}
+
+fn render_markdown_message_lines(text: &str, content_width: usize) -> Vec<Line<'static>> {
+    let mut rendered = Vec::new();
+
+    for segment in markdown_segments(text) {
+        match segment {
+            MarkdownSegment::Markdown(markdown) => {
+                rendered.extend(wrap_styled_lines(markdown_lines(&markdown), content_width));
+            }
+            MarkdownSegment::CodeBlock { language, code } => {
+                rendered.extend(render_code_block_lines(
+                    language.as_deref(),
+                    &code,
+                    content_width,
+                ));
+            }
+        }
+    }
+
+    if rendered.is_empty() {
+        rendered.push(Line::default());
+    }
+
+    rendered
+}
+
+fn markdown_segments(text: &str) -> Vec<MarkdownSegment> {
+    let mut segments = Vec::new();
+    let mut markdown = String::new();
+    let mut code = String::new();
+    let mut language = None;
+    let mut in_code_block = false;
+
+    for raw_line in text.split_inclusive('\n') {
+        let line = raw_line.strip_suffix('\n').unwrap_or(raw_line);
+
+        if in_code_block {
+            if is_closing_code_fence(line) {
+                segments.push(MarkdownSegment::CodeBlock {
+                    language: language.take(),
+                    code: std::mem::take(&mut code),
+                });
+                in_code_block = false;
+            } else {
+                code.push_str(raw_line);
+            }
+            continue;
+        }
+
+        if let Some(next_language) = opening_code_fence_language(line) {
+            if !markdown.is_empty() {
+                segments.push(MarkdownSegment::Markdown(std::mem::take(&mut markdown)));
+            }
+            language = next_language;
+            in_code_block = true;
+        } else {
+            markdown.push_str(raw_line);
+        }
+    }
+
+    if in_code_block {
+        return vec![MarkdownSegment::Markdown(text.to_string())];
+    }
+
+    if !markdown.is_empty() {
+        segments.push(MarkdownSegment::Markdown(markdown));
+    }
+
+    if segments.is_empty() {
+        segments.push(MarkdownSegment::Markdown(String::new()));
+    }
+
+    segments
+}
+
+fn opening_code_fence_language(line: &str) -> Option<Option<String>> {
+    let trimmed = line.trim_start();
+    if !trimmed.starts_with("```") {
+        return None;
+    }
+
+    let rest = &trimmed[3..];
+    if rest.starts_with('`') {
+        return None;
+    }
+
+    let language = rest.trim();
+    Some((!language.is_empty()).then(|| language.to_string()))
+}
+
+fn is_closing_code_fence(line: &str) -> bool {
+    line.trim() == "```"
+}
+
+fn render_code_block_lines(
+    language: Option<&str>,
+    code: &str,
+    content_width: usize,
+) -> Vec<Line<'static>> {
+    let inner_width = content_width
+        .saturating_sub(CODE_BLOCK_HORIZONTAL_PADDING * 2)
+        .max(1);
+    let mut block_lines = Vec::new();
+
+    if let Some(language) = language.filter(|language| !language.is_empty()) {
+        let header = Line::from(Span::styled(
+            language.to_string(),
+            code_block_header_style(),
+        ));
+        block_lines.extend(wrap_styled_lines(vec![header], inner_width));
+    }
+
+    let body = wrap_styled_lines(code_block_body_lines(code, language), inner_width);
+    block_lines.extend(body);
+
+    if block_lines.is_empty() {
+        block_lines.push(Line::default());
+    }
+
+    let target_width = block_lines
+        .iter()
+        .map(rendered_line_width)
+        .max()
+        .unwrap_or(0);
+
+    block_lines
+        .into_iter()
+        .map(|line| decorate_code_block_line(line, target_width))
+        .collect()
+}
+
+fn code_block_body_lines(code: &str, language: Option<&str>) -> Vec<Line<'static>> {
+    let mut lines = markdown_lines(&fenced_code_block_markdown(
+        code,
+        normalized_highlight_language(language),
+    ));
+    strip_outer_code_fences(&mut lines);
+
+    if lines.is_empty() {
+        lines.push(Line::default());
+    }
+
+    lines
+}
+
+fn fenced_code_block_markdown(code: &str, language: Option<&str>) -> String {
+    let mut markdown = String::from("```");
+    if let Some(language) = language.filter(|language| !language.is_empty()) {
+        markdown.push_str(language);
+    }
+    markdown.push('\n');
+    markdown.push_str(code);
+    if !code.ends_with('\n') {
+        markdown.push('\n');
+    }
+    markdown.push_str("```");
+    markdown
+}
+
+fn normalized_highlight_language(language: Option<&str>) -> Option<&str> {
+    let language = language?.trim();
+    if language.is_empty() {
+        return None;
+    }
+
+    match language.to_ascii_lowercase().as_str() {
+        "c#" | "csharp" | "c-sharp" | "c_sharp" | "c sharp" => Some("C#"),
+        _ => Some(language),
+    }
+}
+
+fn strip_outer_code_fences(lines: &mut Vec<Line<'static>>) {
+    let should_strip_first = lines.first().is_some_and(is_opening_code_fence_line);
+    let should_strip_last = lines
+        .last()
+        .is_some_and(is_closing_code_fence_line_rendered);
+
+    if should_strip_first {
+        lines.remove(0);
+    }
+    if should_strip_last && !lines.is_empty() {
+        lines.pop();
+    }
+}
+
+fn is_opening_code_fence_line(line: &Line<'_>) -> bool {
+    rendered_line_text(line).starts_with("```")
+}
+
+fn is_closing_code_fence_line_rendered(line: &Line<'_>) -> bool {
+    rendered_line_text(line).trim() == "```"
+}
+
+fn rendered_line_text(line: &Line<'_>) -> String {
+    line.spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>()
+}
+
+fn rendered_line_width(line: &Line<'_>) -> usize {
+    line.spans
+        .iter()
+        .map(|span| span.content.chars().count())
+        .sum()
+}
+
+fn decorate_code_block_line(line: Line<'static>, target_width: usize) -> Line<'static> {
+    let base_style = code_block_style();
+    let mut spans = Vec::with_capacity(line.spans.len() + 2);
+    let padding = " ".repeat(CODE_BLOCK_HORIZONTAL_PADDING);
+    let line_width = rendered_line_width(&line);
+    let trailing_padding_width =
+        target_width.saturating_sub(line_width) + CODE_BLOCK_HORIZONTAL_PADDING;
+    spans.push(Span::styled(padding.clone(), base_style));
+    spans.extend(
+        line.spans
+            .into_iter()
+            .map(|span| Span::styled(span.content.into_owned(), base_style.patch(span.style))),
+    );
+    spans.push(Span::styled(" ".repeat(trailing_padding_width), base_style));
+
+    Line {
+        style: base_style.patch(line.style),
+        alignment: line.alignment,
+        spans,
+    }
+}
+
+fn code_block_style() -> Style {
+    Style::default().fg(Color::White).bg(Color::Black)
+}
+
+fn code_block_header_style() -> Style {
+    Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD)
+        .add_modifier(Modifier::DIM)
 }
 
 fn into_owned_line(line: Line<'_>) -> Line<'static> {
@@ -793,6 +1105,58 @@ mod tests {
     }
 
     #[test]
+    fn markdown_segments_leave_plain_text_unchanged() {
+        assert_eq!(
+            markdown_segments("plain text"),
+            vec![MarkdownSegment::Markdown("plain text".into())]
+        );
+    }
+
+    #[test]
+    fn markdown_segments_extract_fenced_code_blocks_with_language() {
+        assert_eq!(
+            markdown_segments("Before\n```rust\nlet value = 1;\n```\nAfter"),
+            vec![
+                MarkdownSegment::Markdown("Before\n".into()),
+                MarkdownSegment::CodeBlock {
+                    language: Some("rust".into()),
+                    code: "let value = 1;\n".into(),
+                },
+                MarkdownSegment::Markdown("After".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn markdown_segments_extract_fenced_code_blocks_without_language() {
+        assert_eq!(
+            markdown_segments("```\nplain text\n```"),
+            vec![MarkdownSegment::CodeBlock {
+                language: None,
+                code: "plain text\n".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn markdown_segments_fall_back_to_plain_markdown_for_unclosed_fences() {
+        assert_eq!(
+            markdown_segments("Before\n```rust\nlet value = 1;\n"),
+            vec![MarkdownSegment::Markdown(
+                "Before\n```rust\nlet value = 1;\n".into()
+            )]
+        );
+    }
+
+    #[test]
+    fn normalized_highlight_language_maps_csharp_aliases() {
+        assert_eq!(normalized_highlight_language(Some("csharp")), Some("C#"));
+        assert_eq!(normalized_highlight_language(Some("c#")), Some("C#"));
+        assert_eq!(normalized_highlight_language(Some("c sharp")), Some("C#"));
+        assert_eq!(normalized_highlight_language(Some("rust")), Some("rust"));
+    }
+
+    #[test]
     fn render_shows_mode_line_and_initial_prompt() {
         let backend = TestBackend::new(120, 8);
         let mut terminal = Terminal::new(backend).expect("test terminal");
@@ -811,11 +1175,8 @@ mod tests {
             .collect::<String>();
 
         assert!(rendered.contains("Loaded Azure model"));
-        assert!(rendered.contains("Effort medium"));
         assert!(rendered.contains("Read-only"));
-        assert!(rendered.contains("Thinking visible"));
-        assert!(rendered.contains("Tool output hidden"));
-        assert!(rendered.contains("History live"));
+        assert!(rendered.contains("gpt-5-mini • medium"));
 
         app.apply(Action::ToggleMode);
         terminal
@@ -1052,6 +1413,98 @@ mod tests {
     }
 
     #[test]
+    fn render_hides_fenced_code_markers_for_agent_messages() {
+        let backend = TestBackend::new(100, 16);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut app = App::new(true, false, "gpt-5-mini", ReasoningEffort::Medium);
+        app.composer_mut().insert_str("render code");
+        app.apply(Action::SubmitMessage);
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: crate::llm::StreamEvent::TextDelta("```rust\nlet value = 1;\n```".into()),
+        });
+
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render succeeds");
+
+        let rendered = buffer_string(terminal.backend());
+        assert!(!rendered.contains("```"));
+        assert!(rendered.contains("rust"));
+        assert!(rendered.contains("let value = 1;"));
+    }
+
+    #[test]
+    fn render_highlights_active_history_selection() {
+        let backend = TestBackend::new(100, 16);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut app = App::new(true, false, "gpt-5-mini", ReasoningEffort::Medium);
+        app.push_agent_message("alpha beta gamma");
+
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("initial render succeeds");
+
+        let buffer = terminal.backend().buffer();
+        let (row, column) = find_word_position(buffer, "alpha").expect("alpha position");
+        app.apply(Action::StartHistorySelection { column, row });
+        app.apply(Action::UpdateHistorySelection {
+            column: column + 4,
+            row,
+        });
+
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("selection render succeeds");
+
+        let selected_row = terminal
+            .backend()
+            .buffer()
+            .content
+            .chunks(terminal.backend().buffer().area.width as usize)
+            .nth(row as usize)
+            .expect("selected row");
+        for index in column as usize..=column as usize + 4 {
+            assert_eq!(selected_row[index].bg, accent_color(app.mode()));
+        }
+    }
+
+    #[test]
+    fn render_keeps_markdown_formatting_around_code_blocks() {
+        let backend = TestBackend::new(100, 18);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut app = App::new(true, false, "gpt-5-mini", ReasoningEffort::Medium);
+        app.composer_mut().insert_str("render mixed markdown");
+        app.apply(Action::SubmitMessage);
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: crate::llm::StreamEvent::TextDelta(
+                "- first item\n\n```rust\nlet value = 1;\n```\n\n**after**".into(),
+            ),
+        });
+
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render succeeds");
+
+        let lines = buffer_lines(terminal.backend());
+        let first_row = lines
+            .iter()
+            .position(|line| line.contains("first item"))
+            .expect("first list item row");
+        let code_row = lines
+            .iter()
+            .position(|line| line.contains("let value = 1;"))
+            .expect("code row");
+
+        assert!(code_row > first_row);
+        assert!(
+            word_has_modifier(terminal.backend().buffer(), "after", Modifier::BOLD),
+            "expected bold markdown after the code block"
+        );
+    }
+
+    #[test]
     fn render_preserves_markdown_bold_and_italic_modifiers() {
         let backend = TestBackend::new(100, 14);
         let mut terminal = Terminal::new(backend).expect("test terminal");
@@ -1075,6 +1528,130 @@ mod tests {
         assert!(
             word_has_modifier(buffer, "italic", Modifier::ITALIC),
             "expected italic word to render with italic modifier"
+        );
+    }
+
+    #[test]
+    fn render_applies_syntax_highlighting_to_known_code_block_languages() {
+        let backend = TestBackend::new(100, 16);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut app = App::new(true, false, "gpt-5-mini", ReasoningEffort::Medium);
+        app.composer_mut().insert_str("render highlighted code");
+        app.apply(Action::SubmitMessage);
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: crate::llm::StreamEvent::TextDelta("```rust\nlet value = \"hi\";\n```".into()),
+        });
+
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render succeeds");
+
+        let buffer = terminal.backend().buffer();
+        assert!(
+            word_has_background(buffer, "let", Color::Black),
+            "expected code block background for highlighted Rust code"
+        );
+        assert!(
+            word_has_foreground_not(buffer, "let", Color::White),
+            "expected syntax-highlighted Rust keyword color"
+        );
+    }
+
+    #[test]
+    fn render_applies_syntax_highlighting_to_csharp_aliases() {
+        let backend = TestBackend::new(100, 16);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut app = App::new(true, false, "gpt-5-mini", ReasoningEffort::Medium);
+        app.composer_mut().insert_str("render csharp code");
+        app.apply(Action::SubmitMessage);
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: crate::llm::StreamEvent::TextDelta(
+                "```csharp\npublic class Demo { }\n```".into(),
+            ),
+        });
+
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render succeeds");
+
+        let buffer = terminal.backend().buffer();
+        assert!(
+            word_has_background(buffer, "public", Color::Black),
+            "expected code block background for C# alias"
+        );
+        assert!(
+            word_has_foreground_not(buffer, "public", Color::White),
+            "expected syntax-highlighted C# keyword color"
+        );
+    }
+
+    #[test]
+    fn render_styles_unknown_language_code_blocks_without_showing_fences() {
+        let backend = TestBackend::new(100, 16);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut app = App::new(true, false, "gpt-5-mini", ReasoningEffort::Medium);
+        app.composer_mut().insert_str("render plain code");
+        app.apply(Action::SubmitMessage);
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: crate::llm::StreamEvent::TextDelta("```unknownlang\nplain text\n```".into()),
+        });
+
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render succeeds");
+
+        let rendered = buffer_string(terminal.backend());
+        assert!(!rendered.contains("```"));
+        assert!(
+            word_has_background(terminal.backend().buffer(), "plain", Color::Black),
+            "expected fallback code block background"
+        );
+    }
+
+    #[test]
+    fn render_pads_shorter_code_block_lines_to_the_block_width() {
+        let backend = TestBackend::new(100, 18);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut app = App::new(true, false, "gpt-5-mini", ReasoningEffort::Medium);
+        app.composer_mut().insert_str("render multiline code");
+        app.apply(Action::SubmitMessage);
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: crate::llm::StreamEvent::TextDelta("```text\nalpha\nbetagamma\n```".into()),
+        });
+
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render succeeds");
+
+        let lines = buffer_lines(terminal.backend());
+        let alpha_row = lines
+            .iter()
+            .position(|line| line.contains("alpha"))
+            .expect("alpha row");
+        let betagamma_row = lines
+            .iter()
+            .position(|line| line.contains("betagamma"))
+            .expect("betagamma row");
+
+        let buffer = terminal.backend().buffer();
+        let alpha_cells = buffer
+            .content
+            .chunks(buffer.area.width as usize)
+            .nth(alpha_row)
+            .expect("alpha row cells");
+        let betagamma_cells = buffer
+            .content
+            .chunks(buffer.area.width as usize)
+            .nth(betagamma_row)
+            .expect("betagamma row cells");
+        assert!(
+            longest_background_run(alpha_cells, Color::Black)
+                >= longest_background_run(betagamma_cells, Color::Black),
+            "expected shorter code row background to match the widest line"
         );
     }
 
@@ -1162,7 +1739,7 @@ mod tests {
         let rendered = buffer_string(terminal.backend());
         assert!(rendered.contains("entry 8"));
         assert!(!rendered.contains("entry 1"));
-        assert!(rendered.contains("History live"));
+        assert!(rendered.contains("gpt-5-mini • medium"));
     }
 
     #[test]
@@ -1295,13 +1872,107 @@ mod tests {
                     .map(|cell| cell.symbol())
                     .eq(symbols.iter().map(String::as_str))
                 {
-                    return row[start..start + symbols.len()]
+                    if row[start..start + symbols.len()]
                         .iter()
-                        .all(|cell| cell.modifier.contains(modifier));
+                        .all(|cell| cell.modifier.contains(modifier))
+                    {
+                        return true;
+                    }
                 }
             }
         }
 
         false
+    }
+
+    fn word_has_background(
+        buffer: &ratatui::buffer::Buffer,
+        word: &str,
+        background: Color,
+    ) -> bool {
+        let width = buffer.area.width as usize;
+        let symbols = word.chars().map(|ch| ch.to_string()).collect::<Vec<_>>();
+
+        for row in buffer.content.chunks(width) {
+            for start in 0..=row.len().saturating_sub(symbols.len()) {
+                if row[start..start + symbols.len()]
+                    .iter()
+                    .map(|cell| cell.symbol())
+                    .eq(symbols.iter().map(String::as_str))
+                {
+                    if row[start..start + symbols.len()]
+                        .iter()
+                        .all(|cell| cell.bg == background)
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        false
+    }
+
+    fn word_has_foreground_not(
+        buffer: &ratatui::buffer::Buffer,
+        word: &str,
+        foreground: Color,
+    ) -> bool {
+        let width = buffer.area.width as usize;
+        let symbols = word.chars().map(|ch| ch.to_string()).collect::<Vec<_>>();
+
+        for row in buffer.content.chunks(width) {
+            for start in 0..=row.len().saturating_sub(symbols.len()) {
+                if row[start..start + symbols.len()]
+                    .iter()
+                    .map(|cell| cell.symbol())
+                    .eq(symbols.iter().map(String::as_str))
+                {
+                    if row[start..start + symbols.len()]
+                        .iter()
+                        .all(|cell| cell.fg != foreground)
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        false
+    }
+
+    fn longest_background_run(row: &[ratatui::buffer::Cell], background: Color) -> usize {
+        let mut longest = 0;
+        let mut current = 0;
+
+        for cell in row {
+            if cell.bg == background {
+                current += 1;
+                longest = longest.max(current);
+            } else {
+                current = 0;
+            }
+        }
+
+        longest
+    }
+
+    fn find_word_position(buffer: &ratatui::buffer::Buffer, word: &str) -> Option<(u16, u16)> {
+        let width = buffer.area.width as usize;
+        let symbols = word.chars().map(|ch| ch.to_string()).collect::<Vec<_>>();
+
+        for (row_index, row) in buffer.content.chunks(width).enumerate() {
+            for start in 0..=row.len().saturating_sub(symbols.len()) {
+                if row[start..start + symbols.len()]
+                    .iter()
+                    .map(|cell| cell.symbol())
+                    .eq(symbols.iter().map(String::as_str))
+                {
+                    return Some((row_index as u16, start as u16));
+                }
+            }
+        }
+
+        None
     }
 }

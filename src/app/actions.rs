@@ -11,6 +11,7 @@ use crate::llm::StreamEvent;
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
     ClearComposerOrQuit,
+    CancelPendingReply,
     ToggleMode,
     SelectPreviousCommand,
     SelectNextCommand,
@@ -24,6 +25,9 @@ pub enum Action {
     SubmitMessage,
     Editor(Input),
     Paste(String),
+    StartHistorySelection { column: u16, row: u16 },
+    UpdateHistorySelection { column: u16, row: u16 },
+    FinishHistorySelection { column: u16, row: u16 },
     StreamEvent { reply_id: u64, event: StreamEvent },
     Tick,
 }
@@ -38,18 +42,34 @@ pub enum Effect {
     SetReasoningEffort {
         reasoning_effort: ReasoningEffort,
     },
+    CopyToClipboard {
+        text: String,
+    },
+    CancelPendingReply,
 }
 
 impl App {
     pub fn apply(&mut self, action: Action) -> Option<Effect> {
         match action {
             Action::ClearComposerOrQuit => {
-                if self.composer_has_content() {
+                if self.has_pending_reply() {
+                    self.cancel_pending_reply();
+                    Some(Effect::CancelPendingReply)
+                } else if self.composer_has_content() {
                     self.clear_composer();
+                    None
                 } else {
                     self.should_quit = true;
+                    None
                 }
-                None
+            }
+            Action::CancelPendingReply => {
+                if self.has_pending_reply() {
+                    self.cancel_pending_reply();
+                    Some(Effect::CancelPendingReply)
+                } else {
+                    None
+                }
             }
             Action::ToggleMode => {
                 self.mode.toggle();
@@ -110,6 +130,17 @@ impl App {
                 self.sync_command_selection();
                 None
             }
+            Action::StartHistorySelection { column, row } => {
+                self.start_history_selection(column, row);
+                None
+            }
+            Action::UpdateHistorySelection { column, row } => {
+                self.update_history_selection(column, row);
+                None
+            }
+            Action::FinishHistorySelection { column, row } => self
+                .finish_history_selection(column, row)
+                .map(|text| Effect::CopyToClipboard { text }),
             Action::StreamEvent { reply_id, event } => {
                 on_stream_event(self, reply_id, event);
                 None
@@ -306,6 +337,8 @@ fn append_stream_reasoning(app: &mut App, delta: &str) {
 
 #[cfg(test)]
 mod tests {
+    use ratatui::layout::Rect;
+
     use super::*;
 
     fn new_app(show_thinking: bool) -> App {
@@ -330,6 +363,47 @@ mod tests {
 
         assert!(!app.should_quit);
         assert!(!app.composer_has_content());
+    }
+
+    #[test]
+    fn clear_composer_or_quit_cancels_pending_reply_instead_of_quitting() {
+        let mut app = new_app(true);
+        app.pending_reply = Some(PendingReply {
+            id: 1,
+            reasoning_entry_index: None,
+            text_entry_index: None,
+        });
+
+        let effect = app.apply(Action::ClearComposerOrQuit);
+
+        assert_eq!(effect, Some(Effect::CancelPendingReply));
+        assert!(!app.should_quit);
+        assert!(app.pending_reply.is_none());
+        let TranscriptEntry::Message(message) = app.entries.last().expect("cancel message") else {
+            panic!("expected message entry");
+        };
+        assert_eq!(message.style, MessageStyle::Error);
+        assert_eq!(message.text, "Request cancelled.");
+    }
+
+    #[test]
+    fn explicit_cancel_pending_reply_adds_cancellation_message() {
+        let mut app = new_app(true);
+        app.pending_reply = Some(PendingReply {
+            id: 1,
+            reasoning_entry_index: None,
+            text_entry_index: None,
+        });
+
+        let effect = app.apply(Action::CancelPendingReply);
+
+        assert_eq!(effect, Some(Effect::CancelPendingReply));
+        assert!(app.pending_reply.is_none());
+        let TranscriptEntry::Message(message) = app.entries.last().expect("cancel message") else {
+            panic!("expected message entry");
+        };
+        assert_eq!(message.style, MessageStyle::Error);
+        assert_eq!(message.text, "Request cancelled.");
     }
 
     #[test]
@@ -698,6 +772,33 @@ mod tests {
 
         app.apply(Action::ScrollHistoryDown { lines: 20 });
         assert_eq!(app.history_scroll_top, Some(12));
+    }
+
+    #[test]
+    fn finishing_history_selection_returns_copy_effect() {
+        let mut app = new_app(true);
+        app.update_history_snapshot(
+            Rect {
+                x: 0,
+                y: 0,
+                width: 20,
+                height: 2,
+            },
+            vec!["alpha".into(), "beta".into()],
+        );
+
+        assert!(
+            app.apply(Action::StartHistorySelection { column: 1, row: 0 })
+                .is_none()
+        );
+        let effect = app.apply(Action::FinishHistorySelection { column: 2, row: 1 });
+
+        assert_eq!(
+            effect,
+            Some(Effect::CopyToClipboard {
+                text: "lpha\nbet".into(),
+            })
+        );
     }
 
     #[test]
