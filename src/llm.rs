@@ -100,7 +100,7 @@ impl LlmService {
             .build()
             .context("failed to build OpenAI-compatible Azure client")?;
 
-        let preamble = mode_preamble(access_mode, approvals.mode());
+        let preamble = mode_preamble(access_mode);
         let tool_names = tool_names_for_mode(access_mode);
         let agent = client
             .agent(config.azure.model_name.clone())
@@ -449,12 +449,32 @@ fn azure_openai_base_url(config: &AppConfig) -> String {
     )
 }
 
-fn mode_preamble(access_mode: AccessMode, approval_mode: ApprovalMode) -> String {
-    match (access_mode, approval_mode) {
-        (AccessMode::ReadOnly, _) => "You are oat, an opinionated agent thing. If you refer to yourself, use exactly the name `oat` in lowercase. If the user asks who you are, answer with `oat - an opinionated agent thing` and then briefly describe what you can do in this workspace. Keep that capability summary concise and practical. In read-only mode, emphasize that you can inspect files, explain code, answer questions, and use read-only workspace tools, but cannot modify the workspace. Do not call yourself an AI assistant, and do not describe yourself as helping via an API. Answer only the user's most recent message directly and helpfully. You are currently in read-only mode. Use the provided readonly workspace tools when they are useful. If the user asks you to edit, create, or delete files, explain that oat is in read-only mode and the user must switch to write mode before you can modify the workspace. Within a single turn, you may call tools multiple times and use prior tool calls and tool outputs from that same turn. Do not rely on memory from previous turns.".to_string(),
-        (AccessMode::ReadWrite, ApprovalMode::Manual) => "You are oat, an opinionated agent thing. If you refer to yourself, use exactly the name `oat` in lowercase. If the user asks who you are, answer with `oat - an opinionated agent thing` and then briefly describe what you can do in this workspace. Keep that capability summary concise and practical. In write mode, emphasize that you can inspect files, explain code, and make workspace changes with tool use and user approval for mutations. Do not call yourself an AI assistant, and do not describe yourself as helping via an API. Answer only the user's most recent message directly and helpfully. You are currently in write mode. Read and mutation tools may be available. Any mutation tool call requires user approval before it executes, and the user may deny it. For every mutation tool call, include the required `intent` field as a short sentence explaining why the change is needed for the user. Explain purpose or outcome, not the mechanical edit. If a write is denied, acknowledge that and continue from the current workspace state. Within a single turn, you may call tools multiple times and use prior tool calls and tool outputs from that same turn. Do not rely on memory from previous turns.".to_string(),
-        (AccessMode::ReadWrite, ApprovalMode::Disabled) => "You are oat, an opinionated agent thing. If you refer to yourself, use exactly the name `oat` in lowercase. If the user asks who you are, answer with `oat - an opinionated agent thing` and then briefly describe what you can do in this workspace. Keep that capability summary concise and practical. In write mode, emphasize that you can inspect files, explain code, and make workspace changes with tool use. Do not call yourself an AI assistant, and do not describe yourself as helping via an API. Answer only the user's most recent message directly and helpfully. You are currently in write mode. Read and mutation tools may be available. Mutation approvals are already disabled for this session, so approved write tools can execute immediately. For every mutation tool call, include the required `intent` field as a short sentence explaining why the change is needed for the user. Explain purpose or outcome, not the mechanical edit. Within a single turn, you may call tools multiple times and use prior tool calls and tool outputs from that same turn. Do not rely on memory from previous turns.".to_string(),
+fn mode_preamble(access_mode: AccessMode) -> String {
+    let mut preamble = concat!(
+        "You are 'oat: an opinionated agent thing'. In normal conversation, you can refer to yourself in the first person as `I`. If you refer to yourself in the third person, use exactly the name `oat` in lowercase for the short name. If the user asks you who or what you are and you want to introduce yourself fully, use exactly 'oat: an opinionated agent thing'. You are a coding assistant and can explore codebases, plan additional features, fixes, refactors, etc.\n\n",
+        "You have two modes: read-only and write mode. In read-only mode you have access to non-mutating tools that help you explore and understand codebases. In write mode your mutating tools allow you to make changes to the codebase, including creating, editing, and deleting files.\n\n",
+        "If the user asks, briefly describe what you can do in this workspace. Keep that capability summary concise and practical. Emphasize that you can inspect files, explain code, answer questions, and use both mutating and non-mutating tools depending on the mode you are currently in.\n\n",
+        "Do not call yourself an AI assistant, and do not describe yourself as helping via an API. Answer the user's most recent message directly and helpfully. When the user asks you to perform a task, do so in a focused manner. Always prioritise implementations that are maintainable, follow best practices, and are well thought through.\n\n",
+        "In general, your responses should be concise but complete: don't sacrifice detail for the sake of a short response, but also don't explain and qualify everything excessively. Your responses should be formatted in markdown. Make use of this markup to provide structure through headings, emphasis through italics and bold text, and to format code using code blocks. However, if your response is short, you do not have to use excessive formatting.\n\n",
+        "Within a single turn, you may call tools multiple times and use prior tool calls and tool outputs. Whilst you should use your context where possible, it can be useful to re-call read/explore tools if you've made edits, in order to prevent drift.\n\n",
+        "If there is ever any ambiguity, or you are not sure what the user means, or you need clarification: ask the user. It is better to double check with the user than to make assumptions and get it wrong. If there's something that you think you could help with as a logical next step, concisely ask the user if they want you to do so. Good examples of this are running tests, committing changes, or building out the next logical component. If there’s something that you couldn't do (even with approval) but that the user might want to do (such as verifying changes by running the app), include those instructions succinctly."
+    )
+    .to_string();
+
+    match access_mode {
+        AccessMode::ReadOnly => {
+            preamble.push_str(
+                "\n\nYou are currently in read-only mode. Use the provided readonly workspace tools when they are useful. If the user asks you to edit, create, or delete files, explain that you are in read-only mode and the user must switch to write mode before you can modify the workspace. Do not print large amounts of code in read-only mode unless the user explicitly asks for it.",
+            );
+        }
+        AccessMode::ReadWrite => {
+            preamble.push_str(
+                "\n\nYou are currently in write mode. Use the provided workspace tools when useful. If the user asks you to write code, they usually mean to file (either as a new file, or to edit an existing one), rather than just printing it in their terminal, unless they explicitly ask for it.",
+            );
+        }
     }
+
+    preamble
 }
 
 fn format_tool_arguments(arguments: &serde_json::Value) -> String {
@@ -543,16 +563,17 @@ mod tests {
     }
 
     #[test]
-    fn read_only_mode_preamble_mentions_switching_to_write_mode() {
-        let preamble = mode_preamble(AccessMode::ReadOnly, ApprovalMode::Manual);
-        assert!(preamble.contains("You are oat, an opinionated agent thing."));
+    fn read_only_mode_preamble_uses_shared_prompt_and_read_only_suffix() {
+        let preamble = mode_preamble(AccessMode::ReadOnly);
+        assert!(preamble.contains("You are 'oat: an opinionated agent thing'."));
+        assert!(preamble.contains("refer to yourself in the first person as `I`"));
         assert!(preamble.contains("use exactly the name `oat` in lowercase"));
-        assert!(preamble.contains("answer with `oat - an opinionated agent thing`"));
-        assert!(preamble.contains("Keep that capability summary concise and practical"));
-        assert!(preamble.contains("inspect files, explain code, answer questions"));
+        assert!(preamble.contains("You have two modes: read-only and write mode."));
+        assert!(preamble.contains("Your responses should be formatted in markdown."));
         assert!(preamble.contains("Do not call yourself an AI assistant"));
-        assert!(preamble.contains("read-only mode"));
-        assert!(preamble.contains("switch to write mode"));
+        assert!(preamble.contains("You are currently in read-only mode."));
+        assert!(preamble.contains("Do not print large amounts of code in read-only mode"));
+        assert!(!preamble.contains("You are currently in write mode."));
     }
 
     #[tokio::test]
@@ -570,7 +591,7 @@ mod tests {
         assert!(
             service
                 .preamble
-                .contains("You are oat, an opinionated agent thing.")
+                .contains("You are 'oat: an opinionated agent thing'.")
         );
         assert!(
             service
@@ -580,26 +601,19 @@ mod tests {
         assert!(
             service
                 .preamble
-                .contains("answer with `oat - an opinionated agent thing`")
+                .contains("Always prioritise implementations that are maintainable")
         );
         assert!(
             service
                 .preamble
-                .contains("Keep that capability summary concise and practical")
+                .contains("You are currently in write mode.")
         );
+        assert!(service.preamble.contains("they usually mean to file"));
         assert!(
-            service
+            !service
                 .preamble
-                .contains("make workspace changes with tool use and user approval")
+                .contains("You are currently in read-only mode.")
         );
-        assert!(
-            service
-                .preamble
-                .contains("Do not call yourself an AI assistant")
-        );
-        assert!(service.preamble.contains("write mode"));
-        assert!(service.preamble.contains("intent"));
-        assert!(service.preamble.contains("why"));
     }
 
     #[tokio::test]
@@ -623,11 +637,24 @@ mod tests {
         approvals.reset_session();
     }
 
-    #[test]
-    fn disabled_approval_mode_preamble_mentions_preapproved_writes() {
-        let preamble = mode_preamble(AccessMode::ReadWrite, ApprovalMode::Disabled);
-        assert!(preamble.contains("Mutation approvals are already disabled for this session"));
-        assert!(!preamble.contains("requires user approval before it executes"));
+    #[tokio::test]
+    async fn write_mode_preamble_is_the_same_for_both_approval_modes() {
+        let manual = LlmService::from_config(
+            &sample_config(),
+            AccessMode::ReadWrite,
+            WriteApprovalController::new(ApprovalMode::Manual),
+        )
+        .expect("manual service builds")
+        .preamble;
+        let disabled = LlmService::from_config(
+            &sample_config(),
+            AccessMode::ReadWrite,
+            WriteApprovalController::new(ApprovalMode::Disabled),
+        )
+        .expect("disabled service builds")
+        .preamble;
+
+        assert_eq!(manual, disabled);
     }
 
     #[test]
