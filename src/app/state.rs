@@ -110,7 +110,7 @@ impl AccessMode {
     pub fn label(self) -> &'static str {
         match self {
             Self::ReadOnly => "Read-only",
-            Self::ReadWrite => "Read-Write",
+            Self::ReadWrite => "Write",
         }
     }
 }
@@ -791,7 +791,7 @@ mod tests {
 
         mode.toggle();
         assert_eq!(mode, AccessMode::ReadWrite);
-        assert_eq!(mode.label(), "Read-Write");
+        assert_eq!(mode.label(), "Write");
 
         mode.toggle();
         assert_eq!(mode, AccessMode::ReadOnly);
@@ -901,13 +901,13 @@ mod tests {
 
         app.begin_write_approval(
             "call-1".into(),
-            "ApplyPatch".into(),
+            "ApplyPatches".into(),
             "{\"filename\":\"src/lib.rs\"}".into(),
         );
 
         let pending = app.pending_write_approval().expect("pending approval");
         assert_eq!(pending.request_id, "call-1");
-        assert_eq!(pending.tool_name, "ApplyPatch");
+        assert_eq!(pending.tool_name, "ApplyPatches");
     }
 
     #[test]

@@ -14,7 +14,7 @@ use serde_json::json;
 const MAX_READFILE_LIMIT: usize = 300;
 const MAX_GREP_MATCHES: usize = 100;
 const MAX_LIST_ENTRIES: usize = 400;
-const APPLY_PATCH_TOOL_NAME: &str = "ApplyPatch";
+const APPLY_PATCH_TOOL_NAME: &str = "ApplyPatches";
 const WRITE_FILE_TOOL_NAME: &str = "WriteFile";
 const DELETE_PATH_TOOL_NAME: &str = "DeletePath";
 
@@ -46,7 +46,7 @@ pub struct GrepTool {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ApplyPatchTool {
+pub struct ApplyPatchesTool {
     root: PathBuf,
 }
 
@@ -84,7 +84,7 @@ impl GrepTool {
     }
 }
 
-impl ApplyPatchTool {
+impl ApplyPatchesTool {
     pub fn new(root: PathBuf) -> Self {
         Self { root }
     }
@@ -128,12 +128,17 @@ pub struct GrepArgs {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct ApplyPatchArgs {
+pub struct ApplyPatchesArgs {
     pub filename: String,
-    pub old_text: String,
-    pub new_text: String,
+    pub patches: Vec<TextPatch>,
     #[serde(default)]
     pub intent: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TextPatch {
+    pub old_text: String,
+    pub new_text: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -343,16 +348,16 @@ impl Tool for GrepTool {
     }
 }
 
-impl Tool for ApplyPatchTool {
+impl Tool for ApplyPatchesTool {
     const NAME: &'static str = APPLY_PATCH_TOOL_NAME;
     type Error = ToolExecError;
-    type Args = ApplyPatchArgs;
+    type Args = ApplyPatchesArgs;
     type Output = String;
 
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         ToolDefinition {
             name: Self::NAME.to_string(),
-            description: "Replace exactly one matching text snippet in an existing workspace file. Fails if the old text is missing or appears more than once. Always include intent as a short plain-language reason that explains why the change is needed, not just what text is changing.".to_string(),
+            description: "Apply between 1 and 5 exact text replacements to a single existing workspace file. Each old_text must match exactly once at the moment that patch is applied. The full call fails if any patch is invalid. Always include intent as a short plain-language reason that explains why the change is needed, not just what text is changing.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -360,26 +365,38 @@ impl Tool for ApplyPatchTool {
                         "type": "string",
                         "description": "File path relative to the current workspace root."
                     },
-                    "old_text": {
-                        "type": "string",
-                        "description": "Exact existing text to replace. Must appear exactly once."
-                    },
-                    "new_text": {
-                        "type": "string",
-                        "description": "Replacement text."
+                    "patches": {
+                        "type": "array",
+                        "description": "Between 1 and 5 exact replacements to apply in order to the same file.",
+                        "minItems": 1,
+                        "maxItems": 5,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "old_text": {
+                                    "type": "string",
+                                    "description": "Exact existing text to replace. Must appear exactly once when this patch is applied."
+                                },
+                                "new_text": {
+                                    "type": "string",
+                                    "description": "Replacement text."
+                                }
+                            },
+                            "required": ["old_text", "new_text"]
+                        }
                     },
                     "intent": {
                         "type": "string",
                         "description": "Short sentence explaining why this change is needed for the user. Focus on purpose or outcome, not the mechanical text replacement."
                     }
                 },
-                "required": ["filename", "old_text", "new_text", "intent"]
+                "required": ["filename", "patches", "intent"]
             }),
         }
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        edit_file(&self.root, &args.filename, &args.old_text, &args.new_text)
+        apply_patches(&self.root, &args.filename, &args.patches)
     }
 }
 
@@ -612,14 +629,15 @@ fn grep_workspace(
     Ok(matches.join("\n"))
 }
 
-fn edit_file(
+fn apply_patches(
     root: &Path,
     filename: &str,
-    old_text: &str,
-    new_text: &str,
+    patches: &[TextPatch],
 ) -> Result<String, ToolExecError> {
-    if old_text.is_empty() {
-        return Err(ToolExecError::new("old_text must not be empty"));
+    if patches.is_empty() || patches.len() > 5 {
+        return Err(ToolExecError::new(
+            "patches must contain between 1 and 5 entries",
+        ));
     }
 
     let path = resolve_workspace_path(root, filename)?;
@@ -628,22 +646,33 @@ fn edit_file(
         return Err(ToolExecError::new(format!("{filename} is not a file")));
     }
 
-    let content = fs::read_to_string(&path)?;
-    let match_count = content.matches(old_text).count();
-    if match_count == 0 {
-        return Err(ToolExecError::new(format!(
-            "old_text was not found in {}",
-            display_path(root, &path)
-        )));
-    }
-    if match_count > 1 {
-        return Err(ToolExecError::new(format!(
-            "old_text matched {match_count} times in {}; it must match exactly once",
-            display_path(root, &path)
-        )));
-    }
+    let mut updated = fs::read_to_string(&path)?;
+    for (index, patch) in patches.iter().enumerate() {
+        if patch.old_text.is_empty() {
+            return Err(ToolExecError::new(format!(
+                "patch {} old_text must not be empty",
+                index + 1
+            )));
+        }
 
-    let updated = content.replacen(old_text, new_text, 1);
+        let match_count = updated.matches(&patch.old_text).count();
+        if match_count == 0 {
+            return Err(ToolExecError::new(format!(
+                "patch {} old_text was not found in {}",
+                index + 1,
+                display_path(root, &path)
+            )));
+        }
+        if match_count > 1 {
+            return Err(ToolExecError::new(format!(
+                "patch {} old_text matched {match_count} times in {}; it must match exactly once",
+                index + 1,
+                display_path(root, &path)
+            )));
+        }
+
+        updated = updated.replacen(&patch.old_text, &patch.new_text, 1);
+    }
     fs::write(&path, updated)?;
 
     Ok(format!("Updated {}.", display_path(root, &path)))
@@ -658,7 +687,7 @@ fn write_file(root: &Path, filename: &str, content: &str) -> Result<String, Tool
     }
     if path.exists() {
         return Err(ToolExecError::new(format!(
-            "{} already exists; use ApplyPatch to modify existing files",
+            "{} already exists; use ApplyPatches to modify existing files",
             display_path(root, &path)
         )));
     }
@@ -1095,11 +1124,18 @@ mod tests {
     }
 
     #[test]
-    fn edit_file_replaces_exactly_one_match() {
+    fn apply_patches_replaces_exactly_one_match() {
         let tree = tree_with_mutation_targets();
 
-        let output = edit_file(&tree.root, "src/lib.rs", "fn beta() {}", "fn gamma() {}")
-            .expect("edit succeeds");
+        let output = apply_patches(
+            &tree.root,
+            "src/lib.rs",
+            &[TextPatch {
+                old_text: "fn beta() {}".into(),
+                new_text: "fn gamma() {}".into(),
+            }],
+        )
+        .expect("edit succeeds");
 
         assert_eq!(output, "Updated src/lib.rs.");
         let updated = fs::read_to_string(tree.root.join("src/lib.rs")).expect("file exists");
@@ -1107,23 +1143,82 @@ mod tests {
     }
 
     #[test]
-    fn edit_file_rejects_missing_match() {
+    fn apply_patches_rejects_missing_match() {
         let tree = tree_with_mutation_targets();
 
-        let error =
-            edit_file(&tree.root, "src/lib.rs", "fn missing() {}", "fn gamma() {}").unwrap_err();
+        let error = apply_patches(
+            &tree.root,
+            "src/lib.rs",
+            &[TextPatch {
+                old_text: "fn missing() {}".into(),
+                new_text: "fn gamma() {}".into(),
+            }],
+        )
+        .unwrap_err();
 
-        assert!(error.to_string().contains("old_text was not found"));
+        assert!(error.to_string().contains("patch 1 old_text was not found"));
     }
 
     #[test]
-    fn edit_file_rejects_multiple_matches() {
+    fn apply_patches_rejects_multiple_matches() {
         let tree = TempTree::new();
         fs::write(tree.root.join("repeat.txt"), "same\nsame\n").expect("repeat file");
 
-        let error = edit_file(&tree.root, "repeat.txt", "same", "new").unwrap_err();
+        let error = apply_patches(
+            &tree.root,
+            "repeat.txt",
+            &[TextPatch {
+                old_text: "same".into(),
+                new_text: "new".into(),
+            }],
+        )
+        .unwrap_err();
 
         assert!(error.to_string().contains("must match exactly once"));
+    }
+
+    #[test]
+    fn apply_patches_applies_multiple_replacements_to_one_file() {
+        let tree = tree_with_mutation_targets();
+
+        let output = apply_patches(
+            &tree.root,
+            "src/lib.rs",
+            &[
+                TextPatch {
+                    old_text: "fn alpha() {}".into(),
+                    new_text: "fn alpha_renamed() {}".into(),
+                },
+                TextPatch {
+                    old_text: "fn beta() {}".into(),
+                    new_text: "fn beta_renamed() {}".into(),
+                },
+            ],
+        )
+        .expect("patches succeed");
+
+        assert_eq!(output, "Updated src/lib.rs.");
+        let updated = fs::read_to_string(tree.root.join("src/lib.rs")).expect("file exists");
+        assert_eq!(updated, "fn alpha_renamed() {}\nfn beta_renamed() {}\n");
+    }
+
+    #[test]
+    fn apply_patches_rejects_more_than_five_entries() {
+        let tree = tree_with_mutation_targets();
+        let patches = (0..6)
+            .map(|index| TextPatch {
+                old_text: format!("missing-{index}"),
+                new_text: format!("new-{index}"),
+            })
+            .collect::<Vec<_>>();
+
+        let error = apply_patches(&tree.root, "src/lib.rs", &patches).expect_err("must fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("patches must contain between 1 and 5 entries")
+        );
     }
 
     #[test]
@@ -1147,7 +1242,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("already exists; use ApplyPatch to modify existing files")
+                .contains("already exists; use ApplyPatches to modify existing files")
         );
     }
 
@@ -1192,7 +1287,7 @@ mod tests {
     #[tokio::test]
     async fn mutation_tool_definitions_require_intent() {
         let root = PathBuf::from(".");
-        let apply_patch = ApplyPatchTool::new(root.clone())
+        let apply_patch = ApplyPatchesTool::new(root.clone())
             .definition(String::new())
             .await;
         let write_file = WriteFileTool::new(root.clone())

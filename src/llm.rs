@@ -25,7 +25,7 @@ use crate::{
     config::AppConfig,
     stats::StatsHook,
     tools::{
-        ApplyPatchTool, DeletePathTool, GrepTool, ListTool, ReadFileTool, ReadFilesTool,
+        ApplyPatchesTool, DeletePathTool, GrepTool, ListTool, ReadFileTool, ReadFilesTool,
         WriteFileTool,
     },
 };
@@ -448,7 +448,7 @@ fn tool_names_for_mode(access_mode: AccessMode) -> Vec<String> {
     ];
     if access_mode == AccessMode::ReadWrite {
         names.extend([
-            ApplyPatchTool::NAME.to_string(),
+            ApplyPatchesTool::NAME.to_string(),
             WriteFileTool::NAME.to_string(),
             DeletePathTool::NAME.to_string(),
         ]);
@@ -466,7 +466,7 @@ fn tools_for_mode(root: &std::path::Path, access_mode: AccessMode) -> Vec<Box<dy
 
     if access_mode == AccessMode::ReadWrite {
         tools.extend([
-            Box::new(ApplyPatchTool::new(root.to_path_buf())) as Box<dyn ToolDyn>,
+            Box::new(ApplyPatchesTool::new(root.to_path_buf())) as Box<dyn ToolDyn>,
             Box::new(WriteFileTool::new(root.to_path_buf())) as Box<dyn ToolDyn>,
             Box::new(DeletePathTool::new(root.to_path_buf())) as Box<dyn ToolDyn>,
         ]);
@@ -476,7 +476,7 @@ fn tools_for_mode(root: &std::path::Path, access_mode: AccessMode) -> Vec<Box<dy
 }
 
 fn is_mutation_tool(tool_name: &str) -> bool {
-    matches!(tool_name, "ApplyPatch" | "WriteFile" | "DeletePath")
+    matches!(tool_name, "ApplyPatches" | "WriteFile" | "DeletePath")
 }
 
 fn format_tool_arguments(arguments: &serde_json::Value) -> String {
@@ -579,7 +579,7 @@ mod tests {
         )
         .expect("service builds");
 
-        assert!(service.tool_names.contains(&"ApplyPatch".to_string()));
+        assert!(service.tool_names.contains(&"ApplyPatches".to_string()));
         assert!(service.tool_names.contains(&"WriteFile".to_string()));
         assert!(service.tool_names.contains(&"DeletePath".to_string()));
         assert!(service.preamble.contains("write mode"));
@@ -596,7 +596,7 @@ mod tests {
         )
         .expect("service builds");
 
-        assert!(!service.tool_names.contains(&"ApplyPatch".to_string()));
+        assert!(!service.tool_names.contains(&"ApplyPatches".to_string()));
         assert!(!service.tool_names.contains(&"WriteFile".to_string()));
         assert!(!service.tool_names.contains(&"DeletePath".to_string()));
     }

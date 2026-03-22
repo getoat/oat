@@ -420,9 +420,11 @@ fn render_command_palette(frame: &mut Frame, app: &App, area: Rect, accent: Colo
 }
 
 fn render_mode(frame: &mut Frame, app: &App, area: Rect, accent: Color) {
+    let mode_label = mode_status_label(app.mode(), app.write_approval_policy());
+
     let mut spans = vec![
         Span::styled(
-            app.mode().label(),
+            mode_label,
             Style::default().fg(accent).add_modifier(Modifier::BOLD),
         ),
         Span::raw(format!(
@@ -441,20 +443,27 @@ fn render_mode(frame: &mut Frame, app: &App, area: Rect, accent: Color) {
     } else {
         let hint = match app.mode() {
             crate::app::AccessMode::ReadOnly => "  Tab switches to write mode for edits",
-            crate::app::AccessMode::ReadWrite => match app.write_approval_policy() {
-                crate::app::WriteApprovalPolicy::AskEveryTime => {
-                    "  Write mode active  approvals required"
-                }
-                crate::app::WriteApprovalPolicy::AllowAllSession => {
-                    "  Write mode active  all writes approved this session"
-                }
-            },
+            crate::app::AccessMode::ReadWrite => "",
         };
-        spans.push(Span::styled(hint, Style::default().fg(Color::Gray)));
+        if !hint.is_empty() {
+            spans.push(Span::styled(hint, Style::default().fg(Color::Gray)));
+        }
     }
 
     let mode = Paragraph::new(Line::from(spans));
     frame.render_widget(mode, area);
+}
+
+fn mode_status_label(
+    mode: crate::app::AccessMode,
+    policy: crate::app::WriteApprovalPolicy,
+) -> &'static str {
+    match (mode, policy) {
+        (crate::app::AccessMode::ReadWrite, crate::app::WriteApprovalPolicy::AllowAllSession) => {
+            "Write (!)"
+        }
+        _ => mode.label(),
+    }
 }
 
 fn pending_write_approval_height(
@@ -480,7 +489,7 @@ fn approval_intent_summary(pending: &crate::app::PendingWriteApproval) -> String
 
 fn missing_intent_summary(tool_name: &str, target: &str) -> String {
     match tool_name {
-        "ApplyPatch" => format!("No reason provided for changing {target}"),
+        "ApplyPatches" => format!("No reason provided for changing {target}"),
         "WriteFile" => format!("No reason provided for creating {target}"),
         "DeletePath" => format!("No reason provided for deleting {target}"),
         _ => "No reason provided for this write request".to_string(),
@@ -982,12 +991,17 @@ fn push_mutation_tool_call_lines(
 }
 
 #[derive(Debug, Deserialize)]
-struct ApplyPatchPreviewArgs {
+struct ApplyPatchesPreviewArgs {
     filename: String,
-    old_text: String,
-    new_text: String,
+    patches: Vec<TextPatchPreview>,
     #[serde(default)]
     intent: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TextPatchPreview {
+    old_text: String,
+    new_text: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1021,10 +1035,13 @@ struct DiffPreviewLine {
 
 fn mutation_preview(tool_name: &str, raw_args: &str) -> Option<MutationPreview> {
     match tool_name {
-        "ApplyPatch" => {
-            let args: ApplyPatchPreviewArgs = serde_json::from_str(raw_args).ok()?;
-            let mut lines = diff_lines('-', &args.old_text, Color::Red);
-            lines.extend(diff_lines('+', &args.new_text, Color::Green));
+        "ApplyPatches" => {
+            let args: ApplyPatchesPreviewArgs = serde_json::from_str(raw_args).ok()?;
+            let mut lines = Vec::new();
+            for patch in args.patches {
+                lines.extend(diff_lines('-', &patch.old_text, Color::Red));
+                lines.extend(diff_lines('+', &patch.new_text, Color::Green));
+            }
             Some(MutationPreview {
                 target: args.filename,
                 summary: normalize_intent(args.intent.as_deref()),
@@ -1457,22 +1474,41 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(rendered.contains("Read-Write"));
+        assert!(rendered.contains("Write"));
+        assert!(!rendered.contains("approvals required"));
+    }
+
+    #[test]
+    fn mode_status_label_marks_session_preapproved_write_mode() {
+        assert_eq!(
+            mode_status_label(
+                crate::app::AccessMode::ReadWrite,
+                crate::app::WriteApprovalPolicy::AskEveryTime,
+            ),
+            "Write"
+        );
+        assert_eq!(
+            mode_status_label(
+                crate::app::AccessMode::ReadWrite,
+                crate::app::WriteApprovalPolicy::AllowAllSession,
+            ),
+            "Write (!)"
+        );
     }
 
     #[test]
     fn pending_write_approval_height_matches_wrapped_summary_lines() {
         let short = crate::app::PendingWriteApproval {
             request_id: "call-1".into(),
-            tool_name: "ApplyPatch".into(),
-            arguments: "{\"filename\":\"src/lib.rs\",\"old_text\":\"a\",\"new_text\":\"b\",\"intent\":\"Fix startup\"}".into(),
+            tool_name: "ApplyPatches".into(),
+            arguments: "{\"filename\":\"src/lib.rs\",\"patches\":[{\"old_text\":\"a\",\"new_text\":\"b\"}],\"intent\":\"Fix startup\"}".into(),
         };
         assert_eq!(pending_write_approval_height(&short, 120), 6);
 
         let wrapped = crate::app::PendingWriteApproval {
             request_id: "call-2".into(),
-            tool_name: "ApplyPatch".into(),
-            arguments: "{\"filename\":\"src/lib.rs\",\"old_text\":\"a\",\"new_text\":\"b\",\"intent\":\"Fix the broken startup path so the app launches again after config bootstrap changes\"}".into(),
+            tool_name: "ApplyPatches".into(),
+            arguments: "{\"filename\":\"src/lib.rs\",\"patches\":[{\"old_text\":\"a\",\"new_text\":\"b\"}],\"intent\":\"Fix the broken startup path so the app launches again after config bootstrap changes\"}".into(),
         };
         assert!(pending_write_approval_height(&wrapped, 36) > 6);
     }
@@ -1488,8 +1524,8 @@ mod tests {
             reply_id: 1,
             event: crate::llm::StreamEvent::WriteApprovalRequested {
                 request_id: "call-1".into(),
-                tool_name: "ApplyPatch".into(),
-                arguments: "{\"filename\":\"src/lib.rs\",\"old_text\":\"a\",\"new_text\":\"b\",\"intent\":\"Fix the broken startup path so the app launches again\"}".into(),
+                tool_name: "ApplyPatches".into(),
+                arguments: "{\"filename\":\"src/lib.rs\",\"patches\":[{\"old_text\":\"a\",\"new_text\":\"b\"}],\"intent\":\"Fix the broken startup path so the app launches again\"}".into(),
             },
         });
 
@@ -1557,7 +1593,7 @@ mod tests {
     }
 
     #[test]
-    fn render_shows_apply_patch_tool_call_as_diff() {
+    fn render_shows_apply_patches_tool_call_as_diff() {
         let backend = TestBackend::new(100, 12);
         let mut terminal = Terminal::new(backend).expect("test terminal");
         let mut app = App::new(true, true, "gpt-5-mini", ReasoningEffort::Medium);
@@ -1566,8 +1602,8 @@ mod tests {
         app.apply(Action::StreamEvent {
             reply_id: 1,
             event: crate::llm::StreamEvent::ToolCall {
-                name: "ApplyPatch".into(),
-                arguments: r#"{"filename":"src/lib.rs","old_text":"old line","new_text":"new line","intent":"Fix the broken startup path so the app launches again"}"#.into(),
+                name: "ApplyPatches".into(),
+                arguments: r#"{"filename":"src/lib.rs","patches":[{"old_text":"old line","new_text":"new line"}],"intent":"Fix the broken startup path so the app launches again"}"#.into(),
             },
         });
 
@@ -1576,7 +1612,7 @@ mod tests {
             .expect("render succeeds");
 
         let rendered = buffer_string(terminal.backend());
-        assert!(rendered.contains("ApplyPatch"));
+        assert!(rendered.contains("ApplyPatches"));
         assert!(rendered.contains("src/lib.rs"));
         assert!(rendered.contains("why: Fix the broken startup path so the app launches again"));
         assert!(rendered.contains("- old line"));
