@@ -430,8 +430,8 @@ fn azure_openai_base_url(config: &AppConfig) -> String {
 
 fn mode_preamble(access_mode: AccessMode) -> String {
     match access_mode {
-        AccessMode::ReadOnly => "You are oat. Answer only the user's most recent message directly and helpfully. You are currently in read-only mode. Use the provided readonly workspace tools when they are useful. If the user asks you to edit, create, or delete files, explain that oat is in read-only mode and the user must switch to write mode before you can modify the workspace. Within a single turn, you may call tools multiple times and use prior tool calls and tool outputs from that same turn. Do not rely on memory from previous turns.".to_string(),
-        AccessMode::ReadWrite => "You are oat. Answer only the user's most recent message directly and helpfully. You are currently in write mode. Read and mutation tools may be available. Any mutation tool call requires user approval before it executes, and the user may deny it. For every mutation tool call, include the required `intent` field as a short sentence explaining why the change is needed for the user. Explain purpose or outcome, not the mechanical edit. If a write is denied, acknowledge that and continue from the current workspace state. Within a single turn, you may call tools multiple times and use prior tool calls and tool outputs from that same turn. Do not rely on memory from previous turns.".to_string(),
+        AccessMode::ReadOnly => "You are oat, an opinionated agent thing. If you refer to yourself, use exactly the name `oat` in lowercase. If the user asks who you are, answer with `oat - an opinionated agent thing` and then briefly describe what you can do in this workspace. Keep that capability summary concise and practical. In read-only mode, emphasize that you can inspect files, explain code, answer questions, and use read-only workspace tools, but cannot modify the workspace. Do not call yourself an AI assistant, and do not describe yourself as helping via an API. Answer only the user's most recent message directly and helpfully. You are currently in read-only mode. Use the provided readonly workspace tools when they are useful. If the user asks you to edit, create, or delete files, explain that oat is in read-only mode and the user must switch to write mode before you can modify the workspace. Within a single turn, you may call tools multiple times and use prior tool calls and tool outputs from that same turn. Do not rely on memory from previous turns.".to_string(),
+        AccessMode::ReadWrite => "You are oat, an opinionated agent thing. If you refer to yourself, use exactly the name `oat` in lowercase. If the user asks who you are, answer with `oat - an opinionated agent thing` and then briefly describe what you can do in this workspace. Keep that capability summary concise and practical. In write mode, emphasize that you can inspect files, explain code, and make workspace changes with tool use and user approval for mutations. Do not call yourself an AI assistant, and do not describe yourself as helping via an API. Answer only the user's most recent message directly and helpfully. You are currently in write mode. Read and mutation tools may be available. Any mutation tool call requires user approval before it executes, and the user may deny it. For every mutation tool call, include the required `intent` field as a short sentence explaining why the change is needed for the user. Explain purpose or outcome, not the mechanical edit. If a write is denied, acknowledge that and continue from the current workspace state. Within a single turn, you may call tools multiple times and use prior tool calls and tool outputs from that same turn. Do not rely on memory from previous turns.".to_string(),
     }
 }
 
@@ -522,6 +522,12 @@ mod tests {
     #[test]
     fn read_only_mode_preamble_mentions_switching_to_write_mode() {
         let preamble = mode_preamble(AccessMode::ReadOnly);
+        assert!(preamble.contains("You are oat, an opinionated agent thing."));
+        assert!(preamble.contains("use exactly the name `oat` in lowercase"));
+        assert!(preamble.contains("answer with `oat - an opinionated agent thing`"));
+        assert!(preamble.contains("Keep that capability summary concise and practical"));
+        assert!(preamble.contains("inspect files, explain code, answer questions"));
+        assert!(preamble.contains("Do not call yourself an AI assistant"));
         assert!(preamble.contains("read-only mode"));
         assert!(preamble.contains("switch to write mode"));
     }
@@ -538,6 +544,36 @@ mod tests {
         assert!(service.tool_names.contains(&"ApplyPatches".to_string()));
         assert!(service.tool_names.contains(&"WriteFile".to_string()));
         assert!(service.tool_names.contains(&"DeletePath".to_string()));
+        assert!(
+            service
+                .preamble
+                .contains("You are oat, an opinionated agent thing.")
+        );
+        assert!(
+            service
+                .preamble
+                .contains("use exactly the name `oat` in lowercase")
+        );
+        assert!(
+            service
+                .preamble
+                .contains("answer with `oat - an opinionated agent thing`")
+        );
+        assert!(
+            service
+                .preamble
+                .contains("Keep that capability summary concise and practical")
+        );
+        assert!(
+            service
+                .preamble
+                .contains("make workspace changes with tool use and user approval")
+        );
+        assert!(
+            service
+                .preamble
+                .contains("Do not call yourself an AI assistant")
+        );
         assert!(service.preamble.contains("write mode"));
         assert!(service.preamble.contains("intent"));
         assert!(service.preamble.contains("why"));
