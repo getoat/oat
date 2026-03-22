@@ -29,17 +29,17 @@ pub type Tui = Terminal<CrosstermBackend<Stdout>>;
 pub fn run(terminal: &mut Tui, config: AppConfig) -> Result<(), Box<dyn Error>> {
     let runtime = Runtime::new()?;
     let mut config = config;
-    let mut llm = {
-        let _guard = runtime.enter();
-        LlmService::from_config(&config)?
-    };
-    let (stream_tx, mut stream_rx) = mpsc::unbounded_channel();
     let mut app = App::new(
         config.ui.show_thinking,
         config.ui.show_tool_output,
         config.azure.model_name.clone(),
         config.azure.reasoning_effort,
     );
+    let mut llm = {
+        let _guard = runtime.enter();
+        LlmService::from_config(&config, app.mode(), llm::WriteApprovalController::default())?
+    };
+    let (stream_tx, mut stream_rx) = mpsc::unbounded_channel();
     let stats = StatsStore::new();
     let tick_rate = Duration::from_millis(125);
     let mut last_tick = Instant::now();
@@ -63,7 +63,9 @@ pub fn run(terminal: &mut Tui, config: AppConfig) -> Result<(), Box<dyn Error>> 
 
         let timeout = tick_rate.saturating_sub(last_tick.elapsed());
         if event::poll(timeout)? {
-            if let Some(action) = input::map_event(event::read()?) {
+            if let Some(action) =
+                input::map_event_with_state(event::read()?, app.has_pending_write_approval())
+            {
                 if let Some(effect) = app.apply(action) {
                     if let Err(error) = run_effect(
                         &runtime,
@@ -147,13 +149,14 @@ fn run_effect(
         }
         Effect::RotateSession => {
             stats.rotate_session()?;
+            llm.reset_write_approvals();
             Ok(())
         }
         Effect::SetReasoningEffort { reasoning_effort } => {
             let updated_config = AppConfig::set_default_reasoning_effort(reasoning_effort)?;
             let rebuilt = {
                 let _guard = runtime.enter();
-                LlmService::from_config(&updated_config)?
+                LlmService::from_config(&updated_config, app.mode(), llm.approvals())?
             };
             *config = updated_config;
             *llm = rebuilt;
@@ -163,6 +166,23 @@ fn run_effect(
                 reasoning_effort.as_str(),
                 app.model_name()
             ));
+            Ok(())
+        }
+        Effect::RebuildLlm { access_mode } => {
+            let rebuilt = {
+                let _guard = runtime.enter();
+                LlmService::from_config(config, access_mode, llm.approvals())?
+            };
+            *llm = rebuilt;
+            Ok(())
+        }
+        Effect::ResolveWriteApproval {
+            request_id,
+            decision,
+        } => {
+            if !llm.resolve_write_approval(&request_id, decision) {
+                app.push_error_message("Write approval request is no longer active.");
+            }
             Ok(())
         }
         Effect::CopyToClipboard { text } => {

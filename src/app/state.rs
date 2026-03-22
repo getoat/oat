@@ -116,6 +116,26 @@ impl AccessMode {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WriteApprovalDecision {
+    AllowOnce,
+    AllowAllSession,
+    Deny,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WriteApprovalPolicy {
+    AskEveryTime,
+    AllowAllSession,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingWriteApproval {
+    pub request_id: String,
+    pub tool_name: String,
+    pub arguments: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Speaker {
     User,
     Agent,
@@ -179,6 +199,8 @@ struct HistorySelectionPoint {
 #[derive(Debug)]
 pub struct App {
     pub(super) mode: AccessMode,
+    pub(super) write_approval_policy: WriteApprovalPolicy,
+    pub(super) pending_write_approval: Option<PendingWriteApproval>,
     pub(super) should_quit: bool,
     pub(super) composer: TextArea<'static>,
     pub(super) entries: Vec<TranscriptEntry>,
@@ -210,11 +232,13 @@ impl App {
         let model_name = model_name.into();
         Self {
             mode: AccessMode::ReadOnly,
+            write_approval_policy: WriteApprovalPolicy::AskEveryTime,
+            pending_write_approval: None,
             should_quit: false,
             composer: new_composer(),
             entries: vec![TranscriptEntry::Message(ChatMessage {
                 speaker: Speaker::Agent,
-                text: welcome_message(&model_name),
+                text: welcome_message(&model_name, AccessMode::ReadOnly),
                 style: MessageStyle::Plain,
             })],
             session_history: Vec::new(),
@@ -238,6 +262,18 @@ impl App {
 
     pub fn mode(&self) -> AccessMode {
         self.mode
+    }
+
+    pub fn write_approval_policy(&self) -> WriteApprovalPolicy {
+        self.write_approval_policy
+    }
+
+    pub fn pending_write_approval(&self) -> Option<&PendingWriteApproval> {
+        self.pending_write_approval.as_ref()
+    }
+
+    pub fn has_pending_write_approval(&self) -> bool {
+        self.pending_write_approval.is_some()
     }
 
     pub fn should_quit(&self) -> bool {
@@ -376,11 +412,13 @@ impl App {
     pub(super) fn reset_session(&mut self) {
         self.entries = vec![TranscriptEntry::Message(ChatMessage {
             speaker: Speaker::Agent,
-            text: welcome_message(&self.model_name),
+            text: welcome_message(&self.model_name, self.mode),
             style: MessageStyle::Plain,
         })];
         self.session_history.clear();
         self.pending_reply = None;
+        self.pending_write_approval = None;
+        self.write_approval_policy = WriteApprovalPolicy::AskEveryTime;
         self.resume_history_follow();
         self.history_total_lines = 0;
         self.clear_composer();
@@ -396,7 +434,49 @@ impl App {
 
     pub(crate) fn cancel_pending_reply(&mut self) {
         self.pending_reply = None;
+        self.pending_write_approval = None;
         self.push_error_message("Request cancelled.");
+    }
+
+    pub(super) fn begin_write_approval(
+        &mut self,
+        request_id: String,
+        tool_name: String,
+        arguments: String,
+    ) {
+        let approval = PendingWriteApproval {
+            request_id,
+            tool_name,
+            arguments,
+        };
+        self.push_agent_message(format!(
+            "Write approval required for `{}`.",
+            approval.tool_name
+        ));
+        self.pending_write_approval = Some(approval);
+    }
+
+    pub(super) fn resolve_write_approval(
+        &mut self,
+        decision: WriteApprovalDecision,
+    ) -> Option<PendingWriteApproval> {
+        let pending = self.pending_write_approval.take()?;
+        match decision {
+            WriteApprovalDecision::AllowOnce => {
+                self.push_agent_message(format!("Approved `{}` once.", pending.tool_name));
+            }
+            WriteApprovalDecision::AllowAllSession => {
+                self.write_approval_policy = WriteApprovalPolicy::AllowAllSession;
+                self.push_agent_message(format!(
+                    "Approved `{}` and all future writes for this session.",
+                    pending.tool_name
+                ));
+            }
+            WriteApprovalDecision::Deny => {
+                self.push_error_message(format!("Denied `{}`.", pending.tool_name));
+            }
+        }
+        Some(pending)
     }
 
     pub fn push_agent_message(&mut self, text: impl Into<String>) {
@@ -693,7 +773,8 @@ fn slice_line(line: &str, start: usize, end: usize) -> String {
         .collect()
 }
 
-fn welcome_message(model_name: &str) -> String {
+fn welcome_message(model_name: &str, mode: AccessMode) -> String {
+    let _ = mode;
     format!(
         "Loaded Azure model `{model_name}` from config. Send a message to start a one-shot response, or type / for commands."
     )
@@ -721,6 +802,11 @@ mod tests {
         let app = App::new(true, false, "gpt-5-mini", ReasoningEffort::Medium);
 
         assert_eq!(app.mode(), AccessMode::ReadOnly);
+        assert_eq!(
+            app.write_approval_policy(),
+            WriteApprovalPolicy::AskEveryTime
+        );
+        assert!(!app.has_pending_write_approval());
         assert!(!app.should_quit());
         assert!(!app.has_pending_reply());
         assert_eq!(app.entries().len(), 1);
@@ -807,5 +893,37 @@ mod tests {
         let selected = app.finish_history_selection(6, 3);
 
         assert_eq!(selected.as_deref(), Some("lpha\nbet"));
+    }
+
+    #[test]
+    fn beginning_write_approval_tracks_pending_request() {
+        let mut app = App::new(true, false, "gpt-5-mini", ReasoningEffort::Medium);
+
+        app.begin_write_approval(
+            "call-1".into(),
+            "ApplyPatch".into(),
+            "{\"filename\":\"src/lib.rs\"}".into(),
+        );
+
+        let pending = app.pending_write_approval().expect("pending approval");
+        assert_eq!(pending.request_id, "call-1");
+        assert_eq!(pending.tool_name, "ApplyPatch");
+    }
+
+    #[test]
+    fn allow_all_session_updates_policy_and_clears_pending_request() {
+        let mut app = App::new(true, false, "gpt-5-mini", ReasoningEffort::Medium);
+        app.begin_write_approval("call-1".into(), "WriteFile".into(), "{}".into());
+
+        let pending = app
+            .resolve_write_approval(WriteApprovalDecision::AllowAllSession)
+            .expect("pending approval");
+
+        assert_eq!(pending.request_id, "call-1");
+        assert_eq!(
+            app.write_approval_policy(),
+            WriteApprovalPolicy::AllowAllSession
+        );
+        assert!(!app.has_pending_write_approval());
     }
 }

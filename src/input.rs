@@ -8,15 +8,38 @@ use crate::app::Action;
 const MOUSE_SCROLL_LINES: usize = 3;
 
 pub fn map_event(event: Event) -> Option<Action> {
+    map_event_with_state(event, false)
+}
+
+pub fn map_event_with_state(event: Event, awaiting_write_approval: bool) -> Option<Action> {
     match event {
-        Event::Key(key) if key.kind == KeyEventKind::Press => Some(map_key_event(key)),
+        Event::Key(key) if key.kind == KeyEventKind::Press => {
+            Some(map_key_event(key, awaiting_write_approval))
+        }
         Event::Mouse(mouse) => map_mouse_event(mouse),
-        Event::Paste(text) => Some(Action::Paste(text)),
+        Event::Paste(text) => (!awaiting_write_approval).then_some(Action::Paste(text)),
         _ => None,
     }
 }
 
-fn map_key_event(key: KeyEvent) -> Action {
+fn map_key_event(key: KeyEvent, awaiting_write_approval: bool) -> Action {
+    if awaiting_write_approval {
+        return match (key.code, key.modifiers) {
+            (KeyCode::Esc, _) => Action::CancelPendingReply,
+            (KeyCode::Char('c'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
+                Action::ClearComposerOrQuit
+            }
+            (KeyCode::Char('a'), KeyModifiers::NONE) => Action::ApproveWriteOnce,
+            (KeyCode::Char('s'), KeyModifiers::NONE) => Action::ApproveWriteAllSession,
+            (KeyCode::Char('d'), KeyModifiers::NONE) => Action::DenyWrite,
+            (KeyCode::PageUp, _) => Action::ScrollHistoryPageUp,
+            (KeyCode::PageDown, _) => Action::ScrollHistoryPageDown,
+            (KeyCode::Home, _) => Action::ScrollHistoryToTop,
+            (KeyCode::End, _) => Action::ScrollHistoryToBottom,
+            _ => Action::Tick,
+        };
+    }
+
     match (key.code, key.modifiers) {
         (KeyCode::Esc, _) => Action::CancelPendingReply,
         (KeyCode::Char('c'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
@@ -145,6 +168,46 @@ mod tests {
     fn paste_maps_to_paste_action() {
         let action = map_event(Event::Paste("hello".into()));
         assert_eq!(action, Some(Action::Paste("hello".into())));
+    }
+
+    #[test]
+    fn approval_prompt_maps_a_s_d_keys_to_write_decisions() {
+        assert_eq!(
+            map_event_with_state(
+                Event::Key(key(KeyCode::Char('a'), KeyModifiers::NONE)),
+                true
+            ),
+            Some(Action::ApproveWriteOnce)
+        );
+        assert_eq!(
+            map_event_with_state(
+                Event::Key(key(KeyCode::Char('s'), KeyModifiers::NONE)),
+                true
+            ),
+            Some(Action::ApproveWriteAllSession)
+        );
+        assert_eq!(
+            map_event_with_state(
+                Event::Key(key(KeyCode::Char('d'), KeyModifiers::NONE)),
+                true
+            ),
+            Some(Action::DenyWrite)
+        );
+    }
+
+    #[test]
+    fn approval_prompt_ignores_regular_typing_and_paste() {
+        assert_eq!(
+            map_event_with_state(
+                Event::Key(key(KeyCode::Char('x'), KeyModifiers::NONE)),
+                true
+            ),
+            Some(Action::Tick)
+        );
+        assert_eq!(
+            map_event_with_state(Event::Paste("hello".into()), true),
+            None
+        );
     }
 
     #[test]

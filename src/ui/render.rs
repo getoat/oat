@@ -5,6 +5,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Padding, Paragraph, Wrap},
 };
+use serde::Deserialize;
 use tui_markdown::from_str as markdown_from_str;
 
 use crate::app::{
@@ -17,11 +18,14 @@ use super::theme::accent_color;
 const LOADING_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const MAX_VISIBLE_TOOL_ACTIVITY: usize = 5;
 const CODE_BLOCK_HORIZONTAL_PADDING: usize = 1;
-
 pub fn render(frame: &mut Frame, app: &mut App) {
     let screen = frame.area();
     let accent = accent_color(app.mode());
-    let input_height = app.composer_height().max(3);
+    let input_height = if let Some(pending) = app.pending_write_approval() {
+        pending_write_approval_height(pending, screen.width)
+    } else {
+        app.composer_height().max(3)
+    };
     let command_height = app.command_palette_height();
     let mut constraints = vec![Constraint::Min(1)];
     if command_height > 0 {
@@ -325,6 +329,11 @@ fn push_tool_activity_run_lines(
 }
 
 fn render_input(frame: &mut Frame, app: &mut App, area: Rect, accent: Color) {
+    if let Some(pending) = app.pending_write_approval() {
+        render_write_approval_prompt(frame, pending, area, accent);
+        return;
+    }
+
     let block = Block::default()
         .borders(Borders::ALL)
         .padding(Padding::horizontal(1))
@@ -336,6 +345,49 @@ fn render_input(frame: &mut Frame, app: &mut App, area: Rect, accent: Color) {
     app.composer_mut()
         .set_placeholder_style(Style::default().fg(Color::DarkGray));
     frame.render_widget(app.composer(), area);
+}
+
+fn render_write_approval_prompt(
+    frame: &mut Frame,
+    pending: &crate::app::PendingWriteApproval,
+    area: Rect,
+    accent: Color,
+) {
+    let mut lines = vec![Line::from(Span::styled(
+        approval_intent_summary(pending),
+        Style::default().fg(accent).add_modifier(Modifier::BOLD),
+    ))];
+
+    lines.push(Line::from(vec![
+        Span::styled(
+            "[a]",
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" allow once"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(
+            "[s]",
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" allow all this session"),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(
+            "[d]",
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" deny"),
+    ]));
+
+    let prompt = Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+        Block::default()
+            .title(" Write Approval Required ")
+            .borders(Borders::ALL)
+            .padding(Padding::horizontal(1))
+            .border_style(Style::default().fg(Color::Yellow)),
+    );
+    frame.render_widget(prompt, area);
 }
 
 fn render_command_palette(frame: &mut Frame, app: &App, area: Rect, accent: Color) {
@@ -368,7 +420,7 @@ fn render_command_palette(frame: &mut Frame, app: &App, area: Rect, accent: Colo
 }
 
 fn render_mode(frame: &mut Frame, app: &App, area: Rect, accent: Color) {
-    let mode = Paragraph::new(Line::from(vec![
+    let mut spans = vec![
         Span::styled(
             app.mode().label(),
             Style::default().fg(accent).add_modifier(Modifier::BOLD),
@@ -378,8 +430,61 @@ fn render_mode(frame: &mut Frame, app: &App, area: Rect, accent: Color) {
             app.model_name(),
             app.reasoning_effort().as_str(),
         )),
-    ]));
+    ];
+
+    if let Some(pending) = app.pending_write_approval() {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(
+            format!("Approval pending: {}", pending.tool_name),
+            Style::default().fg(Color::Yellow),
+        ));
+    } else {
+        let hint = match app.mode() {
+            crate::app::AccessMode::ReadOnly => "  Tab switches to write mode for edits",
+            crate::app::AccessMode::ReadWrite => match app.write_approval_policy() {
+                crate::app::WriteApprovalPolicy::AskEveryTime => {
+                    "  Write mode active  approvals required"
+                }
+                crate::app::WriteApprovalPolicy::AllowAllSession => {
+                    "  Write mode active  all writes approved this session"
+                }
+            },
+        };
+        spans.push(Span::styled(hint, Style::default().fg(Color::Gray)));
+    }
+
+    let mode = Paragraph::new(Line::from(spans));
     frame.render_widget(mode, area);
+}
+
+fn pending_write_approval_height(
+    pending: &crate::app::PendingWriteApproval,
+    panel_width: u16,
+) -> u16 {
+    let content_width = panel_width.saturating_sub(4) as usize;
+    let summary_lines = wrap_text(&approval_intent_summary(pending), content_width.max(1)).len();
+    (summary_lines + 3 + 2) as u16
+}
+
+fn approval_intent_summary(pending: &crate::app::PendingWriteApproval) -> String {
+    if let Some(preview) = mutation_preview(&pending.tool_name, &pending.arguments) {
+        if let Some(summary) = preview.summary.as_ref() {
+            return summary.clone();
+        }
+
+        return missing_intent_summary(&pending.tool_name, &preview.target);
+    }
+
+    "No reason provided for this write request".to_string()
+}
+
+fn missing_intent_summary(tool_name: &str, target: &str) -> String {
+    match tool_name {
+        "ApplyPatch" => format!("No reason provided for changing {target}"),
+        "WriteFile" => format!("No reason provided for creating {target}"),
+        "DeletePath" => format!("No reason provided for deleting {target}"),
+        _ => "No reason provided for this write request".to_string(),
+    }
 }
 
 fn command_palette_line(
@@ -784,6 +889,11 @@ fn push_pending_lines(
 
 fn push_tool_call_lines(lines: &mut Vec<Line<'static>>, tool_call: &ToolCall, width: usize) {
     let prefix = "◇ tool";
+    if let Some(preview) = mutation_preview(&tool_call.name, &tool_call.parameter) {
+        push_mutation_tool_call_lines(lines, prefix, &tool_call.name, &preview, width);
+        return;
+    }
+
     let body = format!("{}  {}", tool_call.name, tool_call.parameter);
     let content_width = width.saturating_sub(prefix.chars().count() + 2).max(1);
     let wrapped = wrap_text(&body, content_width);
@@ -792,7 +902,7 @@ fn push_tool_call_lines(lines: &mut Vec<Line<'static>>, tool_call: &ToolCall, wi
         if index == 0 {
             lines.push(Line::from(vec![
                 Span::styled(
-                    prefix,
+                    prefix.to_string(),
                     Style::default()
                         .fg(Color::Yellow)
                         .add_modifier(Modifier::BOLD),
@@ -808,6 +918,164 @@ fn push_tool_call_lines(lines: &mut Vec<Line<'static>>, tool_call: &ToolCall, wi
             )));
         }
     }
+}
+
+fn push_mutation_tool_call_lines(
+    lines: &mut Vec<Line<'static>>,
+    prefix: &str,
+    tool_name: &str,
+    preview: &MutationPreview,
+    width: usize,
+) {
+    let content_width = width.saturating_sub(prefix.chars().count() + 2).max(1);
+    let header = format!("{tool_name}  {}", preview.target);
+    let wrapped = wrap_text(&header, content_width);
+
+    for (index, chunk) in wrapped.into_iter().enumerate() {
+        if index == 0 {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    prefix.to_string(),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("  "),
+                Span::styled(chunk, Style::default().fg(Color::Gray)),
+            ]));
+        } else {
+            lines.push(Line::from(format!(
+                "{}{}",
+                " ".repeat(prefix.chars().count() + 2),
+                chunk
+            )));
+        }
+    }
+
+    let indent = " ".repeat(prefix.chars().count() + 2);
+    if let Some(summary) = &preview.summary {
+        let wrapped = wrap_text(&format!("why: {summary}"), content_width);
+        for chunk in wrapped {
+            lines.push(Line::from(Span::styled(
+                format!("{indent}{chunk}"),
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::ITALIC),
+            )));
+        }
+    }
+
+    for diff in &preview.lines {
+        let wrapped = wrap_text(&format!("{} {}", diff.prefix, diff.text), content_width);
+        for (index, chunk) in wrapped.into_iter().enumerate() {
+            let text = if index == 0 {
+                format!("{indent}{chunk}")
+            } else {
+                format!("{indent}{chunk}")
+            };
+            lines.push(Line::from(Span::styled(
+                text,
+                Style::default().fg(diff.color),
+            )));
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ApplyPatchPreviewArgs {
+    filename: String,
+    old_text: String,
+    new_text: String,
+    #[serde(default)]
+    intent: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WriteFilePreviewArgs {
+    filename: String,
+    content: String,
+    #[serde(default)]
+    intent: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DeletePathPreviewArgs {
+    path: String,
+    #[serde(default)]
+    intent: Option<String>,
+}
+
+#[derive(Debug)]
+struct MutationPreview {
+    target: String,
+    summary: Option<String>,
+    lines: Vec<DiffPreviewLine>,
+}
+
+#[derive(Debug)]
+struct DiffPreviewLine {
+    prefix: char,
+    text: String,
+    color: Color,
+}
+
+fn mutation_preview(tool_name: &str, raw_args: &str) -> Option<MutationPreview> {
+    match tool_name {
+        "ApplyPatch" => {
+            let args: ApplyPatchPreviewArgs = serde_json::from_str(raw_args).ok()?;
+            let mut lines = diff_lines('-', &args.old_text, Color::Red);
+            lines.extend(diff_lines('+', &args.new_text, Color::Green));
+            Some(MutationPreview {
+                target: args.filename,
+                summary: normalize_intent(args.intent.as_deref()),
+                lines,
+            })
+        }
+        "WriteFile" => {
+            let args: WriteFilePreviewArgs = serde_json::from_str(raw_args).ok()?;
+            Some(MutationPreview {
+                target: args.filename,
+                summary: normalize_intent(args.intent.as_deref()),
+                lines: diff_lines('+', &args.content, Color::Green),
+            })
+        }
+        "DeletePath" => {
+            let args: DeletePathPreviewArgs = serde_json::from_str(raw_args).ok()?;
+            Some(MutationPreview {
+                target: args.path.clone(),
+                summary: normalize_intent(args.intent.as_deref()),
+                lines: vec![DiffPreviewLine {
+                    prefix: '-',
+                    text: args.path,
+                    color: Color::Red,
+                }],
+            })
+        }
+        _ => None,
+    }
+}
+
+fn normalize_intent(intent: Option<&str>) -> Option<String> {
+    let intent = intent?;
+    let normalized = intent.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!normalized.is_empty()).then_some(normalized)
+}
+
+fn diff_lines(prefix: char, text: &str, color: Color) -> Vec<DiffPreviewLine> {
+    let lines = if text.is_empty() {
+        vec!["(empty)".to_string()]
+    } else {
+        text.lines().map(ToOwned::to_owned).collect::<Vec<_>>()
+    };
+
+    lines
+        .into_iter()
+        .map(|text| DiffPreviewLine {
+            prefix,
+            text,
+            color,
+        })
+        .collect()
 }
 
 fn push_tool_result_lines(
@@ -1193,6 +1461,56 @@ mod tests {
     }
 
     #[test]
+    fn pending_write_approval_height_matches_wrapped_summary_lines() {
+        let short = crate::app::PendingWriteApproval {
+            request_id: "call-1".into(),
+            tool_name: "ApplyPatch".into(),
+            arguments: "{\"filename\":\"src/lib.rs\",\"old_text\":\"a\",\"new_text\":\"b\",\"intent\":\"Fix startup\"}".into(),
+        };
+        assert_eq!(pending_write_approval_height(&short, 120), 6);
+
+        let wrapped = crate::app::PendingWriteApproval {
+            request_id: "call-2".into(),
+            tool_name: "ApplyPatch".into(),
+            arguments: "{\"filename\":\"src/lib.rs\",\"old_text\":\"a\",\"new_text\":\"b\",\"intent\":\"Fix the broken startup path so the app launches again after config bootstrap changes\"}".into(),
+        };
+        assert!(pending_write_approval_height(&wrapped, 36) > 6);
+    }
+
+    #[test]
+    fn render_replaces_input_with_three_line_write_approval_panel() {
+        let backend = TestBackend::new(120, 12);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut app = App::new(true, false, "gpt-5-mini", ReasoningEffort::Medium);
+        app.composer_mut().insert_str("edit this file");
+        app.apply(Action::SubmitMessage);
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: crate::llm::StreamEvent::WriteApprovalRequested {
+                request_id: "call-1".into(),
+                tool_name: "ApplyPatch".into(),
+                arguments: "{\"filename\":\"src/lib.rs\",\"old_text\":\"a\",\"new_text\":\"b\",\"intent\":\"Fix the broken startup path so the app launches again\"}".into(),
+            },
+        });
+
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render succeeds");
+
+        let rendered = buffer_string(terminal.backend());
+        let lines = buffer_lines(terminal.backend());
+
+        assert!(rendered.contains("Fix the broken startup path so the app launches again"));
+        assert!(lines.iter().any(|line| line.contains("[a] allow once")));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("[s] allow all this session"))
+        );
+        assert!(lines.iter().any(|line| line.contains("[d] deny")));
+    }
+
+    #[test]
     fn message_style_marks_thinking_as_italic() {
         let style = message_style(MessageStyle::Thinking);
         assert!(style.add_modifier.contains(Modifier::ITALIC));
@@ -1236,6 +1554,43 @@ mod tests {
         assert!(rendered.contains("↳ result"));
         assert!(rendered.contains("recursive"));
         assert!(rendered.contains("src/main.rs"));
+    }
+
+    #[test]
+    fn render_shows_apply_patch_tool_call_as_diff() {
+        let backend = TestBackend::new(100, 12);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut app = App::new(true, true, "gpt-5-mini", ReasoningEffort::Medium);
+        app.composer_mut().insert_str("show patch tool");
+        app.apply(Action::SubmitMessage);
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: crate::llm::StreamEvent::ToolCall {
+                name: "ApplyPatch".into(),
+                arguments: r#"{"filename":"src/lib.rs","old_text":"old line","new_text":"new line","intent":"Fix the broken startup path so the app launches again"}"#.into(),
+            },
+        });
+
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render succeeds");
+
+        let rendered = buffer_string(terminal.backend());
+        assert!(rendered.contains("ApplyPatch"));
+        assert!(rendered.contains("src/lib.rs"));
+        assert!(rendered.contains("why: Fix the broken startup path so the app launches again"));
+        assert!(rendered.contains("- old line"));
+        assert!(rendered.contains("+ new line"));
+        assert!(word_has_foreground(
+            terminal.backend().buffer(),
+            "old",
+            Color::Red
+        ));
+        assert!(word_has_foreground(
+            terminal.backend().buffer(),
+            "new",
+            Color::Green
+        ));
     }
 
     #[test]
@@ -1906,6 +2261,32 @@ mod tests {
                     {
                         return true;
                     }
+                }
+            }
+        }
+
+        false
+    }
+
+    fn word_has_foreground(
+        buffer: &ratatui::buffer::Buffer,
+        word: &str,
+        foreground: Color,
+    ) -> bool {
+        let width = buffer.area.width as usize;
+        let symbols = word.chars().map(|ch| ch.to_string()).collect::<Vec<_>>();
+
+        for row in buffer.content.chunks(width) {
+            for start in 0..=row.len().saturating_sub(symbols.len()) {
+                if row[start..start + symbols.len()]
+                    .iter()
+                    .map(|cell| cell.symbol())
+                    .eq(symbols.iter().map(String::as_str))
+                    && row[start..start + symbols.len()]
+                        .iter()
+                        .all(|cell| cell.fg == foreground)
+                {
+                    return true;
                 }
             }
         }

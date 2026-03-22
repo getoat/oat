@@ -3,7 +3,7 @@ use rig::completion::Message as RigMessage;
 
 use super::state::{
     App, ChatMessage, MessageStyle, PendingReply, SlashCommand, Speaker, ToolCall, ToolResultEntry,
-    TranscriptEntry,
+    TranscriptEntry, WriteApprovalDecision,
 };
 use crate::config::ReasoningEffort;
 use crate::llm::StreamEvent;
@@ -23,6 +23,9 @@ pub enum Action {
     ScrollHistoryDown { lines: usize },
     InsertComposerNewline,
     SubmitMessage,
+    ApproveWriteOnce,
+    ApproveWriteAllSession,
+    DenyWrite,
     Editor(Input),
     Paste(String),
     StartHistorySelection { column: u16, row: u16 },
@@ -43,6 +46,13 @@ pub enum Effect {
     RotateSession,
     SetReasoningEffort {
         reasoning_effort: ReasoningEffort,
+    },
+    RebuildLlm {
+        access_mode: super::state::AccessMode,
+    },
+    ResolveWriteApproval {
+        request_id: String,
+        decision: WriteApprovalDecision,
     },
     CopyToClipboard {
         text: String,
@@ -75,7 +85,9 @@ impl App {
             }
             Action::ToggleMode => {
                 self.mode.toggle();
-                None
+                Some(Effect::RebuildLlm {
+                    access_mode: self.mode(),
+                })
             }
             Action::SelectPreviousCommand => {
                 if self.command_palette_visible() {
@@ -118,16 +130,37 @@ impl App {
                 None
             }
             Action::InsertComposerNewline => {
+                if self.has_pending_write_approval() {
+                    return None;
+                }
                 self.composer.insert_newline();
                 None
             }
             Action::SubmitMessage => submit_message(self),
+            Action::ApproveWriteOnce => resolve_write_approval(
+                apply_write_approval(self, WriteApprovalDecision::AllowOnce),
+                WriteApprovalDecision::AllowOnce,
+            ),
+            Action::ApproveWriteAllSession => resolve_write_approval(
+                apply_write_approval(self, WriteApprovalDecision::AllowAllSession),
+                WriteApprovalDecision::AllowAllSession,
+            ),
+            Action::DenyWrite => resolve_write_approval(
+                apply_write_approval(self, WriteApprovalDecision::Deny),
+                WriteApprovalDecision::Deny,
+            ),
             Action::Editor(input) => {
+                if self.has_pending_write_approval() {
+                    return None;
+                }
                 self.composer.input(input);
                 self.sync_command_selection();
                 None
             }
             Action::Paste(text) => {
+                if self.has_pending_write_approval() {
+                    return None;
+                }
                 self.composer.insert_str(text);
                 self.sync_command_selection();
                 None
@@ -156,6 +189,10 @@ impl App {
 }
 
 fn submit_message(app: &mut App) -> Option<Effect> {
+    if app.has_pending_write_approval() {
+        return None;
+    }
+
     if app.command_query().is_some() {
         let command_name = app.command_name().unwrap_or_default().to_owned();
         let arguments = app.command_arguments().unwrap_or_default().to_owned();
@@ -283,14 +320,23 @@ fn on_stream_event(app: &mut App, reply_id: u64, event: StreamEvent) {
                     output,
                 }));
         }
+        StreamEvent::WriteApprovalRequested {
+            request_id,
+            tool_name,
+            arguments,
+        } => {
+            app.begin_write_approval(request_id, tool_name, arguments);
+        }
         StreamEvent::Finished { history } => {
             if let Some(history) = history {
                 app.replace_session_history(history);
             }
             app.pending_reply = None;
+            app.pending_write_approval = None;
         }
         StreamEvent::Failed(error) => {
             app.pending_reply = None;
+            app.pending_write_approval = None;
             app.entries.push(TranscriptEntry::Message(ChatMessage {
                 speaker: Speaker::Agent,
                 text: format!("Request failed: {error}"),
@@ -346,6 +392,21 @@ fn append_stream_reasoning(app: &mut App, delta: &str) {
         style: MessageStyle::Thinking,
     }));
     pending.reasoning_entry_index = Some(app.entries.len() - 1);
+}
+
+fn apply_write_approval(app: &mut App, decision: WriteApprovalDecision) -> Option<String> {
+    app.resolve_write_approval(decision)
+        .map(|pending| pending.request_id)
+}
+
+fn resolve_write_approval(
+    request_id: Option<String>,
+    decision: WriteApprovalDecision,
+) -> Option<Effect> {
+    request_id.map(|request_id| Effect::ResolveWriteApproval {
+        request_id,
+        decision,
+    })
 }
 
 #[cfg(test)]

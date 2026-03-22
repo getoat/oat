@@ -14,6 +14,9 @@ use serde_json::json;
 const MAX_READFILE_LIMIT: usize = 300;
 const MAX_GREP_MATCHES: usize = 100;
 const MAX_LIST_ENTRIES: usize = 400;
+const APPLY_PATCH_TOOL_NAME: &str = "ApplyPatch";
+const WRITE_FILE_TOOL_NAME: &str = "WriteFile";
+const DELETE_PATH_TOOL_NAME: &str = "DeletePath";
 
 #[derive(Debug)]
 struct VisibleEntry {
@@ -42,6 +45,21 @@ pub struct GrepTool {
     root: PathBuf,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ApplyPatchTool {
+    root: PathBuf,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WriteFileTool {
+    root: PathBuf,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DeletePathTool {
+    root: PathBuf,
+}
+
 impl ListTool {
     pub fn new(root: PathBuf) -> Self {
         Self { root }
@@ -61,6 +79,24 @@ impl ReadFilesTool {
 }
 
 impl GrepTool {
+    pub fn new(root: PathBuf) -> Self {
+        Self { root }
+    }
+}
+
+impl ApplyPatchTool {
+    pub fn new(root: PathBuf) -> Self {
+        Self { root }
+    }
+}
+
+impl WriteFileTool {
+    pub fn new(root: PathBuf) -> Self {
+        Self { root }
+    }
+}
+
+impl DeletePathTool {
     pub fn new(root: PathBuf) -> Self {
         Self { root }
     }
@@ -89,6 +125,30 @@ pub struct GrepArgs {
     pub pattern: String,
     pub path: String,
     pub recursive: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ApplyPatchArgs {
+    pub filename: String,
+    pub old_text: String,
+    pub new_text: String,
+    #[serde(default)]
+    pub intent: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WriteFileArgs {
+    pub filename: String,
+    pub content: String,
+    #[serde(default)]
+    pub intent: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DeletePathArgs {
+    pub path: String,
+    #[serde(default)]
+    pub intent: Option<String>,
 }
 
 #[derive(Debug)]
@@ -283,6 +343,114 @@ impl Tool for GrepTool {
     }
 }
 
+impl Tool for ApplyPatchTool {
+    const NAME: &'static str = APPLY_PATCH_TOOL_NAME;
+    type Error = ToolExecError;
+    type Args = ApplyPatchArgs;
+    type Output = String;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        ToolDefinition {
+            name: Self::NAME.to_string(),
+            description: "Replace exactly one matching text snippet in an existing workspace file. Fails if the old text is missing or appears more than once. Always include intent as a short plain-language reason that explains why the change is needed, not just what text is changing.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "filename": {
+                        "type": "string",
+                        "description": "File path relative to the current workspace root."
+                    },
+                    "old_text": {
+                        "type": "string",
+                        "description": "Exact existing text to replace. Must appear exactly once."
+                    },
+                    "new_text": {
+                        "type": "string",
+                        "description": "Replacement text."
+                    },
+                    "intent": {
+                        "type": "string",
+                        "description": "Short sentence explaining why this change is needed for the user. Focus on purpose or outcome, not the mechanical text replacement."
+                    }
+                },
+                "required": ["filename", "old_text", "new_text", "intent"]
+            }),
+        }
+    }
+
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        edit_file(&self.root, &args.filename, &args.old_text, &args.new_text)
+    }
+}
+
+impl Tool for WriteFileTool {
+    const NAME: &'static str = WRITE_FILE_TOOL_NAME;
+    type Error = ToolExecError;
+    type Args = WriteFileArgs;
+    type Output = String;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        ToolDefinition {
+            name: Self::NAME.to_string(),
+            description: "Create a new workspace file with the provided content. Fails if the file already exists. Missing parent directories will be created automatically. Always include intent as a short plain-language reason that explains why the new file is needed.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "filename": {
+                        "type": "string",
+                        "description": "File path relative to the current workspace root."
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Full file contents to write."
+                    },
+                    "intent": {
+                        "type": "string",
+                        "description": "Short sentence explaining why this new file is needed for the user. Focus on purpose or outcome, not the mechanical file creation."
+                    }
+                },
+                "required": ["filename", "content", "intent"]
+            }),
+        }
+    }
+
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        write_file(&self.root, &args.filename, &args.content)
+    }
+}
+
+impl Tool for DeletePathTool {
+    const NAME: &'static str = DELETE_PATH_TOOL_NAME;
+    type Error = ToolExecError;
+    type Args = DeletePathArgs;
+    type Output = String;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        ToolDefinition {
+            name: Self::NAME.to_string(),
+            description: "Delete a file or directory in the current workspace. Directory deletion is recursive. Always include intent as a short plain-language reason that explains why the removal is needed.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "File or directory path relative to the current workspace root."
+                    },
+                    "intent": {
+                        "type": "string",
+                        "description": "Short sentence explaining why this path should be removed for the user. Focus on purpose or outcome, not the mechanical deletion."
+                    }
+                },
+                "required": ["path", "intent"]
+            }),
+        }
+    }
+
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        delete_path(&self.root, &args.path)
+    }
+}
+
 fn list_directory(root: &Path, dir: &str, recursive: bool) -> Result<String, ToolExecError> {
     let target = resolve_path(root, dir)?;
     let metadata = fs::metadata(&target)?;
@@ -444,6 +612,82 @@ fn grep_workspace(
     Ok(matches.join("\n"))
 }
 
+fn edit_file(
+    root: &Path,
+    filename: &str,
+    old_text: &str,
+    new_text: &str,
+) -> Result<String, ToolExecError> {
+    if old_text.is_empty() {
+        return Err(ToolExecError::new("old_text must not be empty"));
+    }
+
+    let path = resolve_workspace_path(root, filename)?;
+    let metadata = fs::metadata(&path)?;
+    if !metadata.is_file() {
+        return Err(ToolExecError::new(format!("{filename} is not a file")));
+    }
+
+    let content = fs::read_to_string(&path)?;
+    let match_count = content.matches(old_text).count();
+    if match_count == 0 {
+        return Err(ToolExecError::new(format!(
+            "old_text was not found in {}",
+            display_path(root, &path)
+        )));
+    }
+    if match_count > 1 {
+        return Err(ToolExecError::new(format!(
+            "old_text matched {match_count} times in {}; it must match exactly once",
+            display_path(root, &path)
+        )));
+    }
+
+    let updated = content.replacen(old_text, new_text, 1);
+    fs::write(&path, updated)?;
+
+    Ok(format!("Updated {}.", display_path(root, &path)))
+}
+
+fn write_file(root: &Path, filename: &str, content: &str) -> Result<String, ToolExecError> {
+    let path = resolve_workspace_path(root, filename)?;
+    if path == root.canonicalize()? {
+        return Err(ToolExecError::new(
+            "refusing to write to the workspace root",
+        ));
+    }
+    if path.exists() {
+        return Err(ToolExecError::new(format!(
+            "{} already exists; use ApplyPatch to modify existing files",
+            display_path(root, &path)
+        )));
+    }
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&path, content)?;
+
+    Ok(format!("Wrote {}.", display_path(root, &path)))
+}
+
+fn delete_path(root: &Path, raw_path: &str) -> Result<String, ToolExecError> {
+    let path = resolve_workspace_path(root, raw_path)?;
+    let canonical_root = root.canonicalize()?;
+    if path == canonical_root {
+        return Err(ToolExecError::new("refusing to delete the workspace root"));
+    }
+
+    let metadata = fs::metadata(&path)?;
+    if metadata.is_dir() {
+        fs::remove_dir_all(&path)?;
+        Ok(format!("Deleted directory {}.", display_path(root, &path)))
+    } else {
+        fs::remove_file(&path)?;
+        Ok(format!("Deleted file {}.", display_path(root, &path)))
+    }
+}
+
 fn collect_visible_entries(
     target: &Path,
     recursive: bool,
@@ -522,13 +766,12 @@ fn is_path_visible(root: &Path, target: &Path) -> Result<bool, ToolExecError> {
 }
 
 fn resolve_path(root: &Path, raw_path: &str) -> Result<PathBuf, ToolExecError> {
+    let canonical_root = root.canonicalize()?;
     let joined = if Path::new(raw_path).is_absolute() {
         PathBuf::from(raw_path)
     } else {
-        root.join(raw_path)
+        canonical_root.join(raw_path)
     };
-
-    let canonical_root = root.canonicalize()?;
     let canonical_path = joined.canonicalize()?;
     if !canonical_path.starts_with(&canonical_root) {
         return Err(ToolExecError::new(format!(
@@ -537,6 +780,40 @@ fn resolve_path(root: &Path, raw_path: &str) -> Result<PathBuf, ToolExecError> {
     }
 
     Ok(canonical_path)
+}
+
+fn resolve_workspace_path(root: &Path, raw_path: &str) -> Result<PathBuf, ToolExecError> {
+    let canonical_root = root.canonicalize()?;
+    let joined = if Path::new(raw_path).is_absolute() {
+        PathBuf::from(raw_path)
+    } else {
+        canonical_root.join(raw_path)
+    };
+
+    let mut existing_ancestor = joined.clone();
+    while !existing_ancestor.exists() {
+        if !existing_ancestor.pop() {
+            return Err(ToolExecError::new(format!(
+                "path {raw_path} escapes the current workspace root"
+            )));
+        }
+    }
+
+    let canonical_ancestor = existing_ancestor.canonicalize()?;
+    if !canonical_ancestor.starts_with(&canonical_root) {
+        return Err(ToolExecError::new(format!(
+            "path {raw_path} escapes the current workspace root"
+        )));
+    }
+
+    if joined == existing_ancestor {
+        return Ok(canonical_ancestor);
+    }
+
+    let suffix = joined
+        .strip_prefix(&existing_ancestor)
+        .map_err(|error| ToolExecError::new(error.to_string()))?;
+    Ok(canonical_ancestor.join(suffix))
 }
 
 fn display_path(root: &Path, path: &Path) -> String {
@@ -591,6 +868,17 @@ mod tests {
         )
         .expect("lib file");
         fs::write(tree.root.join("README.md"), "hello\nworld\n").expect("readme");
+        tree
+    }
+
+    fn tree_with_mutation_targets() -> TempTree {
+        let tree = TempTree::new();
+        fs::create_dir_all(tree.root.join("src")).expect("dirs created");
+        fs::write(
+            tree.root.join("src/lib.rs"),
+            "fn alpha() {}\nfn beta() {}\n",
+        )
+        .expect("lib file");
         tree
     }
 
@@ -804,5 +1092,126 @@ mod tests {
                 .to_string()
                 .contains("escapes the current workspace root")
         );
+    }
+
+    #[test]
+    fn edit_file_replaces_exactly_one_match() {
+        let tree = tree_with_mutation_targets();
+
+        let output = edit_file(&tree.root, "src/lib.rs", "fn beta() {}", "fn gamma() {}")
+            .expect("edit succeeds");
+
+        assert_eq!(output, "Updated src/lib.rs.");
+        let updated = fs::read_to_string(tree.root.join("src/lib.rs")).expect("file exists");
+        assert_eq!(updated, "fn alpha() {}\nfn gamma() {}\n");
+    }
+
+    #[test]
+    fn edit_file_rejects_missing_match() {
+        let tree = tree_with_mutation_targets();
+
+        let error =
+            edit_file(&tree.root, "src/lib.rs", "fn missing() {}", "fn gamma() {}").unwrap_err();
+
+        assert!(error.to_string().contains("old_text was not found"));
+    }
+
+    #[test]
+    fn edit_file_rejects_multiple_matches() {
+        let tree = TempTree::new();
+        fs::write(tree.root.join("repeat.txt"), "same\nsame\n").expect("repeat file");
+
+        let error = edit_file(&tree.root, "repeat.txt", "same", "new").unwrap_err();
+
+        assert!(error.to_string().contains("must match exactly once"));
+    }
+
+    #[test]
+    fn write_file_creates_missing_parent_directories() {
+        let tree = TempTree::new();
+
+        let output = write_file(&tree.root, "nested/deep/file.txt", "hello").expect("write");
+
+        assert_eq!(output, "Wrote nested/deep/file.txt.");
+        let written =
+            fs::read_to_string(tree.root.join("nested/deep/file.txt")).expect("file exists");
+        assert_eq!(written, "hello");
+    }
+
+    #[test]
+    fn write_file_rejects_existing_file() {
+        let tree = tree_with_mutation_targets();
+
+        let error = write_file(&tree.root, "src/lib.rs", "replacement\n").expect_err("write");
+
+        assert!(
+            error
+                .to_string()
+                .contains("already exists; use ApplyPatch to modify existing files")
+        );
+    }
+
+    #[test]
+    fn delete_path_removes_files_and_directories() {
+        let tree = TempTree::new();
+        fs::create_dir_all(tree.root.join("dir/sub")).expect("dir");
+        fs::write(tree.root.join("dir/sub/file.txt"), "hello").expect("file");
+
+        let dir_output = delete_path(&tree.root, "dir").expect("delete dir");
+        assert_eq!(dir_output, "Deleted directory dir.");
+        assert!(!tree.root.join("dir").exists());
+
+        fs::write(tree.root.join("file.txt"), "hello").expect("file");
+        let file_output = delete_path(&tree.root, "file.txt").expect("delete file");
+        assert_eq!(file_output, "Deleted file file.txt.");
+        assert!(!tree.root.join("file.txt").exists());
+    }
+
+    #[test]
+    fn delete_path_rejects_workspace_root() {
+        let tree = TempTree::new();
+
+        let error = delete_path(&tree.root, ".").expect_err("root delete must fail");
+
+        assert!(error.to_string().contains("workspace root"));
+    }
+
+    #[test]
+    fn mutation_path_resolution_rejects_workspace_escape() {
+        let tree = TempTree::new();
+
+        let error = write_file(&tree.root, "../escape.txt", "bad").expect_err("escape must fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("escapes the current workspace root")
+        );
+    }
+
+    #[tokio::test]
+    async fn mutation_tool_definitions_require_intent() {
+        let root = PathBuf::from(".");
+        let apply_patch = ApplyPatchTool::new(root.clone())
+            .definition(String::new())
+            .await;
+        let write_file = WriteFileTool::new(root.clone())
+            .definition(String::new())
+            .await;
+        let delete_path = DeletePathTool::new(root).definition(String::new()).await;
+
+        for definition in [apply_patch, write_file, delete_path] {
+            assert_eq!(
+                definition.parameters["properties"]["intent"]["type"],
+                "string"
+            );
+            assert!(
+                definition.parameters["required"]
+                    .as_array()
+                    .expect("required array")
+                    .iter()
+                    .any(|value| value == "intent")
+            );
+        }
     }
 }
