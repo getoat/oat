@@ -3,6 +3,7 @@ mod command_history;
 pub mod config;
 pub mod input;
 pub mod llm;
+pub mod model_registry;
 pub mod stats;
 pub mod tools;
 pub mod ui;
@@ -162,6 +163,23 @@ impl EffectRunner<'_> {
             Effect::RotateSession => {
                 self.stats.rotate_session()?;
                 self.llm.reset_write_approvals();
+                Ok(())
+            }
+            Effect::SetModelSelection { model_name } => {
+                let reasoning_effort =
+                    app::compatible_reasoning_effort(&model_name, self.app.reasoning_effort());
+                let updated_config =
+                    AppConfig::set_default_model_selection(&model_name, reasoning_effort)?;
+                let rebuilt = self.rebuild_llm(&updated_config, self.app.mode())?;
+                *self.config = updated_config;
+                *self.llm = rebuilt;
+                self.app.set_model_name(model_name.clone());
+                self.app.set_reasoning_effort(reasoning_effort);
+                self.app.open_reasoning_picker();
+                self.app.push_agent_message(format!(
+                    "Model set to `{}` and saved to the active config. Select a reasoning effort.",
+                    model_name
+                ));
                 Ok(())
             }
             Effect::SetReasoningEffort { reasoning_effort } => {

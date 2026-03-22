@@ -4,7 +4,7 @@ api_key = "paste-your-azure-openai-api-key-here"
 
 # This should be the Azure deployment name you want to call.
 # In many setups it matches the model name, but Azure routes by deployment.
-model_name = "gpt-5-mini"
+model_name = "gpt-5.4-mini"
 
 # One of: minimal, low, medium, high, xhigh
 reasoning_effort = "medium"

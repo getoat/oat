@@ -5,12 +5,14 @@ use std::path::{Path, PathBuf};
 
 use crate::{
     config::ReasoningEffort,
+    model_registry,
     tools::{MutationPreview, mutation_preview, write_approval_summary},
 };
 
-const COMMANDS: [SlashCommand; 4] = [
+const COMMANDS: [SlashCommand; 5] = [
     SlashCommand::NewSession,
     SlashCommand::Stats,
+    SlashCommand::Model,
     SlashCommand::Effort,
     SlashCommand::Quit,
 ];
@@ -20,6 +22,7 @@ const DEFAULT_COMMAND_HISTORY_LIMIT: usize = 20;
 pub enum SlashCommand {
     NewSession,
     Stats,
+    Model,
     Effort,
     Quit,
 }
@@ -29,6 +32,7 @@ impl SlashCommand {
         match self {
             Self::NewSession => "/new",
             Self::Stats => "/stats",
+            Self::Model => "/model",
             Self::Effort => "/effort",
             Self::Quit => "/quit",
         }
@@ -38,6 +42,7 @@ impl SlashCommand {
         match self {
             Self::NewSession => &["/clear"],
             Self::Stats => &["/status"],
+            Self::Model => &["/models"],
             Self::Effort => &["/reasoning", "/thinking"],
             Self::Quit => &["/exit"],
         }
@@ -47,6 +52,7 @@ impl SlashCommand {
         match self {
             Self::NewSession => "Start a new session",
             Self::Stats => "Show session and historical usage stats",
+            Self::Model => "Select the model and reasoning effort",
             Self::Effort => "Set reasoning effort for the current model",
             Self::Quit => "Exit the app",
         }
@@ -54,6 +60,7 @@ impl SlashCommand {
 
     pub fn usage(self) -> Option<&'static str> {
         match self {
+            Self::Model => Some("/model"),
             Self::Effort => Some("/effort <minimal|low|medium|high|xhigh>"),
             Self::NewSession | Self::Stats | Self::Quit => None,
         }
@@ -96,6 +103,24 @@ impl SlashCommand {
             .into_iter()
             .find(|command| command.matches_exact(query))
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SelectionPicker {
+    Model {
+        selected_index: usize,
+    },
+    Reasoning {
+        model_name: String,
+        options: Vec<ReasoningEffort>,
+        selected_index: usize,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum PickerSelection {
+    Model(String),
+    Reasoning(ReasoningEffort),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -242,6 +267,7 @@ pub struct App {
     pub(super) model_name: String,
     pub(super) reasoning_effort: ReasoningEffort,
     pub(super) selected_command: SlashCommand,
+    pub(super) picker: Option<SelectionPicker>,
     pub(super) history: HistoryViewState,
     command_history: CommandRecallState,
 }
@@ -275,6 +301,7 @@ impl App {
             model_name,
             reasoning_effort,
             selected_command: SlashCommand::NewSession,
+            picker: None,
             history: HistoryViewState::default(),
             command_history: CommandRecallState::default(),
         }
@@ -335,6 +362,14 @@ impl App {
         self.composer.lines().len().max(1) as u16 + 2
     }
 
+    pub fn overlay_height(&self) -> u16 {
+        if let Some(picker) = self.selection_picker() {
+            return picker_height(picker);
+        }
+
+        self.command_palette_height()
+    }
+
     pub fn command_palette_height(&self) -> u16 {
         if !self.command_palette_visible() {
             return 0;
@@ -360,6 +395,10 @@ impl App {
         self.reasoning_effort
     }
 
+    pub fn current_model_info(&self) -> Option<&'static model_registry::ModelInfo> {
+        model_registry::find_model(&self.model_name)
+    }
+
     pub fn show_tool_output(&self) -> bool {
         self.show_tool_output
     }
@@ -369,7 +408,15 @@ impl App {
     }
 
     pub fn command_palette_visible(&self) -> bool {
-        self.command_query().is_some()
+        self.selection_picker().is_none() && self.command_query().is_some()
+    }
+
+    pub fn selection_picker(&self) -> Option<&SelectionPicker> {
+        self.picker.as_ref()
+    }
+
+    pub fn selection_picker_visible(&self) -> bool {
+        self.selection_picker().is_some()
     }
 
     pub fn history_is_pinned(&self) -> bool {
@@ -416,6 +463,20 @@ impl App {
             .or_else(|| commands.first().copied())
     }
 
+    pub fn supported_reasoning_levels(&self) -> Vec<ReasoningEffort> {
+        model_registry::reasoning_levels_for_model(&self.model_name)
+            .map(|levels| levels.to_vec())
+            .unwrap_or_else(|| {
+                vec![
+                    ReasoningEffort::Minimal,
+                    ReasoningEffort::Low,
+                    ReasoningEffort::Medium,
+                    ReasoningEffort::High,
+                    ReasoningEffort::XHigh,
+                ]
+            })
+    }
+
     pub(super) fn active_reply_id(&self) -> Option<u64> {
         self.pending_reply.as_ref().map(|pending| pending.id)
     }
@@ -460,6 +521,7 @@ impl App {
         self.write_approval_policy = WriteApprovalPolicy::AskEveryTime;
         self.resume_history_follow();
         self.history.reset();
+        self.picker = None;
         self.command_history.reset_navigation();
         self.clear_composer();
     }
@@ -470,6 +532,10 @@ impl App {
 
     pub(crate) fn set_reasoning_effort(&mut self, reasoning_effort: ReasoningEffort) {
         self.reasoning_effort = reasoning_effort;
+    }
+
+    pub(crate) fn set_model_name(&mut self, model_name: impl Into<String>) {
+        self.model_name = model_name.into();
     }
 
     #[cfg(test)]
@@ -599,6 +665,60 @@ impl App {
 
     pub(super) fn move_command_selection_down(&mut self) {
         self.move_command_selection(1);
+    }
+
+    pub(crate) fn open_model_picker(&mut self) {
+        let selected_index = model_registry::models()
+            .iter()
+            .position(|model| model.name == self.model_name)
+            .unwrap_or(0);
+        self.picker = Some(SelectionPicker::Model { selected_index });
+    }
+
+    pub(crate) fn open_reasoning_picker(&mut self) {
+        let Some(options) = model_registry::reasoning_levels_for_model(&self.model_name) else {
+            self.picker = None;
+            return;
+        };
+
+        let selected_index = options
+            .iter()
+            .position(|level| *level == self.reasoning_effort)
+            .unwrap_or(0);
+        self.picker = Some(SelectionPicker::Reasoning {
+            model_name: self.model_name.clone(),
+            options: options.to_vec(),
+            selected_index,
+        });
+    }
+
+    pub(super) fn cancel_picker(&mut self) -> bool {
+        self.picker.take().is_some()
+    }
+
+    pub(super) fn move_picker_selection_up(&mut self) {
+        self.move_picker_selection(-1);
+    }
+
+    pub(super) fn move_picker_selection_down(&mut self) {
+        self.move_picker_selection(1);
+    }
+
+    pub(super) fn apply_picker_selection(&mut self) -> Option<PickerSelection> {
+        let picker = self.picker.take()?;
+        match picker {
+            SelectionPicker::Model { selected_index } => model_registry::models()
+                .get(selected_index)
+                .map(|model| PickerSelection::Model(model.name.to_string())),
+            SelectionPicker::Reasoning {
+                options,
+                selected_index,
+                ..
+            } => options
+                .get(selected_index)
+                .copied()
+                .map(PickerSelection::Reasoning),
+        }
     }
 
     pub(super) fn move_composer_cursor_up(&mut self) {
@@ -745,6 +865,35 @@ impl App {
             && !commands.contains(&self.selected_command)
         {
             self.selected_command = command;
+        }
+    }
+
+    fn move_picker_selection(&mut self, direction: isize) {
+        let Some(picker) = self.picker.as_mut() else {
+            return;
+        };
+
+        match picker {
+            SelectionPicker::Model { selected_index } => {
+                let len = model_registry::models().len();
+                if len == 0 {
+                    return;
+                }
+                *selected_index =
+                    (*selected_index as isize + direction).rem_euclid(len as isize) as usize;
+            }
+            SelectionPicker::Reasoning {
+                options,
+                selected_index,
+                ..
+            } => {
+                let len = options.len();
+                if len == 0 {
+                    return;
+                }
+                *selected_index =
+                    (*selected_index as isize + direction).rem_euclid(len as isize) as usize;
+            }
         }
     }
 }
@@ -1032,6 +1181,16 @@ fn new_composer() -> TextArea<'static> {
     new_composer_with_text("")
 }
 
+fn picker_height(picker: &SelectionPicker) -> u16 {
+    let line_count = match picker {
+        SelectionPicker::Model { .. } => model_registry::models().len(),
+        SelectionPicker::Reasoning { options, .. } => options.len(),
+    }
+    .clamp(1, 4) as u16;
+
+    line_count + 2
+}
+
 fn split_command_query(query: &str) -> (&str, &str) {
     let mut parts = query.splitn(2, char::is_whitespace);
     let name = parts.next().unwrap_or("");
@@ -1116,6 +1275,7 @@ mod tests {
             vec![SlashCommand::NewSession]
         );
         assert_eq!(SlashCommand::filtered("/st"), vec![SlashCommand::Stats]);
+        assert_eq!(SlashCommand::filtered("/mo"), vec![SlashCommand::Model]);
         assert_eq!(SlashCommand::filtered("/ex"), vec![SlashCommand::Quit]);
         assert_eq!(SlashCommand::filtered("/th"), vec![SlashCommand::Effort]);
     }
@@ -1176,6 +1336,55 @@ mod tests {
         let selected = app.finish_history_selection(6, 3);
 
         assert_eq!(selected.as_deref(), Some("lpha\nbet"));
+    }
+
+    #[test]
+    fn model_picker_uses_current_registry_model_as_selection() {
+        let mut app = App::new(true, false, "gpt-5.4-mini", ReasoningEffort::Medium);
+
+        app.open_model_picker();
+
+        assert_eq!(
+            app.selection_picker(),
+            Some(&SelectionPicker::Model { selected_index: 1 })
+        );
+        assert_eq!(app.overlay_height(), 5);
+    }
+
+    #[test]
+    fn reasoning_picker_uses_current_reasoning_effort_as_selection() {
+        let mut app = App::new(true, false, "gpt-5.4", ReasoningEffort::High);
+
+        app.open_reasoning_picker();
+
+        assert_eq!(
+            app.selection_picker(),
+            Some(&SelectionPicker::Reasoning {
+                model_name: "gpt-5.4".into(),
+                options: vec![
+                    ReasoningEffort::Low,
+                    ReasoningEffort::Medium,
+                    ReasoningEffort::High,
+                ],
+                selected_index: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn supported_reasoning_levels_fall_back_for_unknown_model() {
+        let app = App::new(true, false, "custom-deployment", ReasoningEffort::Medium);
+
+        assert_eq!(
+            app.supported_reasoning_levels(),
+            vec![
+                ReasoningEffort::Minimal,
+                ReasoningEffort::Low,
+                ReasoningEffort::Medium,
+                ReasoningEffort::High,
+                ReasoningEffort::XHigh,
+            ]
+        );
     }
 
     #[test]

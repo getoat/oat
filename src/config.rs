@@ -6,6 +6,8 @@ use std::{
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
+use crate::model_registry;
+
 const DEFAULT_CONFIG_PATH: &str = "config.toml";
 const HOME_CONFIG_RELATIVE_PATH: &str = ".config/oat/config.toml";
 const DEFAULT_API_VERSION: &str = "2025-01-01-preview";
@@ -78,8 +80,8 @@ impl AppConfig {
     pub fn set_default_reasoning_effort(reasoning_effort: ReasoningEffort) -> Result<Self> {
         let home_path = default_home_config_path();
         let cwd_path = PathBuf::from(DEFAULT_CONFIG_PATH);
-        let target_path = default_reasoning_effort_path(home_path.as_deref(), Some(&cwd_path))?;
-        write_reasoning_effort_at_path(&target_path, reasoning_effort)?;
+        let target_path = default_config_update_path(home_path.as_deref(), Some(&cwd_path))?;
+        write_azure_config_updates_at_path(&target_path, None, Some(reasoning_effort))?;
         Self::load_from_default_path()
     }
 
@@ -87,7 +89,27 @@ impl AppConfig {
         path: &Path,
         reasoning_effort: ReasoningEffort,
     ) -> Result<Self> {
-        write_reasoning_effort_at_path(path, reasoning_effort)?;
+        write_azure_config_updates_at_path(path, None, Some(reasoning_effort))?;
+        Self::load_from_path(path)
+    }
+
+    pub fn set_default_model_selection(
+        model_name: &str,
+        reasoning_effort: ReasoningEffort,
+    ) -> Result<Self> {
+        let home_path = default_home_config_path();
+        let cwd_path = PathBuf::from(DEFAULT_CONFIG_PATH);
+        let target_path = default_config_update_path(home_path.as_deref(), Some(&cwd_path))?;
+        write_azure_config_updates_at_path(&target_path, Some(model_name), Some(reasoning_effort))?;
+        Self::load_from_default_path()
+    }
+
+    pub fn set_model_selection_at_path(
+        path: &Path,
+        model_name: &str,
+        reasoning_effort: ReasoningEffort,
+    ) -> Result<Self> {
+        write_azure_config_updates_at_path(path, Some(model_name), Some(reasoning_effort))?;
         Self::load_from_path(path)
     }
 
@@ -102,6 +124,22 @@ impl AppConfig {
 
         if self.azure.model_name.trim().is_empty() {
             bail!("azure.model_name must not be empty");
+        }
+
+        if let Some(model) = model_registry::find_model(&self.azure.model_name)
+            && !model.supports_reasoning(self.azure.reasoning_effort)
+        {
+            let supported = model
+                .supported_reasoning_levels
+                .iter()
+                .map(|level| level.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            bail!(
+                "azure.reasoning_effort `{}` is not supported by model `{}`. Supported values: {supported}",
+                self.azure.reasoning_effort.as_str(),
+                self.azure.model_name
+            );
         }
 
         Ok(())
@@ -316,7 +354,7 @@ fn default_config_locations(home_path: Option<&Path>, cwd_path: Option<&Path>) -
     locations
 }
 
-fn default_reasoning_effort_path(
+fn default_config_update_path(
     home_path: Option<&Path>,
     cwd_path: Option<&Path>,
 ) -> Result<PathBuf> {
@@ -332,10 +370,14 @@ fn default_reasoning_effort_path(
         return Ok(path.to_path_buf());
     }
 
-    bail!("failed to determine a config path for reasoning effort updates")
+    bail!("failed to determine a config path for config updates")
 }
 
-fn write_reasoning_effort_at_path(path: &Path, reasoning_effort: ReasoningEffort) -> Result<()> {
+fn write_azure_config_updates_at_path(
+    path: &Path,
+    model_name: Option<&str>,
+    reasoning_effort: Option<ReasoningEffort>,
+) -> Result<()> {
     let raw = fs::read_to_string(path).unwrap_or_default();
     let mut value: toml::Value = if raw.trim().is_empty() {
         toml::Value::Table(Default::default())
@@ -351,10 +393,18 @@ fn write_reasoning_effort_at_path(path: &Path, reasoning_effort: ReasoningEffort
         .or_insert_with(|| toml::Value::Table(Default::default()))
         .as_table_mut()
         .context("config azure value must be a TOML table")?;
-    azure.insert(
-        "reasoning_effort".into(),
-        toml::Value::String(reasoning_effort.as_str().to_string()),
-    );
+    if let Some(model_name) = model_name {
+        azure.insert(
+            "model_name".into(),
+            toml::Value::String(model_name.to_string()),
+        );
+    }
+    if let Some(reasoning_effort) = reasoning_effort {
+        azure.insert(
+            "reasoning_effort".into(),
+            toml::Value::String(reasoning_effort.as_str().to_string()),
+        );
+    }
 
     let formatted = toml::to_string_pretty(&value)
         .with_context(|| format!("failed to serialize {}", path.display()))?;
@@ -471,6 +521,22 @@ mod tests {
         .expect("config parses");
 
         assert_eq!(config.azure.reasoning_effort, ReasoningEffort::XHigh);
+    }
+
+    #[test]
+    fn known_registry_models_reject_unsupported_reasoning_effort() {
+        let config = AppConfig {
+            azure: AzureConfig {
+                resource_name: "demo-resource".into(),
+                api_key: "secret".into(),
+                model_name: "gpt-5.4-mini".into(),
+                reasoning_effort: ReasoningEffort::Minimal,
+                api_version: default_api_version(),
+            },
+            ui: UiConfig::default(),
+        };
+
+        assert!(config.validate().is_err());
     }
 
     #[test]
@@ -601,13 +667,42 @@ mod tests {
     }
 
     #[test]
-    fn default_reasoning_effort_path_prefers_existing_cwd_config() {
+    fn set_model_selection_updates_config_file() {
+        let path = unique_temp_path("model-selection");
+
+        fs::write(
+            &path,
+            r#"
+            [azure]
+            resource_name = "demo-resource"
+            api_key = "secret"
+            model_name = "gpt-5-mini"
+            reasoning_effort = "minimal"
+            "#,
+        )
+        .expect("write temp config");
+
+        let updated =
+            AppConfig::set_model_selection_at_path(&path, "gpt-5.4-mini", ReasoningEffort::Medium)
+                .expect("update config");
+
+        assert_eq!(updated.azure.model_name, "gpt-5.4-mini");
+        assert_eq!(updated.azure.reasoning_effort, ReasoningEffort::Medium);
+        let raw = fs::read_to_string(&path).expect("read updated config");
+        assert!(raw.contains("model_name = \"gpt-5.4-mini\""));
+        assert!(raw.contains("reasoning_effort = \"medium\""));
+
+        fs::remove_file(path).expect("remove temp config");
+    }
+
+    #[test]
+    fn default_config_update_path_prefers_existing_cwd_config() {
         let home_path = unique_temp_path("home-effort");
         let cwd_path = unique_temp_path("cwd-effort");
         fs::write(&cwd_path, "").expect("write cwd config");
 
-        let selected = default_reasoning_effort_path(Some(&home_path), Some(&cwd_path))
-            .expect("select reasoning effort path");
+        let selected =
+            default_config_update_path(Some(&home_path), Some(&cwd_path)).expect("select path");
 
         assert_eq!(selected, cwd_path);
 
@@ -615,12 +710,12 @@ mod tests {
     }
 
     #[test]
-    fn default_reasoning_effort_path_uses_home_when_cwd_config_is_missing() {
+    fn default_config_update_path_uses_home_when_cwd_config_is_missing() {
         let home_path = unique_temp_path("home-fallback");
         let cwd_path = unique_temp_path("cwd-missing");
 
-        let selected = default_reasoning_effort_path(Some(&home_path), Some(&cwd_path))
-            .expect("select reasoning effort path");
+        let selected =
+            default_config_update_path(Some(&home_path), Some(&cwd_path)).expect("select path");
 
         assert_eq!(selected, home_path);
     }

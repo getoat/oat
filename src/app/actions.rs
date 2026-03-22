@@ -2,11 +2,12 @@ use ratatui_textarea::Input;
 use rig::completion::Message as RigMessage;
 
 use super::state::{
-    App, ChatMessage, MessageStyle, PendingReply, SlashCommand, Speaker, TranscriptEntry,
-    WriteApprovalDecision,
+    App, ChatMessage, MessageStyle, PendingReply, PickerSelection, SlashCommand, Speaker,
+    TranscriptEntry, WriteApprovalDecision,
 };
 use crate::config::ReasoningEffort;
 use crate::llm::StreamEvent;
+use crate::model_registry;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
@@ -44,6 +45,9 @@ pub enum Effect {
     },
     ShowStats,
     RotateSession,
+    SetModelSelection {
+        model_name: String,
+    },
     SetReasoningEffort {
         reasoning_effort: ReasoningEffort,
     },
@@ -79,6 +83,8 @@ impl App {
                 if self.has_pending_reply() {
                     self.cancel_pending_reply();
                     Some(Effect::CancelPendingReply)
+                } else if self.cancel_picker() {
+                    None
                 } else {
                     None
                 }
@@ -90,7 +96,9 @@ impl App {
                 })
             }
             Action::SelectPreviousCommand => {
-                if self.command_palette_visible() {
+                if self.selection_picker_visible() {
+                    self.move_picker_selection_up();
+                } else if self.command_palette_visible() {
                     self.move_command_selection_up();
                 } else if self.should_recall_previous_input() && self.recall_previous_input() {
                 } else {
@@ -99,7 +107,9 @@ impl App {
                 None
             }
             Action::SelectNextCommand => {
-                if self.command_palette_visible() {
+                if self.selection_picker_visible() {
+                    self.move_picker_selection_down();
+                } else if self.command_palette_visible() {
                     self.move_command_selection_down();
                 } else if self.should_recall_next_input() && self.recall_next_input() {
                 } else {
@@ -193,6 +203,10 @@ fn submit_message(app: &mut App) -> Option<Effect> {
         return None;
     }
 
+    if app.selection_picker_visible() {
+        return submit_picker_selection(app);
+    }
+
     let submitted = app.composer.lines().join("\n");
     let submitted = submitted.trim().to_owned();
 
@@ -241,7 +255,7 @@ fn submit_command(
     let Some(command) = app.selected_command() else {
         app.record_submitted_input(submitted);
         app.push_error_message(format!(
-            "Unknown command `{command_name}`. Try /new, /stats, /quit, or /effort."
+            "Unknown command `{command_name}`. Try /new, /stats, /model, /quit, or /effort."
         ));
         return None;
     };
@@ -258,11 +272,21 @@ fn submit_command(
             Some(Effect::RotateSession)
         }
         SlashCommand::Stats => submit_stats_command(app, arguments),
+        SlashCommand::Model => submit_model_command(app, arguments),
         SlashCommand::Quit => {
             app.should_quit = true;
             None
         }
         SlashCommand::Effort => submit_effort_command(app, arguments),
+    }
+}
+
+fn submit_picker_selection(app: &mut App) -> Option<Effect> {
+    match app.apply_picker_selection()? {
+        PickerSelection::Model(model_name) => Some(Effect::SetModelSelection { model_name }),
+        PickerSelection::Reasoning(reasoning_effort) => {
+            Some(Effect::SetReasoningEffort { reasoning_effort })
+        }
     }
 }
 
@@ -276,10 +300,26 @@ fn submit_stats_command(app: &mut App, arguments: &str) -> Option<Effect> {
     Some(Effect::ShowStats)
 }
 
+fn submit_model_command(app: &mut App, arguments: &str) -> Option<Effect> {
+    if !arguments.trim().is_empty() {
+        app.push_error_message("Usage: /model");
+        return None;
+    }
+
+    app.clear_composer();
+    app.open_model_picker();
+    None
+}
+
 fn submit_effort_command(app: &mut App, arguments: &str) -> Option<Effect> {
     let value = arguments.trim();
+    let supported_levels = app.supported_reasoning_levels();
+    let supported = supported_levels
+        .iter()
+        .map(|level| level.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
     if value.is_empty() {
-        let supported = ReasoningEffort::supported_values().join(", ");
         app.push_error_message(format!(
             "Usage: /effort <{supported}>. Current effort is `{}`.",
             app.reasoning_effort().as_str()
@@ -288,12 +328,26 @@ fn submit_effort_command(app: &mut App, arguments: &str) -> Option<Effect> {
     }
 
     let Some(reasoning_effort) = ReasoningEffort::parse(value) else {
-        let supported = ReasoningEffort::supported_values().join(", ");
         app.push_error_message(format!(
             "Unknown reasoning effort `{value}`. Choose one of: {supported}."
         ));
         return None;
     };
+
+    if !supported_levels.contains(&reasoning_effort) {
+        if let Some(model) = app.current_model_info() {
+            app.push_error_message(format!(
+                "Model `{}` supports reasoning efforts: {supported}.",
+                model.name
+            ));
+        } else {
+            app.push_error_message(format!(
+                "Reasoning effort `{}` is not supported. Choose one of: {supported}.",
+                reasoning_effort.as_str()
+            ));
+        }
+        return None;
+    }
 
     if reasoning_effort == app.reasoning_effort() {
         app.clear_composer();
@@ -306,6 +360,27 @@ fn submit_effort_command(app: &mut App, arguments: &str) -> Option<Effect> {
 
     app.clear_composer();
     Some(Effect::SetReasoningEffort { reasoning_effort })
+}
+
+pub(crate) fn compatible_reasoning_effort(
+    model_name: &str,
+    current: ReasoningEffort,
+) -> ReasoningEffort {
+    if let Some(model) = model_registry::find_model(model_name) {
+        if model.supports_reasoning(current) {
+            current
+        } else {
+            model
+                .supported_reasoning_levels
+                .iter()
+                .find(|level| **level == ReasoningEffort::Medium)
+                .copied()
+                .or_else(|| model.supported_reasoning_levels.first().copied())
+                .unwrap_or(current)
+        }
+    } else {
+        current
+    }
 }
 
 fn on_stream_event(app: &mut App, reply_id: u64, event: StreamEvent) {
@@ -369,6 +444,15 @@ mod tests {
 
     fn new_app(show_thinking: bool) -> App {
         App::new(show_thinking, false, "gpt-5-mini", ReasoningEffort::Medium)
+    }
+
+    fn registry_app(show_thinking: bool) -> App {
+        App::new(
+            show_thinking,
+            false,
+            "gpt-5.4-mini",
+            ReasoningEffort::Medium,
+        )
     }
 
     #[test]
@@ -688,6 +772,36 @@ mod tests {
     }
 
     #[test]
+    fn model_command_opens_model_picker() {
+        let mut app = registry_app(true);
+        app.composer.insert_str("/model");
+        app.sync_command_selection();
+
+        let effect = app.apply(Action::SubmitMessage);
+
+        assert!(effect.is_none());
+        assert!(app.selection_picker_visible());
+        assert!(!app.composer_has_content());
+    }
+
+    #[test]
+    fn submitting_model_picker_returns_model_selection_effect() {
+        let mut app = registry_app(true);
+        app.open_model_picker();
+        app.apply(Action::SelectNextCommand);
+
+        let effect = app.apply(Action::SubmitMessage);
+
+        assert_eq!(
+            effect,
+            Some(Effect::SetModelSelection {
+                model_name: "gpt-5.4-nano".into(),
+            })
+        );
+        assert!(!app.selection_picker_visible());
+    }
+
+    #[test]
     fn effort_command_returns_effect_for_valid_value() {
         let mut app = new_app(true);
         app.composer.insert_str("/effort high");
@@ -762,6 +876,23 @@ mod tests {
     }
 
     #[test]
+    fn effort_command_rejects_unsupported_value_for_registry_model() {
+        let mut app = registry_app(true);
+        app.composer.insert_str("/effort xhigh");
+        app.sync_command_selection();
+
+        let effect = app.apply(Action::SubmitMessage);
+
+        assert!(effect.is_none());
+        let TranscriptEntry::Message(message) = app.entries.last().expect("error entry exists")
+        else {
+            panic!("expected message entry");
+        };
+        assert_eq!(message.style, MessageStyle::Error);
+        assert!(message.text.contains("supports reasoning efforts"));
+    }
+
+    #[test]
     fn effort_command_reports_noop_when_value_is_unchanged() {
         let mut app = new_app(true);
         app.composer.insert_str("/effort medium");
@@ -801,6 +932,17 @@ mod tests {
         assert_eq!(app.entries.len(), 1);
         assert!(app.pending_reply.is_none());
         assert!(!app.composer_has_content());
+    }
+
+    #[test]
+    fn escape_action_closes_active_picker() {
+        let mut app = registry_app(true);
+        app.open_model_picker();
+
+        let effect = app.apply(Action::CancelPendingReply);
+
+        assert!(effect.is_none());
+        assert!(!app.selection_picker_visible());
     }
 
     #[test]
@@ -971,5 +1113,21 @@ mod tests {
         });
 
         assert_eq!(app.session_history(), &[RigMessage::assistant("stable")]);
+    }
+
+    #[test]
+    fn compatible_reasoning_effort_preserves_supported_level() {
+        assert_eq!(
+            compatible_reasoning_effort("gpt-5.4", ReasoningEffort::High),
+            ReasoningEffort::High
+        );
+    }
+
+    #[test]
+    fn compatible_reasoning_effort_downgrades_to_medium_when_needed() {
+        assert_eq!(
+            compatible_reasoning_effort("gpt-5.4-mini", ReasoningEffort::Minimal),
+            ReasoningEffort::Medium
+        );
     }
 }

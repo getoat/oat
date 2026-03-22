@@ -6,7 +6,7 @@ use ratatui::{
     widgets::{Block, Borders, Padding, Paragraph, Wrap},
 };
 
-use crate::app::{App, SlashCommand};
+use crate::app::{App, SelectionPicker, SlashCommand};
 
 use super::{
     history::render_history, markdown::loading_frame, theme::accent_color, wrap::wrap_text,
@@ -20,10 +20,10 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     } else {
         app.composer_height().max(3)
     };
-    let command_height = app.command_palette_height();
+    let overlay_height = app.overlay_height();
     let mut constraints = vec![Constraint::Min(1)];
-    if command_height > 0 {
-        constraints.push(Constraint::Length(command_height));
+    if overlay_height > 0 {
+        constraints.push(Constraint::Length(overlay_height));
     }
     constraints.push(Constraint::Length(input_height));
     constraints.push(Constraint::Length(1));
@@ -36,8 +36,8 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     let mut section = 0;
     render_history(frame, app, layout[section], accent, loading_frame(app));
     section += 1;
-    if command_height > 0 {
-        render_command_palette(frame, app, layout[section], accent);
+    if overlay_height > 0 {
+        render_overlay(frame, app, layout[section], accent);
         section += 1;
     }
     render_input(frame, app, layout[section], accent);
@@ -135,6 +135,74 @@ fn render_command_palette(frame: &mut Frame, app: &App, area: Rect, accent: Colo
     frame.render_widget(palette, area);
 }
 
+fn render_overlay(frame: &mut Frame, app: &App, area: Rect, accent: Color) {
+    if let Some(picker) = app.selection_picker() {
+        render_selection_picker(frame, picker, area, accent);
+    } else {
+        render_command_palette(frame, app, area, accent);
+    }
+}
+
+fn render_selection_picker(frame: &mut Frame, picker: &SelectionPicker, area: Rect, accent: Color) {
+    let visible_rows = area.height.saturating_sub(2) as usize;
+    let (title, lines) = match picker {
+        SelectionPicker::Model { selected_index } => {
+            let lines: Vec<Line<'static>> = crate::model_registry::models()
+                .iter()
+                .take(visible_rows)
+                .enumerate()
+                .map(|(index, model)| {
+                    selection_picker_line(
+                        index == *selected_index,
+                        model.name,
+                        format!(
+                            "{}  ctx {}  in {}  cache {}  out {}",
+                            model.provider.display_name(),
+                            format_context_length(model.context_length),
+                            format_price(model.pricing.input_per_million_tokens),
+                            format_price(model.pricing.cache_read_per_million_tokens),
+                            format_price(model.pricing.output_per_million_tokens),
+                        ),
+                        accent,
+                    )
+                })
+                .collect();
+            (" Models ", lines)
+        }
+        SelectionPicker::Reasoning {
+            model_name,
+            options,
+            selected_index,
+        } => {
+            let lines: Vec<Line<'static>> = options
+                .iter()
+                .take(visible_rows)
+                .enumerate()
+                .map(|(index, level)| {
+                    selection_picker_line(
+                        index == *selected_index,
+                        level.as_str(),
+                        format!("for {}", model_name),
+                        accent,
+                    )
+                })
+                .collect();
+            (" Reasoning ", lines)
+        }
+    };
+
+    let picker = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .title(title)
+                .borders(Borders::ALL)
+                .padding(Padding::horizontal(1))
+                .border_style(Style::default().fg(accent)),
+        )
+        .wrap(Wrap { trim: false });
+    frame.render_widget(picker, area);
+}
+
 fn render_mode(frame: &mut Frame, app: &App, area: Rect, accent: Color) {
     let mode_label = mode_status_label(app.mode(), app.write_approval_policy());
 
@@ -220,6 +288,48 @@ fn command_palette_line(
     }
 
     Line::from(spans)
+}
+
+fn selection_picker_line(
+    is_selected: bool,
+    label: impl Into<String>,
+    detail: impl Into<String>,
+    accent: Color,
+) -> Line<'static> {
+    let marker = if is_selected { ">" } else { " " };
+    let name_style = if is_selected {
+        Style::default().fg(accent).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().add_modifier(Modifier::BOLD)
+    };
+
+    Line::from(vec![
+        Span::styled(marker, name_style),
+        Span::raw(" "),
+        Span::styled(label.into(), name_style),
+        Span::raw("  "),
+        Span::styled(detail.into(), Style::default().fg(Color::Gray)),
+    ])
+}
+
+fn format_context_length(context_length: usize) -> String {
+    if context_length >= 1_000_000 {
+        format!("{:.2}M", context_length as f64 / 1_000_000.0)
+    } else if context_length >= 1_000 {
+        format!("{}K", context_length / 1_000)
+    } else {
+        context_length.to_string()
+    }
+}
+
+fn format_price(price: f64) -> String {
+    if price == 0.0 {
+        "0".to_string()
+    } else if price < 0.1 {
+        format!("{price:.3}")
+    } else {
+        format!("{price:.2}")
+    }
 }
 
 #[cfg(test)]
@@ -378,6 +488,42 @@ mod tests {
             .collect::<String>();
         assert!(rendered.contains("Write"));
         assert!(!rendered.contains("approvals required"));
+    }
+
+    #[test]
+    fn render_shows_model_picker_details() {
+        let backend = TestBackend::new(160, 12);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut app = App::new(true, false, "gpt-5.4-mini", ReasoningEffort::Medium);
+        app.open_model_picker();
+
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render succeeds");
+
+        let rendered = buffer_string(terminal.backend());
+        assert!(rendered.contains("Models"));
+        assert!(rendered.contains("gpt-5.4-mini"));
+        assert!(rendered.contains("Azure OpenAI"));
+        assert!(rendered.contains("ctx 400K"));
+    }
+
+    #[test]
+    fn render_shows_reasoning_picker() {
+        let backend = TestBackend::new(120, 12);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut app = App::new(true, false, "gpt-5.4", ReasoningEffort::Medium);
+        app.open_reasoning_picker();
+
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render succeeds");
+
+        let rendered = buffer_string(terminal.backend());
+        assert!(rendered.contains("Reasoning"));
+        assert!(rendered.contains("low"));
+        assert!(rendered.contains("medium"));
+        assert!(rendered.contains("high"));
     }
 
     #[test]
