@@ -27,17 +27,31 @@ pub struct ModelPricing {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LongContextPricing {
+    pub input_tokens_threshold: usize,
+    pub pricing: ModelPricing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ModelInfo {
     pub name: &'static str,
     pub provider: ModelProvider,
     pub context_length: usize,
     pub pricing: ModelPricing,
+    pub long_context_pricing: Option<LongContextPricing>,
     pub supported_reasoning_levels: &'static [ReasoningEffort],
 }
 
 impl ModelInfo {
     pub fn supports_reasoning(self, reasoning_effort: ReasoningEffort) -> bool {
         self.supported_reasoning_levels.contains(&reasoning_effort)
+    }
+
+    pub fn pricing_for_input_tokens(self, input_tokens: usize) -> ModelPricing {
+        self.long_context_pricing
+            .filter(|tier| input_tokens > tier.input_tokens_threshold)
+            .map(|tier| tier.pricing)
+            .unwrap_or(self.pricing)
     }
 }
 
@@ -51,6 +65,14 @@ const MODELS: [ModelInfo; 3] = [
             cache_read_per_million_tokens: 0.25,
             output_per_million_tokens: 15.00,
         },
+        long_context_pricing: Some(LongContextPricing {
+            input_tokens_threshold: 272_000,
+            pricing: ModelPricing {
+                input_per_million_tokens: 5.00,
+                cache_read_per_million_tokens: 0.50,
+                output_per_million_tokens: 22.50,
+            },
+        }),
         supported_reasoning_levels: &GPT_5_4_REASONING_LEVELS,
     },
     ModelInfo {
@@ -62,6 +84,7 @@ const MODELS: [ModelInfo; 3] = [
             cache_read_per_million_tokens: 0.075,
             output_per_million_tokens: 4.50,
         },
+        long_context_pricing: None,
         supported_reasoning_levels: &GPT_5_4_REASONING_LEVELS,
     },
     ModelInfo {
@@ -73,6 +96,7 @@ const MODELS: [ModelInfo; 3] = [
             cache_read_per_million_tokens: 0.02,
             output_per_million_tokens: 1.25,
         },
+        long_context_pricing: None,
         supported_reasoning_levels: &GPT_5_4_REASONING_LEVELS,
     },
 ];
@@ -110,5 +134,27 @@ mod tests {
         let model = find_model("gpt-5.4-mini").expect("registry model");
         assert!(model.supports_reasoning(ReasoningEffort::Medium));
         assert!(!model.supports_reasoning(ReasoningEffort::Minimal));
+    }
+
+    #[test]
+    fn gpt_5_4_exposes_long_context_pricing_tier() {
+        let model = find_model("gpt-5.4").expect("registry model");
+
+        assert_eq!(
+            model.long_context_pricing,
+            Some(LongContextPricing {
+                input_tokens_threshold: 272_000,
+                pricing: ModelPricing {
+                    input_per_million_tokens: 5.00,
+                    cache_read_per_million_tokens: 0.50,
+                    output_per_million_tokens: 22.50,
+                },
+            })
+        );
+        assert_eq!(model.pricing_for_input_tokens(272_000), model.pricing);
+        assert_eq!(
+            model.pricing_for_input_tokens(272_001),
+            model.long_context_pricing.expect("long tier").pricing
+        );
     }
 }

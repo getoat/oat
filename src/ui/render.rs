@@ -155,14 +155,7 @@ fn render_selection_picker(frame: &mut Frame, picker: &SelectionPicker, area: Re
                     selection_picker_line(
                         index == *selected_index,
                         model.name,
-                        format!(
-                            "{}  ctx {}  in {}  cache {}  out {}",
-                            model.provider.display_name(),
-                            format_context_length(model.context_length),
-                            format_price(model.pricing.input_per_million_tokens),
-                            format_price(model.pricing.cache_read_per_million_tokens),
-                            format_price(model.pricing.output_per_million_tokens),
-                        ),
+                        model_picker_detail(model),
                         accent,
                     )
                 })
@@ -310,6 +303,29 @@ fn selection_picker_line(
         Span::raw("  "),
         Span::styled(detail.into(), Style::default().fg(Color::Gray)),
     ])
+}
+
+fn model_picker_detail(model: &crate::model_registry::ModelInfo) -> String {
+    let standard = format!(
+        "{}  ctx {}  in {}  cache {}  out {}",
+        model.provider.display_name(),
+        format_context_length(model.context_length),
+        format_price(model.pricing.input_per_million_tokens),
+        format_price(model.pricing.cache_read_per_million_tokens),
+        format_price(model.pricing.output_per_million_tokens),
+    );
+
+    if let Some(long_context) = model.long_context_pricing {
+        format!(
+            "{standard}  >{} in {}  cache {}  out {}",
+            format_context_length(long_context.input_tokens_threshold),
+            format_price(long_context.pricing.input_per_million_tokens),
+            format_price(long_context.pricing.cache_read_per_million_tokens),
+            format_price(long_context.pricing.output_per_million_tokens),
+        )
+    } else {
+        standard
+    }
 }
 
 fn format_context_length(context_length: usize) -> String {
@@ -494,7 +510,7 @@ mod tests {
     fn render_shows_model_picker_details() {
         let backend = TestBackend::new(160, 12);
         let mut terminal = Terminal::new(backend).expect("test terminal");
-        let mut app = App::new(true, false, "gpt-5.4-mini", ReasoningEffort::Medium);
+        let mut app = App::new(true, false, "gpt-5.4", ReasoningEffort::Medium);
         app.open_model_picker();
 
         terminal
@@ -503,9 +519,10 @@ mod tests {
 
         let rendered = buffer_string(terminal.backend());
         assert!(rendered.contains("Models"));
-        assert!(rendered.contains("gpt-5.4-mini"));
+        assert!(rendered.contains("gpt-5.4"));
         assert!(rendered.contains("Azure OpenAI"));
-        assert!(rendered.contains("ctx 400K"));
+        assert!(rendered.contains("ctx 1.05M"));
+        assert!(rendered.contains(">272K"));
     }
 
     #[test]
