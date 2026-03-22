@@ -80,6 +80,7 @@ pub fn run(terminal: &mut Tui, config: AppConfig) -> Result<(), Box<dyn Error>> 
             persist_command_history_if_needed(&mut app, &command_history);
         }
 
+        app.set_session_stats(stats.current_totals());
         terminal.draw(|frame| ui::render(frame, &mut app))?;
 
         let timeout = tick_rate.saturating_sub(last_tick.elapsed());
@@ -147,7 +148,7 @@ impl EffectRunner<'_> {
             } => {
                 self.cancel_active_reply();
                 let llm = self.llm.clone();
-                let stats_hook = self.stats.hook();
+                let stats_hook = self.stats.hook_for_model(self.app.model_name().to_string());
                 let stream_tx = self.stream_tx.clone();
                 let task = self.runtime.spawn(async move {
                     llm.stream_prompt(reply_id, prompt, history, stats_hook, stream_tx)

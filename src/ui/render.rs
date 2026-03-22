@@ -198,6 +198,8 @@ fn render_selection_picker(frame: &mut Frame, picker: &SelectionPicker, area: Re
 
 fn render_mode(frame: &mut Frame, app: &App, area: Rect, accent: Color) {
     let mode_label = mode_status_label(app.mode(), app.write_approval_policy());
+    let session_stats = app.session_stats();
+    let context_percent = app.next_request_context_percent();
 
     let mut spans = vec![
         Span::styled(
@@ -205,9 +207,13 @@ fn render_mode(frame: &mut Frame, app: &App, area: Rect, accent: Color) {
             Style::default().fg(accent).add_modifier(Modifier::BOLD),
         ),
         Span::raw(format!(
-            "  {} • {}",
+            "  {} • {}  in {}  out {}  ctx {}  ${:.6}",
             app.model_name(),
             app.reasoning_effort().as_str(),
+            format_compact_tokens(session_stats.input_tokens),
+            format_compact_tokens(session_stats.output_tokens),
+            format!("{context_percent}%"),
+            session_stats.estimated_cost_usd(),
         )),
     ];
 
@@ -348,6 +354,16 @@ fn format_price(price: f64) -> String {
     }
 }
 
+fn format_compact_tokens(tokens: u64) -> String {
+    if tokens >= 1_000_000 {
+        format!("{:.2}M", tokens as f64 / 1_000_000.0)
+    } else if tokens >= 1_000 {
+        format!("{:.1}K", tokens as f64 / 1_000.0)
+    } else {
+        tokens.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use ratatui::{Terminal, backend::TestBackend};
@@ -360,6 +376,7 @@ mod tests {
     use crate::{
         app::{Action, MessageStyle},
         config::ReasoningEffort,
+        stats::StatsTotals,
         tools::{DiffKind, DiffPreviewLine, MutationPreview, mutation_preview},
     };
 
@@ -471,9 +488,19 @@ mod tests {
 
     #[test]
     fn render_shows_mode_line_and_initial_prompt() {
-        let backend = TestBackend::new(120, 8);
+        let backend = TestBackend::new(140, 8);
         let mut terminal = Terminal::new(backend).expect("test terminal");
-        let mut app = App::new(true, false, "gpt-5-mini", ReasoningEffort::Medium);
+        let mut app = App::new(true, false, "gpt-5.4-mini", ReasoningEffort::Medium);
+        app.set_session_stats(StatsTotals {
+            input_tokens: 1_234,
+            cached_input_tokens: 200,
+            output_tokens: 345,
+            estimated_cost_nanos_usd: 123_456_000,
+            request_count: 2,
+            tool_call_count: 0,
+            tool_success_count: 0,
+            tool_failure_count: 0,
+        });
 
         terminal
             .draw(|frame| render(frame, &mut app))
@@ -489,7 +516,11 @@ mod tests {
 
         assert!(rendered.contains("Loaded Azure model"));
         assert!(rendered.contains("Read-only"));
-        assert!(rendered.contains("gpt-5-mini • medium"));
+        assert!(rendered.contains("gpt-5.4-mini • medium"));
+        assert!(rendered.contains("in 1.2K"));
+        assert!(rendered.contains("out 345"));
+        assert!(rendered.contains("ctx 0%"));
+        assert!(rendered.contains("$0.123456"));
 
         app.apply(Action::ToggleMode);
         terminal

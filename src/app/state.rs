@@ -1,11 +1,17 @@
 use ratatui::layout::Rect;
 use ratatui_textarea::{CursorMove, Input, TextArea};
-use rig::completion::Message as RigMessage;
+use rig::completion::{
+    Message as RigMessage,
+    message::{
+        AssistantContent, DocumentSourceKind, ReasoningContent, ToolResultContent, UserContent,
+    },
+};
 use std::path::{Path, PathBuf};
 
 use crate::{
     config::ReasoningEffort,
     model_registry,
+    stats::StatsTotals,
     tools::{MutationPreview, mutation_preview, write_approval_summary},
 };
 
@@ -17,6 +23,8 @@ const COMMANDS: [SlashCommand; 5] = [
     SlashCommand::Quit,
 ];
 const DEFAULT_COMMAND_HISTORY_LIMIT: usize = 20;
+const ESTIMATED_MESSAGE_OVERHEAD_TOKENS: u64 = 4;
+const ESTIMATED_CONTENT_OVERHEAD_TOKENS: u64 = 2;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SlashCommand {
@@ -266,6 +274,7 @@ pub struct App {
     pub(super) show_tool_output: bool,
     pub(super) model_name: String,
     pub(super) reasoning_effort: ReasoningEffort,
+    pub(super) session_stats: StatsTotals,
     pub(super) selected_command: SlashCommand,
     pub(super) picker: Option<SelectionPicker>,
     pub(super) history: HistoryViewState,
@@ -300,6 +309,7 @@ impl App {
             show_tool_output,
             model_name,
             reasoning_effort,
+            session_stats: StatsTotals::default(),
             selected_command: SlashCommand::NewSession,
             picker: None,
             history: HistoryViewState::default(),
@@ -401,6 +411,25 @@ impl App {
 
     pub fn show_tool_output(&self) -> bool {
         self.show_tool_output
+    }
+
+    pub fn session_stats(&self) -> StatsTotals {
+        self.session_stats
+    }
+
+    pub fn estimated_next_request_context_tokens(&self) -> u64 {
+        estimated_history_context_tokens(&self.session_history)
+    }
+
+    pub fn next_request_context_percent(&self) -> u64 {
+        let Some(model) = self.current_model_info() else {
+            return 0;
+        };
+        if model.context_length == 0 {
+            return 0;
+        }
+
+        self.estimated_next_request_context_tokens() * 100 / model.context_length as u64
     }
 
     pub fn tick_count(&self) -> usize {
@@ -532,6 +561,10 @@ impl App {
 
     pub(crate) fn set_reasoning_effort(&mut self, reasoning_effort: ReasoningEffort) {
         self.reasoning_effort = reasoning_effort;
+    }
+
+    pub(crate) fn set_session_stats(&mut self, session_stats: StatsTotals) {
+        self.session_stats = session_stats;
     }
 
     pub(crate) fn set_model_name(&mut self, model_name: impl Into<String>) {
@@ -1208,6 +1241,154 @@ fn new_composer_with_text(text: &str) -> TextArea<'static> {
     composer
 }
 
+fn estimated_history_context_tokens(history: &[RigMessage]) -> u64 {
+    history.iter().map(estimated_message_tokens).sum()
+}
+
+fn estimated_message_tokens(message: &RigMessage) -> u64 {
+    match message {
+        RigMessage::System { content } => {
+            ESTIMATED_MESSAGE_OVERHEAD_TOKENS + estimated_text_tokens(content)
+        }
+        RigMessage::User { content } => {
+            ESTIMATED_MESSAGE_OVERHEAD_TOKENS
+                + content
+                    .iter()
+                    .map(estimated_user_content_tokens)
+                    .sum::<u64>()
+        }
+        RigMessage::Assistant { id, content } => {
+            ESTIMATED_MESSAGE_OVERHEAD_TOKENS
+                + id.as_deref().map(estimated_text_tokens).unwrap_or(0)
+                + content
+                    .iter()
+                    .map(estimated_assistant_content_tokens)
+                    .sum::<u64>()
+        }
+    }
+}
+
+fn estimated_user_content_tokens(content: &UserContent) -> u64 {
+    ESTIMATED_CONTENT_OVERHEAD_TOKENS
+        + match content {
+            UserContent::Text(text) => estimated_text_tokens(text.text()),
+            UserContent::ToolResult(tool_result) => {
+                estimated_text_tokens(&tool_result.id)
+                    + tool_result
+                        .call_id
+                        .as_deref()
+                        .map(estimated_text_tokens)
+                        .unwrap_or(0)
+                    + tool_result
+                        .content
+                        .iter()
+                        .map(estimated_tool_result_content_tokens)
+                        .sum::<u64>()
+            }
+            UserContent::Image(image) => estimated_document_source_tokens(&image.data),
+            UserContent::Audio(audio) => estimated_document_source_tokens(&audio.data),
+            UserContent::Video(video) => estimated_document_source_tokens(&video.data),
+            UserContent::Document(document) => estimated_document_source_tokens(&document.data),
+        }
+}
+
+fn estimated_assistant_content_tokens(content: &AssistantContent) -> u64 {
+    ESTIMATED_CONTENT_OVERHEAD_TOKENS
+        + match content {
+            AssistantContent::Text(text) => estimated_text_tokens(text.text()),
+            AssistantContent::ToolCall(tool_call) => {
+                estimated_text_tokens(&tool_call.id)
+                    + tool_call
+                        .call_id
+                        .as_deref()
+                        .map(estimated_text_tokens)
+                        .unwrap_or(0)
+                    + estimated_text_tokens(&tool_call.function.name)
+                    + estimated_json_tokens(&tool_call.function.arguments)
+                    + tool_call
+                        .signature
+                        .as_deref()
+                        .map(estimated_text_tokens)
+                        .unwrap_or(0)
+                    + tool_call
+                        .additional_params
+                        .as_ref()
+                        .map(estimated_json_tokens)
+                        .unwrap_or(0)
+            }
+            AssistantContent::Reasoning(reasoning) => {
+                reasoning
+                    .id
+                    .as_deref()
+                    .map(estimated_text_tokens)
+                    .unwrap_or(0)
+                    + reasoning
+                        .content
+                        .iter()
+                        .map(estimated_reasoning_content_tokens)
+                        .sum::<u64>()
+            }
+            AssistantContent::Image(image) => estimated_document_source_tokens(&image.data),
+        }
+}
+
+fn estimated_tool_result_content_tokens(content: &ToolResultContent) -> u64 {
+    match content {
+        ToolResultContent::Text(text) => estimated_text_tokens(text.text()),
+        ToolResultContent::Image(image) => estimated_document_source_tokens(&image.data),
+    }
+}
+
+fn estimated_reasoning_content_tokens(content: &ReasoningContent) -> u64 {
+    match content {
+        ReasoningContent::Text { text, signature } => {
+            estimated_text_tokens(text)
+                + signature.as_deref().map(estimated_text_tokens).unwrap_or(0)
+        }
+        ReasoningContent::Encrypted(_) => 0,
+        ReasoningContent::Redacted { data } => estimated_text_tokens(data),
+        ReasoningContent::Summary(summary) => estimated_text_tokens(summary),
+        _ => {
+            debug_assert!(
+                false,
+                "unhandled reasoning content variant in context estimation: {content:?}"
+            );
+            0
+        }
+    }
+}
+
+fn estimated_document_source_tokens(source: &DocumentSourceKind) -> u64 {
+    match source {
+        DocumentSourceKind::Url(value)
+        | DocumentSourceKind::Base64(value)
+        | DocumentSourceKind::String(value) => estimated_text_tokens(value),
+        DocumentSourceKind::Raw(value) => value.len().div_ceil(4) as u64,
+        DocumentSourceKind::Unknown => 0,
+        _ => {
+            debug_assert!(
+                false,
+                "unhandled document source variant in context estimation: {source:?}"
+            );
+            0
+        }
+    }
+}
+
+fn estimated_json_tokens(value: &serde_json::Value) -> u64 {
+    serde_json::to_string(value)
+        .map(|json| estimated_text_tokens(&json))
+        .unwrap_or(0)
+}
+
+fn estimated_text_tokens(text: &str) -> u64 {
+    if text.is_empty() {
+        0
+    } else {
+        text.chars().count().div_ceil(4) as u64
+    }
+}
+
 fn slice_line(line: &str, start: usize, end: usize) -> String {
     line.chars()
         .skip(start)
@@ -1369,6 +1550,15 @@ mod tests {
                 selected_index: 2,
             })
         );
+    }
+
+    #[test]
+    fn next_request_context_percent_uses_session_history_and_model_window() {
+        let mut app = App::new(true, false, "gpt-5.4-mini", ReasoningEffort::Medium);
+        app.replace_session_history(vec![RigMessage::assistant("a".repeat(16_000))]);
+
+        assert_eq!(app.next_request_context_percent(), 1);
+        assert!(app.estimated_next_request_context_tokens() >= 4_000);
     }
 
     #[test]
