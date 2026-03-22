@@ -2,6 +2,7 @@ pub mod app;
 pub mod config;
 pub mod input;
 pub mod llm;
+pub mod stats;
 pub mod tools;
 pub mod ui;
 
@@ -21,7 +22,7 @@ use crossterm::{
 use ratatui::{Terminal, backend::CrosstermBackend};
 use tokio::{runtime::Runtime, sync::mpsc, task::JoinHandle};
 
-use crate::{config::AppConfig, llm::LlmService};
+use crate::{config::AppConfig, llm::LlmService, stats::StatsStore};
 
 pub type Tui = Terminal<CrosstermBackend<Stdout>>;
 
@@ -39,6 +40,7 @@ pub fn run(terminal: &mut Tui, config: AppConfig) -> Result<(), Box<dyn Error>> 
         config.azure.model_name.clone(),
         config.azure.reasoning_effort,
     );
+    let stats = StatsStore::new();
     let tick_rate = Duration::from_millis(125);
     let mut last_tick = Instant::now();
     let mut active_reply_task: Option<(u64, JoinHandle<()>)> = None;
@@ -70,6 +72,7 @@ pub fn run(terminal: &mut Tui, config: AppConfig) -> Result<(), Box<dyn Error>> 
                         &mut llm,
                         &mut config,
                         &mut app,
+                        &stats,
                         stream_tx.clone(),
                         effect,
                     ) {
@@ -85,6 +88,7 @@ pub fn run(terminal: &mut Tui, config: AppConfig) -> Result<(), Box<dyn Error>> 
         }
     }
 
+    stats.finalize_current_session()?;
     Ok(())
 }
 
@@ -115,6 +119,7 @@ fn run_effect(
     llm: &mut LlmService,
     config: &mut AppConfig,
     app: &mut App,
+    stats: &StatsStore,
     stream_tx: mpsc::UnboundedSender<(u64, llm::StreamEvent)>,
     effect: Effect,
 ) -> anyhow::Result<()> {
@@ -128,11 +133,20 @@ fn run_effect(
                 task.abort();
             }
             let llm = llm.clone();
+            let stats_hook = stats.hook();
             let task = runtime.spawn(async move {
-                llm.stream_prompt(reply_id, prompt, history, stream_tx)
+                llm.stream_prompt(reply_id, prompt, history, stats_hook, stream_tx)
                     .await;
             });
             *active_reply_task = Some((reply_id, task));
+            Ok(())
+        }
+        Effect::ShowStats => {
+            app.push_agent_message(stats.report()?.render());
+            Ok(())
+        }
+        Effect::RotateSession => {
+            stats.rotate_session()?;
             Ok(())
         }
         Effect::SetReasoningEffort { reasoning_effort } => {
@@ -145,7 +159,7 @@ fn run_effect(
             *llm = rebuilt;
             app.set_reasoning_effort(reasoning_effort);
             app.push_agent_message(format!(
-                "Reasoning effort set to `{}` for model `{}` and saved to `config.toml`.",
+                "Reasoning effort set to `{}` for model `{}` and saved to the active config.",
                 reasoning_effort.as_str(),
                 app.model_name()
             ));

@@ -4,48 +4,53 @@ use rig::completion::Message as RigMessage;
 
 use crate::config::ReasoningEffort;
 
-const COMMANDS: [SlashCommand; 3] = [
+const COMMANDS: [SlashCommand; 4] = [
     SlashCommand::NewSession,
-    SlashCommand::Quit,
+    SlashCommand::Stats,
     SlashCommand::Effort,
+    SlashCommand::Quit,
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SlashCommand {
     NewSession,
-    Quit,
+    Stats,
     Effort,
+    Quit,
 }
 
 impl SlashCommand {
     pub fn canonical_name(self) -> &'static str {
         match self {
             Self::NewSession => "/new",
-            Self::Quit => "/quit",
+            Self::Stats => "/stats",
             Self::Effort => "/effort",
+            Self::Quit => "/quit",
         }
     }
 
     pub fn aliases(self) -> &'static [&'static str] {
         match self {
             Self::NewSession => &["/clear"],
-            Self::Quit => &["/exit"],
+            Self::Stats => &["/status"],
             Self::Effort => &["/reasoning", "/thinking"],
+            Self::Quit => &["/exit"],
         }
     }
 
     pub fn description(self) -> &'static str {
         match self {
             Self::NewSession => "Start a new session",
-            Self::Quit => "Exit the app",
+            Self::Stats => "Show session and historical usage stats",
             Self::Effort => "Set reasoning effort for the current model",
+            Self::Quit => "Exit the app",
         }
     }
 
     pub fn usage(self) -> Option<&'static str> {
         match self {
             Self::Effort => Some("/effort <minimal|low|medium|high|xhigh>"),
-            Self::NewSession | Self::Quit => None,
+            Self::NewSession | Self::Stats | Self::Quit => None,
         }
     }
 
@@ -690,7 +695,7 @@ fn slice_line(line: &str, start: usize, end: usize) -> String {
 
 fn welcome_message(model_name: &str) -> String {
     format!(
-        "Loaded Azure model `{model_name}` from config.toml. Send a message to start a one-shot response, or type / for commands."
+        "Loaded Azure model `{model_name}` from config. Send a message to start a one-shot response, or type / for commands."
     )
 }
 
@@ -741,6 +746,7 @@ mod tests {
             SlashCommand::filtered("/cl"),
             vec![SlashCommand::NewSession]
         );
+        assert_eq!(SlashCommand::filtered("/st"), vec![SlashCommand::Stats]);
         assert_eq!(SlashCommand::filtered("/ex"), vec![SlashCommand::Quit]);
         assert_eq!(SlashCommand::filtered("/th"), vec![SlashCommand::Effort]);
     }

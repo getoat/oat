@@ -39,6 +39,8 @@ pub enum Effect {
         prompt: String,
         history: Vec<RigMessage>,
     },
+    ShowStats,
+    RotateSession,
     SetReasoningEffort {
         reasoning_effort: ReasoningEffort,
     },
@@ -194,7 +196,7 @@ fn submit_message(app: &mut App) -> Option<Effect> {
 fn submit_command(app: &mut App, command_name: &str, arguments: &str) -> Option<Effect> {
     let Some(command) = app.selected_command() else {
         app.push_error_message(format!(
-            "Unknown command `{command_name}`. Try /new, /quit, or /effort."
+            "Unknown command `{command_name}`. Try /new, /stats, /quit, or /effort."
         ));
         return None;
     };
@@ -207,14 +209,25 @@ fn submit_command(app: &mut App, command_name: &str, arguments: &str) -> Option<
     match command {
         SlashCommand::NewSession => {
             app.reset_session();
-            None
+            Some(Effect::RotateSession)
         }
+        SlashCommand::Stats => submit_stats_command(app, arguments),
         SlashCommand::Quit => {
             app.should_quit = true;
             None
         }
         SlashCommand::Effort => submit_effort_command(app, arguments),
     }
+}
+
+fn submit_stats_command(app: &mut App, arguments: &str) -> Option<Effect> {
+    if !arguments.trim().is_empty() {
+        app.push_error_message("Usage: /stats");
+        return None;
+    }
+
+    app.clear_composer();
+    Some(Effect::ShowStats)
 }
 
 fn submit_effort_command(app: &mut App, arguments: &str) -> Option<Effect> {
@@ -640,6 +653,29 @@ mod tests {
     }
 
     #[test]
+    fn stats_command_returns_effect() {
+        let mut app = new_app(true);
+        app.composer.insert_str("/stats");
+        app.sync_command_selection();
+
+        let effect = app.apply(Action::SubmitMessage);
+
+        assert_eq!(effect, Some(Effect::ShowStats));
+        assert!(!app.composer_has_content());
+    }
+
+    #[test]
+    fn status_alias_returns_stats_effect() {
+        let mut app = new_app(true);
+        app.composer.insert_str("/status");
+        app.sync_command_selection();
+
+        let effect = app.apply(Action::SubmitMessage);
+
+        assert_eq!(effect, Some(Effect::ShowStats));
+    }
+
+    #[test]
     fn effort_alias_returns_effect_for_valid_value() {
         let mut app = new_app(true);
         app.composer.insert_str("/thinking xhigh");
@@ -709,7 +745,7 @@ mod tests {
 
         let effect = app.apply(Action::SubmitMessage);
 
-        assert!(effect.is_none());
+        assert_eq!(effect, Some(Effect::RotateSession));
         assert_eq!(app.entries.len(), 1);
         assert!(app.pending_reply.is_none());
         assert!(!app.composer_has_content());
@@ -722,7 +758,7 @@ mod tests {
         app.sync_command_selection();
 
         app.apply(Action::SelectPreviousCommand);
-        assert_eq!(app.selected_command(), Some(SlashCommand::Effort));
+        assert_eq!(app.selected_command(), Some(SlashCommand::Quit));
 
         app.apply(Action::SelectNextCommand);
         assert_eq!(app.selected_command(), Some(SlashCommand::NewSession));

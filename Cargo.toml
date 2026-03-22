@@ -18,3 +18,4 @@ serde_json = "1.0.149"
 tokio = { version = "1.50.0", features = ["full"] }
 toml = "1.0.7"
 tui-markdown = { version = "0.3.7", default-features = false, features = ["highlight-code"] }
+uuid = { version = "1.18.1", features = ["v7"] }

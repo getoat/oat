@@ -9,14 +9,14 @@ use rig::{
         Message as RigMessage,
         message::{ToolResult, ToolResultContent},
     },
-    providers::azure::{self, AzureOpenAIAuth},
+    providers::openai,
     streaming::{StreamedAssistantContent, StreamedUserContent, StreamingChat},
 };
 use serde_json::json;
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::config::AppConfig;
 use crate::tools::{GrepTool, ListTool, ReadFileTool, ReadFilesTool};
+use crate::{config::AppConfig, stats::StatsHook};
 
 const MAX_TOOL_STEPS_PER_TURN: usize = 64;
 
@@ -30,22 +30,21 @@ pub enum StreamEvent {
     Failed(String),
 }
 
-type AzureAgent = rig::agent::Agent<azure::CompletionModel>;
+type LlmAgent = rig::agent::Agent<openai::CompletionModel>;
 
 #[derive(Clone)]
 pub struct LlmService {
-    agent: AzureAgent,
+    agent: LlmAgent,
 }
 
 impl LlmService {
     pub fn from_config(config: &AppConfig) -> Result<Self> {
         let workspace_root = env::current_dir().context("failed to determine workspace root")?;
-        let client = azure::Client::builder()
-            .api_key(AzureOpenAIAuth::ApiKey(config.azure.api_key.clone()))
-            .azure_endpoint(config.azure.endpoint())
-            .api_version(&config.azure.api_version)
+        let client = openai::CompletionsClient::builder()
+            .api_key(&config.azure.api_key)
+            .base_url(&azure_openai_base_url(config))
             .build()
-            .context("failed to build Azure OpenAI client")?;
+            .context("failed to build OpenAI-compatible Azure client")?;
 
         let agent = client
             .agent(config.azure.model_name.clone())
@@ -70,11 +69,13 @@ rely on memory from previous turns.",
         reply_id: u64,
         prompt: String,
         history: Vec<RigMessage>,
+        stats_hook: StatsHook,
         events: UnboundedSender<(u64, StreamEvent)>,
     ) {
         let mut stream = self
             .agent
             .stream_chat(prompt, history)
+            .with_hook(stats_hook)
             .multi_turn(MAX_TOOL_STEPS_PER_TURN)
             .await;
         let mut tool_calls = HashMap::<String, String>::new();
@@ -136,6 +137,13 @@ fn reasoning_params(config: &AppConfig) -> serde_json::Value {
     })
 }
 
+fn azure_openai_base_url(config: &AppConfig) -> String {
+    format!(
+        "{}/openai/v1",
+        config.azure.endpoint().trim_end_matches('/')
+    )
+}
+
 fn format_tool_arguments(arguments: &serde_json::Value) -> String {
     serde_json::to_string(arguments).unwrap_or_else(|_| arguments.to_string())
 }
@@ -183,6 +191,14 @@ mod tests {
     fn reasoning_params_match_requested_effort() {
         let params = reasoning_params(&sample_config());
         assert_eq!(params, json!({ "reasoning_effort": "minimal" }));
+    }
+
+    #[test]
+    fn azure_openai_base_url_targets_v1_endpoint() {
+        assert_eq!(
+            azure_openai_base_url(&sample_config()),
+            "https://demo-resource.openai.azure.com/openai/v1"
+        );
     }
 
     #[test]
