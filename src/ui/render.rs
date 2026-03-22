@@ -1,3 +1,8 @@
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
+
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
@@ -22,7 +27,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     let screen = frame.area();
     let accent = accent_color(app.mode());
     let input_height = if let Some(pending) = app.pending_write_approval() {
-        pending_write_approval_height(pending, screen.width)
+        pending_write_approval_height(pending, app.workspace_root(), screen.width)
     } else {
         app.composer_height().max(3)
     };
@@ -74,6 +79,7 @@ fn render_history(frame: &mut Frame, app: &mut App, area: Rect, accent: Color) {
             push_tool_activity_run_lines(
                 &mut lines,
                 &visible_entries[index..run_end],
+                app.workspace_root(),
                 content_area.width as usize,
             );
             index = run_end;
@@ -83,6 +89,7 @@ fn render_history(frame: &mut Frame, app: &mut App, area: Rect, accent: Color) {
         push_visible_entry_lines(
             &mut lines,
             visible_entries[index],
+            app.workspace_root(),
             content_area.width as usize,
             accent,
         );
@@ -291,12 +298,15 @@ fn tool_activity_run_end(entries: &[VisibleEntry<'_>], start: usize) -> usize {
 fn push_visible_entry_lines(
     lines: &mut Vec<Line<'static>>,
     entry: VisibleEntry<'_>,
+    workspace_root: &Path,
     width: usize,
     accent: Color,
 ) {
     match entry {
         VisibleEntry::Message(message) => push_message_lines(lines, message, width, accent),
-        VisibleEntry::ToolCall(tool_call) => push_tool_call_lines(lines, tool_call, width),
+        VisibleEntry::ToolCall(tool_call) => {
+            push_tool_call_lines(lines, tool_call, workspace_root, width)
+        }
         VisibleEntry::ToolResult(tool_result) => push_tool_result_lines(lines, tool_result, width),
     }
 }
@@ -304,6 +314,7 @@ fn push_visible_entry_lines(
 fn push_tool_activity_run_lines(
     lines: &mut Vec<Line<'static>>,
     entries: &[VisibleEntry<'_>],
+    workspace_root: &Path,
     width: usize,
 ) {
     let hidden_count = entries.len().saturating_sub(MAX_VISIBLE_TOOL_ACTIVITY);
@@ -318,7 +329,9 @@ fn push_tool_activity_run_lines(
 
     for entry in entries.iter().skip(hidden_count).copied() {
         match entry {
-            VisibleEntry::ToolCall(tool_call) => push_tool_call_lines(lines, tool_call, width),
+            VisibleEntry::ToolCall(tool_call) => {
+                push_tool_call_lines(lines, tool_call, workspace_root, width)
+            }
             VisibleEntry::ToolResult(tool_result) => {
                 push_tool_result_lines(lines, tool_result, width)
             }
@@ -330,7 +343,7 @@ fn push_tool_activity_run_lines(
 
 fn render_input(frame: &mut Frame, app: &mut App, area: Rect, accent: Color) {
     if let Some(pending) = app.pending_write_approval() {
-        render_write_approval_prompt(frame, pending, area, accent);
+        render_write_approval_prompt(frame, pending, app.workspace_root(), area, accent);
         return;
     }
 
@@ -350,11 +363,12 @@ fn render_input(frame: &mut Frame, app: &mut App, area: Rect, accent: Color) {
 fn render_write_approval_prompt(
     frame: &mut Frame,
     pending: &crate::app::PendingWriteApproval,
+    workspace_root: &Path,
     area: Rect,
     accent: Color,
 ) {
     let mut lines = vec![Line::from(Span::styled(
-        approval_intent_summary(pending),
+        approval_intent_summary(pending, workspace_root),
         Style::default().fg(accent).add_modifier(Modifier::BOLD),
     ))];
 
@@ -468,15 +482,24 @@ fn mode_status_label(
 
 fn pending_write_approval_height(
     pending: &crate::app::PendingWriteApproval,
+    workspace_root: &Path,
     panel_width: u16,
 ) -> u16 {
     let content_width = panel_width.saturating_sub(4) as usize;
-    let summary_lines = wrap_text(&approval_intent_summary(pending), content_width.max(1)).len();
+    let summary_lines = wrap_text(
+        &approval_intent_summary(pending, workspace_root),
+        content_width.max(1),
+    )
+    .len();
     (summary_lines + 3 + 2) as u16
 }
 
-fn approval_intent_summary(pending: &crate::app::PendingWriteApproval) -> String {
-    if let Some(preview) = mutation_preview(&pending.tool_name, &pending.arguments) {
+fn approval_intent_summary(
+    pending: &crate::app::PendingWriteApproval,
+    workspace_root: &Path,
+) -> String {
+    if let Some(preview) = mutation_preview(&pending.tool_name, &pending.arguments, workspace_root)
+    {
         if let Some(summary) = preview.summary.as_ref() {
             return summary.clone();
         }
@@ -896,9 +919,14 @@ fn push_pending_lines(
     push_message_lines(lines, &message, width, accent);
 }
 
-fn push_tool_call_lines(lines: &mut Vec<Line<'static>>, tool_call: &ToolCall, width: usize) {
+fn push_tool_call_lines(
+    lines: &mut Vec<Line<'static>>,
+    tool_call: &ToolCall,
+    workspace_root: &Path,
+    width: usize,
+) {
     let prefix = "◇ tool";
-    if let Some(preview) = mutation_preview(&tool_call.name, &tool_call.parameter) {
+    if let Some(preview) = mutation_preview(&tool_call.name, &tool_call.parameter, workspace_root) {
         push_mutation_tool_call_lines(lines, prefix, &tool_call.name, &preview, width);
         return;
     }
@@ -962,6 +990,11 @@ fn push_mutation_tool_call_lines(
     }
 
     let indent = " ".repeat(prefix.chars().count() + 2);
+    let gutter_width = diff_gutter_digit_width(preview);
+    let blank_gutter = diff_gutter(None, None, gutter_width);
+    let diff_content_width = content_width
+        .saturating_sub(blank_gutter.chars().count())
+        .max(1);
     if let Some(summary) = &preview.summary {
         let wrapped = wrap_text(&format!("why: {summary}"), content_width);
         for chunk in wrapped {
@@ -975,19 +1008,49 @@ fn push_mutation_tool_call_lines(
     }
 
     for diff in &preview.lines {
-        let wrapped = wrap_text(&format!("{} {}", diff.prefix, diff.text), content_width);
+        let wrapped = wrap_text(
+            &format!("{} {}", diff.prefix, diff.text),
+            diff_content_width,
+        );
         for (index, chunk) in wrapped.into_iter().enumerate() {
-            let text = if index == 0 {
-                format!("{indent}{chunk}")
+            let gutter = if index == 0 {
+                diff_gutter(diff.old_line_number, diff.new_line_number, gutter_width)
             } else {
-                format!("{indent}{chunk}")
+                blank_gutter.clone()
             };
-            lines.push(Line::from(Span::styled(
-                text,
-                Style::default().fg(diff.color),
-            )));
+            lines.push(Line::from(vec![
+                Span::raw(indent.clone()),
+                Span::styled(gutter, Style::default().fg(Color::DarkGray)),
+                Span::styled(chunk, Style::default().fg(diff.color)),
+            ]));
         }
     }
+}
+
+fn diff_gutter_digit_width(preview: &MutationPreview) -> usize {
+    preview
+        .lines
+        .iter()
+        .flat_map(|line| [line.old_line_number, line.new_line_number])
+        .flatten()
+        .max()
+        .unwrap_or(1)
+        .to_string()
+        .len()
+}
+
+fn diff_gutter(
+    old_line_number: Option<usize>,
+    new_line_number: Option<usize>,
+    width: usize,
+) -> String {
+    let old = old_line_number
+        .map(|line| line.to_string())
+        .unwrap_or_default();
+    let new = new_line_number
+        .map(|line| line.to_string())
+        .unwrap_or_default();
+    format!("{old:>width$} {new:>width$} | ")
 }
 
 #[derive(Debug, Deserialize)]
@@ -1028,32 +1091,29 @@ struct MutationPreview {
 
 #[derive(Debug)]
 struct DiffPreviewLine {
+    old_line_number: Option<usize>,
+    new_line_number: Option<usize>,
     prefix: char,
     text: String,
     color: Color,
 }
 
-fn mutation_preview(tool_name: &str, raw_args: &str) -> Option<MutationPreview> {
+fn mutation_preview(
+    tool_name: &str,
+    raw_args: &str,
+    workspace_root: &Path,
+) -> Option<MutationPreview> {
     match tool_name {
         "ApplyPatches" => {
             let args: ApplyPatchesPreviewArgs = serde_json::from_str(raw_args).ok()?;
-            let mut lines = Vec::new();
-            for patch in args.patches {
-                lines.extend(diff_lines('-', &patch.old_text, Color::Red));
-                lines.extend(diff_lines('+', &patch.new_text, Color::Green));
-            }
-            Some(MutationPreview {
-                target: args.filename,
-                summary: normalize_intent(args.intent.as_deref()),
-                lines,
-            })
+            Some(apply_patches_preview(args, workspace_root))
         }
         "WriteFile" => {
             let args: WriteFilePreviewArgs = serde_json::from_str(raw_args).ok()?;
             Some(MutationPreview {
                 target: args.filename,
                 summary: normalize_intent(args.intent.as_deref()),
-                lines: diff_lines('+', &args.content, Color::Green),
+                lines: numbered_diff_lines('+', &args.content, Color::Green, None, Some(1)),
             })
         }
         "DeletePath" => {
@@ -1061,11 +1121,7 @@ fn mutation_preview(tool_name: &str, raw_args: &str) -> Option<MutationPreview> 
             Some(MutationPreview {
                 target: args.path.clone(),
                 summary: normalize_intent(args.intent.as_deref()),
-                lines: vec![DiffPreviewLine {
-                    prefix: '-',
-                    text: args.path,
-                    color: Color::Red,
-                }],
+                lines: delete_path_preview_lines(workspace_root, &args.path),
             })
         }
         _ => None,
@@ -1078,21 +1134,144 @@ fn normalize_intent(intent: Option<&str>) -> Option<String> {
     (!normalized.is_empty()).then_some(normalized)
 }
 
-fn diff_lines(prefix: char, text: &str, color: Color) -> Vec<DiffPreviewLine> {
-    let lines = if text.is_empty() {
-        vec!["(empty)".to_string()]
-    } else {
-        text.lines().map(ToOwned::to_owned).collect::<Vec<_>>()
-    };
+fn apply_patches_preview(args: ApplyPatchesPreviewArgs, workspace_root: &Path) -> MutationPreview {
+    let mut lines = Vec::new();
+    let mut content = read_preview_file(workspace_root, &args.filename);
 
-    lines
+    for patch in args.patches {
+        let preview_lines = content
+            .as_mut()
+            .and_then(|updated| apply_numbered_patch_preview(updated, &patch))
+            .unwrap_or_else(|| {
+                let mut fallback =
+                    numbered_diff_lines('-', &patch.old_text, Color::Red, None, None);
+                fallback.extend(numbered_diff_lines(
+                    '+',
+                    &patch.new_text,
+                    Color::Green,
+                    None,
+                    None,
+                ));
+                fallback
+            });
+
+        if preview_lines
+            .iter()
+            .all(|line| line.old_line_number.is_none() && line.new_line_number.is_none())
+        {
+            content = None;
+        }
+
+        lines.extend(preview_lines);
+    }
+
+    MutationPreview {
+        target: args.filename,
+        summary: normalize_intent(args.intent.as_deref()),
+        lines,
+    }
+}
+
+fn apply_numbered_patch_preview(
+    updated: &mut String,
+    patch: &TextPatchPreview,
+) -> Option<Vec<DiffPreviewLine>> {
+    if patch.old_text.is_empty() {
+        return None;
+    }
+
+    let start = unique_match_index(updated, &patch.old_text)?;
+    let start_line = line_number_for_offset(updated, start);
+    let end = start + patch.old_text.len();
+    updated.replace_range(start..end, &patch.new_text);
+
+    let mut lines = numbered_diff_lines('-', &patch.old_text, Color::Red, Some(start_line), None);
+    lines.extend(numbered_diff_lines(
+        '+',
+        &patch.new_text,
+        Color::Green,
+        None,
+        Some(start_line),
+    ));
+    Some(lines)
+}
+
+fn delete_path_preview_lines(workspace_root: &Path, raw_path: &str) -> Vec<DiffPreviewLine> {
+    if let Some(content) = read_preview_file(workspace_root, raw_path) {
+        return numbered_diff_lines('-', &content, Color::Red, Some(1), None);
+    }
+
+    vec![DiffPreviewLine {
+        old_line_number: Some(1),
+        new_line_number: None,
+        prefix: '-',
+        text: raw_path.to_string(),
+        color: Color::Red,
+    }]
+}
+
+fn read_preview_file(workspace_root: &Path, raw_path: &str) -> Option<String> {
+    let path = preview_path(workspace_root, raw_path)?;
+    let metadata = fs::metadata(&path).ok()?;
+    metadata
+        .is_file()
+        .then(|| fs::read_to_string(path).ok())
+        .flatten()
+}
+
+fn preview_path(workspace_root: &Path, raw_path: &str) -> Option<PathBuf> {
+    let canonical_root = workspace_root.canonicalize().ok()?;
+    let candidate = canonical_root.join(raw_path);
+    let canonical_path = candidate.canonicalize().ok()?;
+    (canonical_path != canonical_root && canonical_path.starts_with(&canonical_root))
+        .then_some(canonical_path)
+}
+
+fn unique_match_index(text: &str, pattern: &str) -> Option<usize> {
+    let mut matches = text.match_indices(pattern);
+    let (index, _) = matches.next()?;
+    matches.next().is_none().then_some(index)
+}
+
+fn line_number_for_offset(text: &str, byte_offset: usize) -> usize {
+    text[..byte_offset]
+        .bytes()
+        .filter(|byte| *byte == b'\n')
+        .count()
+        + 1
+}
+
+fn numbered_diff_lines(
+    prefix: char,
+    text: &str,
+    color: Color,
+    old_start: Option<usize>,
+    new_start: Option<usize>,
+) -> Vec<DiffPreviewLine> {
+    let has_numbered_content = !text.is_empty();
+    preview_text_lines(text)
         .into_iter()
-        .map(|text| DiffPreviewLine {
+        .enumerate()
+        .map(|(index, text)| DiffPreviewLine {
+            old_line_number: has_numbered_content
+                .then(|| old_start.map(|start| start + index))
+                .flatten(),
+            new_line_number: has_numbered_content
+                .then(|| new_start.map(|start| start + index))
+                .flatten(),
             prefix,
             text,
             color,
         })
         .collect()
+}
+
+fn preview_text_lines(text: &str) -> Vec<String> {
+    if text.is_empty() {
+        vec!["(empty)".to_string()]
+    } else {
+        text.lines().map(ToOwned::to_owned).collect()
+    }
 }
 
 fn push_tool_result_lines(
@@ -1371,10 +1550,45 @@ fn push_split_word(word: &str, width: usize, lines: &mut Vec<String>, current: &
 #[cfg(test)]
 mod tests {
     use ratatui::{Terminal, backend::TestBackend};
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     use crate::{app::Action, config::ReasoningEffort};
 
     use super::*;
+
+    struct TempTree {
+        root: PathBuf,
+    }
+
+    impl TempTree {
+        fn new() -> Self {
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time works")
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!("oat-render-{unique}"));
+            fs::create_dir_all(&root).expect("temp root created");
+            Self { root }
+        }
+
+        fn write(&self, relative_path: &str, content: &str) {
+            let path = self.root.join(relative_path);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).expect("parent directories created");
+            }
+            fs::write(path, content).expect("test file written");
+        }
+    }
+
+    impl Drop for TempTree {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
 
     #[test]
     fn wrap_text_respects_width_and_newlines() {
@@ -1503,14 +1717,17 @@ mod tests {
             tool_name: "ApplyPatches".into(),
             arguments: "{\"filename\":\"src/lib.rs\",\"patches\":[{\"old_text\":\"a\",\"new_text\":\"b\"}],\"intent\":\"Fix startup\"}".into(),
         };
-        assert_eq!(pending_write_approval_height(&short, 120), 6);
+        assert_eq!(
+            pending_write_approval_height(&short, Path::new("."), 120),
+            6
+        );
 
         let wrapped = crate::app::PendingWriteApproval {
             request_id: "call-2".into(),
             tool_name: "ApplyPatches".into(),
             arguments: "{\"filename\":\"src/lib.rs\",\"patches\":[{\"old_text\":\"a\",\"new_text\":\"b\"}],\"intent\":\"Fix the broken startup path so the app launches again after config bootstrap changes\"}".into(),
         };
-        assert!(pending_write_approval_height(&wrapped, 36) > 6);
+        assert!(pending_write_approval_height(&wrapped, Path::new("."), 36) > 6);
     }
 
     #[test]
@@ -1597,6 +1814,9 @@ mod tests {
         let backend = TestBackend::new(100, 12);
         let mut terminal = Terminal::new(backend).expect("test terminal");
         let mut app = App::new(true, true, "gpt-5-mini", ReasoningEffort::Medium);
+        let tree = TempTree::new();
+        tree.write("src/lib.rs", "old line\n");
+        app.set_workspace_root(tree.root.clone());
         app.composer_mut().insert_str("show patch tool");
         app.apply(Action::SubmitMessage);
         app.apply(Action::StreamEvent {
@@ -1615,8 +1835,8 @@ mod tests {
         assert!(rendered.contains("ApplyPatches"));
         assert!(rendered.contains("src/lib.rs"));
         assert!(rendered.contains("why: Fix the broken startup path so the app launches again"));
-        assert!(rendered.contains("- old line"));
-        assert!(rendered.contains("+ new line"));
+        assert!(rendered.contains("1   | - old line"));
+        assert!(rendered.contains("1 | + new line"));
         assert!(word_has_foreground(
             terminal.backend().buffer(),
             "old",
@@ -1627,6 +1847,168 @@ mod tests {
             "new",
             Color::Green
         ));
+    }
+
+    #[test]
+    fn mutation_preview_numbers_multiline_apply_patch_lines() {
+        let tree = TempTree::new();
+        tree.write("src/lib.rs", "alpha\nold one\nold two\nomega\n");
+
+        let preview = mutation_preview(
+            "ApplyPatches",
+            r#"{"filename":"src/lib.rs","patches":[{"old_text":"old one\nold two","new_text":"new one\nnew two"}]}"#,
+            &tree.root,
+        )
+        .expect("preview");
+
+        let lines = preview
+            .lines
+            .iter()
+            .map(|line| {
+                (
+                    line.old_line_number,
+                    line.new_line_number,
+                    line.prefix,
+                    line.text.as_str(),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            lines,
+            vec![
+                (Some(2), None, '-', "old one"),
+                (Some(3), None, '-', "old two"),
+                (None, Some(2), '+', "new one"),
+                (None, Some(3), '+', "new two"),
+            ]
+        );
+    }
+
+    #[test]
+    fn mutation_preview_adjusts_line_numbers_after_line_count_change() {
+        let tree = TempTree::new();
+        tree.write(
+            "src/lib.rs",
+            "top\nold one\nold two\nstay\nnext old\nbottom\n",
+        );
+
+        let preview = mutation_preview(
+            "ApplyPatches",
+            r#"{"filename":"src/lib.rs","patches":[{"old_text":"old one\nold two","new_text":"new only"},{"old_text":"next old","new_text":"next new\nnext newer"}]}"#,
+            &tree.root,
+        )
+        .expect("preview");
+
+        let lines = preview
+            .lines
+            .iter()
+            .map(|line| {
+                (
+                    line.old_line_number,
+                    line.new_line_number,
+                    line.prefix,
+                    line.text.as_str(),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            lines,
+            vec![
+                (Some(2), None, '-', "old one"),
+                (Some(3), None, '-', "old two"),
+                (None, Some(2), '+', "new only"),
+                (Some(4), None, '-', "next old"),
+                (None, Some(4), '+', "next new"),
+                (None, Some(5), '+', "next newer"),
+            ]
+        );
+    }
+
+    #[test]
+    fn render_shows_write_file_tool_call_with_line_numbers() {
+        let backend = TestBackend::new(100, 12);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut app = App::new(true, true, "gpt-5-mini", ReasoningEffort::Medium);
+        app.composer_mut().insert_str("show write tool");
+        app.apply(Action::SubmitMessage);
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: crate::llm::StreamEvent::ToolCall {
+                name: "WriteFile".into(),
+                arguments:
+                    r#"{"filename":"src/new.rs","content":"first line\nsecond line","intent":"Create a new file"}"#
+                        .into(),
+            },
+        });
+
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render succeeds");
+
+        let rendered = buffer_string(terminal.backend());
+        assert!(rendered.contains("1 | + first line"));
+        assert!(rendered.contains("2 | + second line"));
+    }
+
+    #[test]
+    fn render_shows_delete_path_tool_call_with_line_numbers() {
+        let backend = TestBackend::new(100, 12);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut app = App::new(true, true, "gpt-5-mini", ReasoningEffort::Medium);
+        let tree = TempTree::new();
+        tree.write("notes.txt", "alpha\nbeta\n");
+        app.set_workspace_root(tree.root.clone());
+        app.composer_mut().insert_str("show delete tool");
+        app.apply(Action::SubmitMessage);
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: crate::llm::StreamEvent::ToolCall {
+                name: "DeletePath".into(),
+                arguments: r#"{"path":"notes.txt","intent":"Remove stale notes"}"#.into(),
+            },
+        });
+
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render succeeds");
+
+        let rendered = buffer_string(terminal.backend());
+        assert!(rendered.contains("1   | - alpha"));
+        assert!(rendered.contains("2   | - beta"));
+    }
+
+    #[test]
+    fn wrapped_diff_continuations_do_not_repeat_line_numbers() {
+        let preview = MutationPreview {
+            target: "src/lib.rs".into(),
+            summary: None,
+            lines: vec![DiffPreviewLine {
+                old_line_number: Some(12),
+                new_line_number: None,
+                prefix: '-',
+                text: "this preview line should wrap cleanly".into(),
+                color: Color::Red,
+            }],
+        };
+        let mut lines = Vec::new();
+
+        push_mutation_tool_call_lines(&mut lines, "◇ tool", "ApplyPatches", &preview, 28);
+
+        let rendered = lines.iter().map(rendered_line_text).collect::<Vec<_>>();
+        let diff_rows = rendered
+            .iter()
+            .filter(|line| line.contains("|"))
+            .cloned()
+            .collect::<Vec<_>>();
+
+        assert!(
+            diff_rows.len() >= 2,
+            "expected wrapped diff rows: {diff_rows:?}"
+        );
+        assert!(diff_rows[0].contains("12"));
+        assert!(!diff_rows[1].contains("12"));
     }
 
     #[test]

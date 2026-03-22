@@ -1,6 +1,7 @@
 use ratatui::layout::Rect;
 use ratatui_textarea::{CursorMove, TextArea};
 use rig::completion::Message as RigMessage;
+use std::path::{Path, PathBuf};
 
 use crate::config::ReasoningEffort;
 
@@ -198,6 +199,7 @@ struct HistorySelectionPoint {
 
 #[derive(Debug)]
 pub struct App {
+    pub(super) workspace_root: PathBuf,
     pub(super) mode: AccessMode,
     pub(super) write_approval_policy: WriteApprovalPolicy,
     pub(super) pending_write_approval: Option<PendingWriteApproval>,
@@ -231,6 +233,7 @@ impl App {
     ) -> Self {
         let model_name = model_name.into();
         Self {
+            workspace_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             mode: AccessMode::ReadOnly,
             write_approval_policy: WriteApprovalPolicy::AskEveryTime,
             pending_write_approval: None,
@@ -262,6 +265,10 @@ impl App {
 
     pub fn mode(&self) -> AccessMode {
         self.mode
+    }
+
+    pub fn workspace_root(&self) -> &Path {
+        &self.workspace_root
     }
 
     pub fn write_approval_policy(&self) -> WriteApprovalPolicy {
@@ -430,6 +437,11 @@ impl App {
 
     pub(crate) fn set_reasoning_effort(&mut self, reasoning_effort: ReasoningEffort) {
         self.reasoning_effort = reasoning_effort;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_workspace_root(&mut self, workspace_root: PathBuf) {
+        self.workspace_root = workspace_root;
     }
 
     pub(crate) fn cancel_pending_reply(&mut self) {
