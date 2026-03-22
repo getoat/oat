@@ -379,6 +379,19 @@ impl App {
         &self.session_history
     }
 
+    pub(crate) fn shows_startup_banner(&self) -> bool {
+        self.session_history.is_empty()
+            && self.entries.len() == 1
+            && matches!(
+                self.entries.first(),
+                Some(TranscriptEntry::Message(ChatMessage {
+                    speaker: Speaker::Agent,
+                    style: MessageStyle::Plain,
+                    text,
+                })) if text == &welcome_message(&self.model_name, self.initial_mode)
+            )
+    }
+
     pub fn has_pending_reply(&self) -> bool {
         self.pending_reply.is_some()
     }
@@ -566,6 +579,7 @@ impl App {
             text: welcome_message(&self.model_name, self.initial_mode),
             style: MessageStyle::Plain,
         })];
+        self.tick_count = 0;
         self.mode = self.initial_mode;
         self.session_history.clear();
         self.pending_reply = None;
@@ -803,7 +817,8 @@ impl App {
 
     pub(super) fn paste_into_composer(&mut self, text: &str) {
         self.command_history.reset_navigation();
-        self.composer.insert_str(text);
+        self.composer
+            .insert_str(normalize_pasted_line_endings(text));
         self.sync_command_selection();
     }
 
@@ -1419,6 +1434,10 @@ fn slice_line(line: &str, start: usize, end: usize) -> String {
         .collect()
 }
 
+fn normalize_pasted_line_endings(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n")
+}
+
 fn welcome_message(model_name: &str, mode: AccessMode) -> String {
     let _ = mode;
     format!(
@@ -1453,6 +1472,7 @@ mod tests {
         assert!(!app.should_quit());
         assert!(!app.has_pending_reply());
         assert_eq!(app.entries().len(), 1);
+        assert!(app.shows_startup_banner());
         assert_eq!(app.model_name(), "gpt-5-mini");
         assert_eq!(app.reasoning_effort(), ReasoningEffort::Medium);
         assert!(!app.show_tool_output());
@@ -1489,6 +1509,23 @@ mod tests {
 
         app.composer.insert_newline();
         assert!(!app.command_palette_visible());
+    }
+
+    #[test]
+    fn paste_into_composer_preserves_newlines_and_whitespace() {
+        let mut app = App::new(true, false, "gpt-5-mini", ReasoningEffort::Medium);
+
+        app.paste_into_composer("  alpha\n\tbeta\r\ngamma  \n");
+
+        assert_eq!(
+            app.composer.lines(),
+            &[
+                "  alpha".to_string(),
+                "\tbeta".to_string(),
+                "gamma  ".to_string(),
+                String::new(),
+            ]
+        );
     }
 
     #[test]
@@ -1639,9 +1676,13 @@ mod tests {
 
         app.mode = AccessMode::ReadOnly;
         app.approval_mode = ApprovalMode::Manual;
+        app.tick_count = 12;
         app.reset_session();
 
         assert_eq!(app.mode(), AccessMode::ReadWrite);
         assert_eq!(app.approval_mode(), ApprovalMode::Disabled);
+        assert_eq!(app.tick_count(), 0);
+        assert_eq!(app.entries().len(), 1);
+        assert!(app.shows_startup_banner());
     }
 }

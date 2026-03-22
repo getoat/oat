@@ -14,6 +14,21 @@ use super::{
 };
 
 const MAX_VISIBLE_TOOL_ACTIVITY: usize = 5;
+const STARTUP_VERSION: &str = env!("CARGO_PKG_VERSION");
+const STARTUP_SHIMMER_STEP: isize = 4;
+const STARTUP_SHIMMER_WIDTH: isize = 2;
+const STARTUP_BANNER_FRONT_OFFSET: isize = 15;
+const STARTUP_BANNER_LINE_DELAY: isize = 2;
+const STARTUP_VERSION_FRONT_DELAY: isize = 8;
+const STARTUP_BANNER_LINES: [&str; 7] = [
+    "                         ░██    ",
+    "                         ░██    ",
+    " ░███████   ░██████   ░████████ ",
+    "░██    ░██       ░██     ░██    ",
+    "░██    ░██  ░███████     ░██    ",
+    "░██    ░██ ░██   ░██     ░██    ",
+    " ░███████   ░█████░██     ░████ ",
+];
 
 #[derive(Clone, Copy)]
 enum VisibleEntry<'a> {
@@ -49,6 +64,10 @@ pub(super) fn render_history(
     };
     let content_area = history_layout[0];
     let mut lines = Vec::new();
+    if app.shows_startup_banner() {
+        push_startup_banner_lines(&mut lines, accent, app.tick_count());
+        lines.push(Line::default());
+    }
     let visible_entries = visible_entries(app);
     let mut index = 0;
 
@@ -287,4 +306,77 @@ fn push_tool_activity_run_lines(
         }
         lines.push(Line::default());
     }
+}
+
+fn push_startup_banner_lines(lines: &mut Vec<Line<'static>>, accent: Color, tick_count: usize) {
+    lines.extend(
+        STARTUP_BANNER_LINES
+            .iter()
+            .enumerate()
+            .map(|(line_index, line)| {
+                animated_startup_line(
+                    line,
+                    accent,
+                    Style::default().fg(accent).add_modifier(Modifier::BOLD),
+                    STARTUP_BANNER_FRONT_OFFSET + tick_count as isize * STARTUP_SHIMMER_STEP
+                        - line_index as isize * STARTUP_BANNER_LINE_DELAY,
+                )
+            }),
+    );
+    lines.push(animated_startup_line(
+        &centered_startup_version(),
+        accent,
+        Style::default().fg(accent),
+        tick_count as isize * STARTUP_SHIMMER_STEP - STARTUP_VERSION_FRONT_DELAY,
+    ));
+}
+
+fn animated_startup_line(
+    text: &str,
+    accent: Color,
+    settled_style: Style,
+    front: isize,
+) -> Line<'static> {
+    let pending_style = Style::default()
+        .fg(Color::DarkGray)
+        .add_modifier(Modifier::DIM);
+    let shimmer_style = settled_style.fg(startup_highlight_color(accent));
+    let mut spans = Vec::with_capacity(text.chars().count());
+
+    for (column, ch) in text.chars().enumerate() {
+        let column = column as isize;
+        let style = if column <= front {
+            if column >= front - STARTUP_SHIMMER_WIDTH {
+                shimmer_style
+            } else {
+                settled_style
+            }
+        } else {
+            pending_style
+        };
+        spans.push(Span::styled(ch.to_string(), style));
+    }
+
+    Line::from(spans)
+}
+
+fn startup_highlight_color(accent: Color) -> Color {
+    match accent {
+        Color::Magenta => Color::LightMagenta,
+        Color::Cyan => Color::LightCyan,
+        other => other,
+    }
+}
+
+fn centered_startup_version() -> String {
+    let version = format!("v{STARTUP_VERSION}");
+    let banner_width = STARTUP_BANNER_LINES
+        .iter()
+        .map(|line| line.chars().count())
+        .max()
+        .unwrap_or(version.chars().count());
+    let version_width = version.chars().count();
+    let left_padding = banner_width.saturating_sub(version_width) / 2;
+
+    format!("{}{}", " ".repeat(left_padding), version)
 }

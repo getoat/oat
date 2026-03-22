@@ -18,7 +18,9 @@ use anyhow::anyhow;
 use app::{Action, App, ApprovalMode, Effect};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture},
+    event::{
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -205,7 +207,12 @@ pub fn run_headless(
 pub fn setup_terminal() -> Result<Tui, Box<dyn Error>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste
+    )?;
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend)?;
     Ok(terminal)
@@ -215,6 +222,7 @@ pub fn restore_terminal(terminal: &mut Tui) -> Result<(), Box<dyn Error>> {
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
+        DisableBracketedPaste,
         DisableMouseCapture,
         LeaveAlternateScreen
     )?;

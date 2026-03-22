@@ -486,7 +486,7 @@ mod tests {
 
     #[test]
     fn render_shows_mode_line_and_initial_prompt() {
-        let backend = TestBackend::new(140, 8);
+        let backend = TestBackend::new(140, 16);
         let mut terminal = Terminal::new(backend).expect("test terminal");
         let mut app = App::new(true, false, "gpt-5.4-mini", ReasoningEffort::Medium);
         app.set_session_stats(StatsTotals {
@@ -512,6 +512,8 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
 
+        assert!(rendered.contains("░███████"));
+        assert!(rendered.contains("v0.1.0"));
         assert!(rendered.contains("Loaded Azure model"));
         assert!(rendered.contains("Read-only"));
         assert!(rendered.contains("gpt-5.4-mini • medium"));
@@ -519,6 +521,26 @@ mod tests {
         assert!(rendered.contains("out 345"));
         assert!(rendered.contains("ctx 0%"));
         assert!(rendered.contains("$0.123456"));
+        assert!(
+            buffer_lines(terminal.backend())
+                .iter()
+                .any(|line| line.contains("                         ░██")),
+            "expected startup banner indentation to be preserved"
+        );
+        assert!(
+            buffer_lines(terminal.backend())
+                .iter()
+                .any(|line| line.trim() == "v0.1.0"),
+            "expected startup version to render underneath the banner"
+        );
+        assert!(
+            word_has_foreground(
+                terminal.backend().buffer(),
+                "░███████",
+                accent_color(app.mode())
+            ),
+            "expected startup banner to use the accent color"
+        );
 
         app.apply(Action::ToggleMode);
         terminal
@@ -533,6 +555,37 @@ mod tests {
             .collect::<String>();
         assert!(rendered.contains("Write"));
         assert!(!rendered.contains("approvals required"));
+    }
+
+    #[test]
+    fn render_animates_startup_version_into_accent_color() {
+        let backend = TestBackend::new(140, 16);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut app = App::new(true, false, "gpt-5.4-mini", ReasoningEffort::Medium);
+
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("initial render succeeds");
+        assert!(
+            word_has_foreground(terminal.backend().buffer(), "v0.1.0", Color::DarkGray),
+            "expected startup version to begin dim before the shimmer passes"
+        );
+
+        for _ in 0..8 {
+            app.apply(Action::Tick);
+        }
+
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("animated render succeeds");
+        assert!(
+            word_has_foreground(
+                terminal.backend().buffer(),
+                "v0.1.0",
+                accent_color(app.mode())
+            ),
+            "expected startup version to settle into the accent color"
+        );
     }
 
     #[test]
