@@ -6,10 +6,13 @@ use ratatui::{
     widgets::Paragraph,
 };
 
-use crate::app::{App, ChatMessage, ToolCall, ToolResultEntry, TranscriptEntry};
+use crate::app::{
+    App, ChatMessage, SubagentStatusEntry, ToolCall, ToolResultEntry, TranscriptEntry,
+};
 
 use super::{
     markdown::{push_message_lines, push_pending_lines, rendered_line_text},
+    subagent_activity::push_subagent_status_lines,
     tool_activity::{push_tool_call_lines, push_tool_result_lines},
 };
 
@@ -31,11 +34,15 @@ enum VisibleEntry<'a> {
     Message(&'a ChatMessage),
     ToolCall(&'a ToolCall),
     ToolResult(&'a ToolResultEntry),
+    SubagentStatus(&'a SubagentStatusEntry),
 }
 
 impl VisibleEntry<'_> {
     fn is_tool_activity(self) -> bool {
-        matches!(self, Self::ToolCall(_) | Self::ToolResult(_))
+        matches!(
+            self,
+            Self::ToolCall(_) | Self::ToolResult(_) | Self::SubagentStatus(_)
+        )
     }
 }
 
@@ -252,6 +259,7 @@ fn visible_entries(app: &App) -> Vec<VisibleEntry<'_>> {
             TranscriptEntry::ToolResult(tool_result) => app
                 .show_tool_output()
                 .then_some(VisibleEntry::ToolResult(tool_result)),
+            TranscriptEntry::SubagentStatus(status) => Some(VisibleEntry::SubagentStatus(status)),
         })
         .collect()
 }
@@ -274,6 +282,7 @@ fn push_visible_entry_lines(
         VisibleEntry::Message(message) => push_message_lines(lines, message, width, accent),
         VisibleEntry::ToolCall(tool_call) => push_tool_call_lines(lines, tool_call, width),
         VisibleEntry::ToolResult(tool_result) => push_tool_result_lines(lines, tool_result, width),
+        VisibleEntry::SubagentStatus(status) => push_subagent_status_lines(lines, status, width),
     }
 }
 
@@ -297,6 +306,9 @@ fn push_tool_activity_run_lines(
             VisibleEntry::ToolCall(tool_call) => push_tool_call_lines(lines, tool_call, width),
             VisibleEntry::ToolResult(tool_result) => {
                 push_tool_result_lines(lines, tool_result, width)
+            }
+            VisibleEntry::SubagentStatus(status) => {
+                push_subagent_status_lines(lines, status, width)
             }
             VisibleEntry::Message(_) => {}
         }

@@ -5,18 +5,20 @@ use std::{
 
 use regex::Regex;
 use rig::{completion::ToolDefinition, tool::Tool};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::json;
 
 use super::common::{
     ToolExecError, collect_visible_entries, display_path, is_path_visible, resolve_path,
 };
+use crate::tool_policy::SearchPathPolicy;
 
 const MAX_GREP_MATCHES: usize = 100;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone)]
 pub struct GrepTool {
     root: PathBuf,
+    policy: SearchPathPolicy,
 }
 
 #[derive(Debug, Deserialize)]
@@ -27,8 +29,8 @@ pub struct GrepArgs {
 }
 
 impl GrepTool {
-    pub fn new(root: PathBuf) -> Self {
-        Self { root }
+    pub fn new(root: PathBuf, policy: SearchPathPolicy) -> Self {
+        Self { root, policy }
     }
 }
 
@@ -42,7 +44,7 @@ impl Tool for GrepTool {
         ToolDefinition {
             name: Self::NAME.to_string(),
             description: format!(
-                "Search files in the current workspace using a regular expression pattern while respecting .gitignore rules. Returns up to {MAX_GREP_MATCHES} matches as path:line:text."
+                "Search files in the current workspace using a regular expression pattern while respecting .gitignore plus the default search filters for hidden files/directories and common generated/package artifacts. Returns up to {MAX_GREP_MATCHES} matches as path:line:text."
             ),
             parameters: json!({
                 "type": "object",
@@ -68,6 +70,7 @@ impl Tool for GrepTool {
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         grep_workspace(
             &self.root,
+            &self.policy,
             &args.pattern,
             &args.path,
             args.recursive.unwrap_or(true),
@@ -77,6 +80,7 @@ impl Tool for GrepTool {
 
 pub(crate) fn grep_workspace(
     root: &Path,
+    policy: &SearchPathPolicy,
     pattern: &str,
     path: &str,
     recursive: bool,
@@ -84,15 +88,13 @@ pub(crate) fn grep_workspace(
     let regex = Regex::new(pattern)?;
     let target = resolve_path(root, path)?;
     let metadata = std::fs::metadata(&target)?;
-    if target != root && !is_path_visible(root, &target)? {
-        return Err(ToolExecError::new(format!(
-            "{path} is ignored by .gitignore"
-        )));
+    if target != root && !is_path_visible(root, &target, policy)? {
+        return Err(ToolExecError::new(SearchPathPolicy::excluded_message(path)));
     }
     let files = if metadata.is_file() {
         vec![target]
     } else if metadata.is_dir() {
-        collect_visible_entries(&target, recursive)?
+        collect_visible_entries(&target, recursive, policy)?
             .into_iter()
             .filter(|entry| !entry.is_dir)
             .map(|entry| entry.path)
@@ -155,7 +157,8 @@ mod tests {
     #[test]
     fn grep_returns_matching_lines() {
         let tree = sample_tree();
-        let output = grep_workspace(&tree.root, "TODO", ".", true).expect("grep succeeds");
+        let policy = SearchPathPolicy::new(&[]).expect("policy builds");
+        let output = grep_workspace(&tree.root, &policy, "TODO", ".", true).expect("grep succeeds");
 
         assert!(output.contains("src/nested/lib.rs:2:// TODO: grep target"));
     }
@@ -163,7 +166,9 @@ mod tests {
     #[test]
     fn grep_respects_gitignore_patterns() {
         let tree = gitignored_tree();
-        let output = grep_workspace(&tree.root, "needle", ".", true).expect("grep succeeds");
+        let policy = SearchPathPolicy::new(&[]).expect("policy builds");
+        let output =
+            grep_workspace(&tree.root, &policy, "needle", ".", true).expect("grep succeeds");
 
         assert!(output.contains("visible.txt:1:needle visible"));
         assert!(!output.contains("hidden.log"));
@@ -173,24 +178,64 @@ mod tests {
     #[test]
     fn grep_rejects_explicit_ignored_file() {
         let tree = gitignored_tree();
-        let error = grep_workspace(&tree.root, "needle", "hidden.log", true)
+        let policy = SearchPathPolicy::new(&[]).expect("policy builds");
+        let error = grep_workspace(&tree.root, &policy, "needle", "hidden.log", true)
             .expect_err("ignored file must fail");
 
-        assert!(error.to_string().contains("ignored by .gitignore"));
+        assert!(
+            error
+                .to_string()
+                .contains("excluded by the default search filters")
+        );
     }
 
     #[test]
     fn grep_truncates_large_match_sets() {
         let tree = TempTree::new();
+        let policy = SearchPathPolicy::new(&[]).expect("policy builds");
         let content = (0..(MAX_GREP_MATCHES + 25))
             .map(|index| format!("match line {index}"))
             .collect::<Vec<_>>()
             .join("\n");
         std::fs::write(tree.root.join("many.txt"), content).expect("matches file");
 
-        let output =
-            grep_workspace(&tree.root, "match line", "many.txt", true).expect("grep succeeds");
+        let output = grep_workspace(&tree.root, &policy, "match line", "many.txt", true)
+            .expect("grep succeeds");
 
         assert!(output.contains(&format!("... truncated after {MAX_GREP_MATCHES} matches")));
+    }
+
+    #[test]
+    fn grep_excludes_node_modules_by_default() {
+        let tree = TempTree::new();
+        let policy = SearchPathPolicy::new(&[]).expect("policy builds");
+        std::fs::create_dir_all(tree.root.join("node_modules/react")).expect("node_modules");
+        std::fs::write(
+            tree.root.join("node_modules/react/index.js"),
+            "dangerouslySetInnerHTML\n",
+        )
+        .expect("write generated file");
+        std::fs::write(tree.root.join("src.txt"), "dangerouslySetInnerHTML\n")
+            .expect("write source file");
+
+        let output = grep_workspace(&tree.root, &policy, "dangerouslySetInnerHTML", ".", true)
+            .expect("grep succeeds");
+
+        assert!(output.contains("src.txt:1:dangerouslySetInnerHTML"));
+        assert!(!output.contains("node_modules/react/index.js"));
+    }
+
+    #[test]
+    fn grep_can_include_hidden_directory_when_configured() {
+        let tree = TempTree::new();
+        let policy = SearchPathPolicy::new(&[".research/**".into()]).expect("policy builds");
+        std::fs::create_dir_all(tree.root.join(".research")).expect("hidden dir");
+        std::fs::write(tree.root.join(".research/findings.md"), "needle hidden\n")
+            .expect("hidden file");
+
+        let output = grep_workspace(&tree.root, &policy, "needle", ".research", true)
+            .expect("grep succeeds");
+
+        assert!(output.contains(".research/findings.md:1:needle hidden"));
     }
 }

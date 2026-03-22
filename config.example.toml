@@ -18,3 +18,18 @@ show_tool_output = false
 
 # Number of submitted prompts/commands to keep for up/down recall.
 command_history_limit = 20
+
+[subagents]
+# Maximum number of concurrent subagents the main agent can run.
+max_concurrent = 4
+
+[tools]
+# Tool outputs are truncated after approximately this many tokens.
+max_output_tokens = 10000
+
+# Optional allowlist patterns, relative to the workspace root, for paths that
+# should remain searchable even when they are hidden or otherwise excluded by
+# the default search filters.
+# Examples:
+# search_include_patterns = [".research/**", ".scratch/**"]
+search_include_patterns = []

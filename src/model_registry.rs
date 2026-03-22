@@ -53,6 +53,14 @@ impl ModelInfo {
             .map(|tier| tier.pricing)
             .unwrap_or(self.pricing)
     }
+
+    pub fn recommended_prompt_token_budget(self) -> usize {
+        let base_limit = self
+            .long_context_pricing
+            .map(|tier| tier.input_tokens_threshold)
+            .unwrap_or(self.context_length / 2);
+        base_limit.saturating_sub(32_000).max(8_000)
+    }
 }
 
 const MODELS: [ModelInfo; 3] = [
@@ -117,6 +125,10 @@ pub fn default_reasoning_for_model(name: &str) -> Option<ReasoningEffort> {
     reasoning_levels_for_model(name).and_then(|levels| levels.first().copied())
 }
 
+pub fn recommended_prompt_token_budget(name: &str) -> Option<usize> {
+    find_model(name).map(|model| model.recommended_prompt_token_budget())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -156,5 +168,14 @@ mod tests {
             model.pricing_for_input_tokens(272_001),
             model.long_context_pricing.expect("long tier").pricing
         );
+    }
+
+    #[test]
+    fn recommended_prompt_budget_uses_conservative_headroom() {
+        let gpt_54 = find_model("gpt-5.4").expect("registry model");
+        let gpt_54_mini = find_model("gpt-5.4-mini").expect("registry model");
+
+        assert_eq!(gpt_54.recommended_prompt_token_budget(), 240_000);
+        assert_eq!(gpt_54_mini.recommended_prompt_token_budget(), 168_000);
     }
 }

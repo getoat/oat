@@ -6,6 +6,8 @@ use std::{
 
 use ignore::WalkBuilder;
 
+use crate::tool_policy::SearchPathPolicy;
+
 #[derive(Debug)]
 pub(crate) struct VisibleEntry {
     pub(crate) path: PathBuf,
@@ -45,8 +47,9 @@ impl From<regex::Error> for ToolExecError {
 pub(crate) fn collect_visible_entries(
     target: &Path,
     recursive: bool,
+    policy: &SearchPathPolicy,
 ) -> Result<Vec<VisibleEntry>, ToolExecError> {
-    let mut builder = walk_builder(target);
+    let mut builder = walk_builder(target, policy);
     if !recursive {
         builder.max_depth(Some(1));
     }
@@ -67,6 +70,12 @@ pub(crate) fn collect_visible_entries(
         let is_dir = entry
             .file_type()
             .is_some_and(|file_type| file_type.is_dir());
+        let relative_path = path
+            .strip_prefix(target)
+            .map_err(|error| ToolExecError::new(error.to_string()))?;
+        if !policy.should_include(relative_path, is_dir) {
+            continue;
+        }
 
         entries.push(VisibleEntry {
             path: path.to_path_buf(),
@@ -86,13 +95,17 @@ pub(crate) fn collect_visible_entries(
     Ok(entries)
 }
 
-pub(crate) fn is_path_visible(root: &Path, target: &Path) -> Result<bool, ToolExecError> {
+pub(crate) fn is_path_visible(
+    root: &Path,
+    target: &Path,
+    policy: &SearchPathPolicy,
+) -> Result<bool, ToolExecError> {
     let max_depth = target
         .strip_prefix(root)
         .map_err(|error| ToolExecError::new(error.to_string()))?
         .components()
         .count();
-    let mut builder = walk_builder(root);
+    let mut builder = walk_builder(root, policy);
     builder.max_depth(Some(max_depth));
 
     for result in builder.build() {
@@ -166,7 +179,7 @@ pub(crate) fn display_path(root: &Path, path: &Path) -> String {
         .to_string()
 }
 
-fn walk_builder(target: &Path) -> WalkBuilder {
+fn walk_builder(target: &Path, policy: &SearchPathPolicy) -> WalkBuilder {
     let mut builder = WalkBuilder::new(target);
     builder.hidden(false);
     builder.ignore(false);
@@ -175,6 +188,21 @@ fn walk_builder(target: &Path) -> WalkBuilder {
     builder.git_exclude(false);
     builder.parents(true);
     builder.require_git(false);
+    let root = target.to_path_buf();
+    let policy = policy.clone();
+    builder.filter_entry(move |entry| {
+        entry.path() == root
+            || entry
+                .path()
+                .strip_prefix(&root)
+                .ok()
+                .is_some_and(|relative_path| {
+                    let is_dir = entry
+                        .file_type()
+                        .is_some_and(|file_type| file_type.is_dir());
+                    policy.should_include(relative_path, is_dir)
+                })
+    });
     builder
 }
 

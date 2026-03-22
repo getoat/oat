@@ -3,11 +3,12 @@ use rig::completion::Message as RigMessage;
 
 use super::state::{
     App, ChatMessage, MessageStyle, PendingReply, PickerSelection, SlashCommand, Speaker,
-    TranscriptEntry, WriteApprovalDecision,
+    SubagentDisplayState, TranscriptEntry, WriteApprovalDecision,
 };
 use crate::config::ReasoningEffort;
 use crate::llm::StreamEvent;
 use crate::model_registry;
+use crate::subagents::SubagentUiEvent;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
@@ -33,6 +34,7 @@ pub enum Action {
     UpdateHistorySelection { column: u16, row: u16 },
     FinishHistorySelection { column: u16, row: u16 },
     StreamEvent { reply_id: u64, event: StreamEvent },
+    SubagentEvent(SubagentUiEvent),
     Tick,
 }
 
@@ -188,6 +190,10 @@ impl App {
                 .map(|text| Effect::CopyToClipboard { text }),
             Action::StreamEvent { reply_id, event } => {
                 on_stream_event(self, reply_id, event);
+                None
+            }
+            Action::SubagentEvent(event) => {
+                on_subagent_event(self, event);
                 None
             }
             Action::Tick => {
@@ -411,12 +417,60 @@ fn on_stream_event(app: &mut App, reply_id: u64, event: StreamEvent) {
                 app.replace_session_history(history);
             }
             app.pending_reply = None;
-            app.pending_write_approval = None;
         }
         StreamEvent::Failed(error) => {
             app.pending_reply = None;
-            app.pending_write_approval = None;
             app.push_agent_error(format!("Request failed: {error}"));
+        }
+    }
+}
+
+fn on_subagent_event(app: &mut App, event: SubagentUiEvent) {
+    match event {
+        SubagentUiEvent::Spawned { id, access_mode } => {
+            app.upsert_subagent_status(
+                id,
+                SubagentDisplayState::Running,
+                format!(
+                    "running in {} mode",
+                    access_mode.label().to_ascii_lowercase()
+                ),
+            );
+        }
+        SubagentUiEvent::Updated {
+            id,
+            latest_tool_name,
+        } => {
+            if let Some(latest_tool_name) = latest_tool_name {
+                app.set_subagent_latest_tool(id, latest_tool_name);
+            }
+        }
+        SubagentUiEvent::Completed { id } => {
+            app.upsert_subagent_status(id, SubagentDisplayState::Completed, "completed".into());
+        }
+        SubagentUiEvent::Failed {
+            id,
+            error,
+            log_path,
+        } => {
+            app.upsert_subagent_status(
+                id.clone(),
+                SubagentDisplayState::Failed,
+                format!("failed: {error}"),
+            );
+            let suffix = log_path
+                .as_deref()
+                .map(|path| format!(" Logged request to `{path}`."))
+                .unwrap_or_default();
+            app.push_error_message(format!("Subagent `{id}` failed: {error}{suffix}"));
+        }
+        SubagentUiEvent::WriteApprovalRequested {
+            id,
+            request_id,
+            tool_name,
+            arguments,
+        } => {
+            app.begin_subagent_write_approval(id, request_id, tool_name, arguments);
         }
     }
 }
@@ -756,6 +810,46 @@ mod tests {
         };
         assert_eq!(message.style, MessageStyle::Error);
         assert!(message.text.contains("boom"));
+    }
+
+    #[test]
+    fn subagent_failure_message_includes_log_path_when_available() {
+        let mut app = new_app(true);
+
+        app.apply(Action::SubagentEvent(SubagentUiEvent::Failed {
+            id: "subagent-1".into(),
+            error: "boom".into(),
+            log_path: Some("/tmp/subagent-1.json".into()),
+        }));
+
+        let TranscriptEntry::Message(message) = app.entries.last().expect("message entry") else {
+            panic!("expected message entry");
+        };
+        assert!(
+            message
+                .text
+                .contains("Logged request to `/tmp/subagent-1.json`.")
+        );
+    }
+
+    #[test]
+    fn subagent_update_tracks_latest_tool_name() {
+        let mut app = new_app(true);
+        app.apply(Action::SubagentEvent(SubagentUiEvent::Spawned {
+            id: "subagent-1".into(),
+            access_mode: crate::app::AccessMode::ReadOnly,
+        }));
+
+        app.apply(Action::SubagentEvent(SubagentUiEvent::Updated {
+            id: "subagent-1".into(),
+            latest_tool_name: Some("Grep".into()),
+        }));
+
+        let TranscriptEntry::SubagentStatus(status) = app.entries.last().expect("status entry")
+        else {
+            panic!("expected subagent status entry");
+        };
+        assert_eq!(status.latest_tool_name.as_deref(), Some("Grep"));
     }
 
     #[test]

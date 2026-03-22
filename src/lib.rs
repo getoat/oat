@@ -1,10 +1,15 @@
+pub mod agent;
 pub mod app;
 mod command_history;
+pub mod completion_request;
 pub mod config;
 pub mod input;
 pub mod llm;
 pub mod model_registry;
 pub mod stats;
+pub mod subagents;
+pub mod token_counting;
+pub mod tool_policy;
 pub mod tools;
 pub mod ui;
 
@@ -28,7 +33,8 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 use tokio::{runtime::Runtime, sync::mpsc, task::JoinHandle};
 
 use crate::{
-    command_history::CommandHistoryStore, config::AppConfig, llm::LlmService, stats::StatsStore,
+    agent::AgentContext, command_history::CommandHistoryStore, config::AppConfig, llm::LlmService,
+    stats::StatsStore, subagents::SubagentManager,
 };
 
 pub type Tui = Terminal<CrosstermBackend<Stdout>>;
@@ -57,6 +63,7 @@ struct EffectRunner<'a> {
     app: &'a mut App,
     stats: &'a StatsStore,
     stream_tx: mpsc::UnboundedSender<(u64, llm::StreamEvent)>,
+    subagents: &'a SubagentManager,
 }
 
 pub fn run(terminal: &mut Tui, config: AppConfig) -> Result<(), Box<dyn Error>> {
@@ -78,6 +85,10 @@ pub fn run_with_options(
         startup.access_mode,
         startup.approval_mode,
     );
+    let stats = StatsStore::new();
+    let (subagent_tx, mut subagent_rx) = mpsc::unbounded_channel();
+    let subagents =
+        SubagentManager::new(config.subagents.max_concurrent, subagent_tx, stats.clone());
     let command_history = CommandHistoryStore::new(config.ui.command_history_limit);
     match command_history.load() {
         Ok(entries) => app.restore_command_history(entries, config.ui.command_history_limit),
@@ -87,12 +98,12 @@ pub fn run_with_options(
         let _guard = runtime.enter();
         LlmService::from_config(
             &config,
-            app.mode(),
+            AgentContext::main(app.mode()),
             llm::WriteApprovalController::new(startup.approval_mode),
+            Some(subagents.clone()),
         )?
     };
     let (stream_tx, mut stream_rx) = mpsc::unbounded_channel();
-    let stats = StatsStore::new();
     let tick_rate = Duration::from_millis(125);
     let mut last_tick = Instant::now();
     let mut active_reply_task: Option<(u64, JoinHandle<()>)> = None;
@@ -109,6 +120,10 @@ pub fn run_with_options(
                 active_reply_task = None;
             }
             app.apply(Action::StreamEvent { reply_id, event });
+            persist_command_history_if_needed(&mut app, &command_history);
+        }
+        while let Ok(event) = subagent_rx.try_recv() {
+            app.apply(Action::SubagentEvent(event));
             persist_command_history_if_needed(&mut app, &command_history);
         }
 
@@ -130,6 +145,7 @@ pub fn run_with_options(
                 app: &mut app,
                 stats: &stats,
                 stream_tx: stream_tx.clone(),
+                subagents: &subagents,
             };
             if let Err(error) = runner.run(effect) {
                 app.push_error_message(format!("Command failed: {error}"));
@@ -161,8 +177,9 @@ pub fn run_headless(
         let _guard = runtime.enter();
         LlmService::from_config(
             &config,
-            startup.access_mode,
+            AgentContext::main(startup.access_mode),
             llm::WriteApprovalController::new(startup.approval_mode),
+            None,
         )?
     };
     let (stream_tx, mut stream_rx) = mpsc::unbounded_channel();
@@ -330,7 +347,12 @@ impl EffectRunner<'_> {
         access_mode: app::AccessMode,
     ) -> anyhow::Result<LlmService> {
         let _guard = self.runtime.enter();
-        LlmService::from_config(config, access_mode, self.llm.approvals())
+        LlmService::from_config(
+            config,
+            AgentContext::main(access_mode),
+            self.llm.approvals(),
+            Some(self.subagents.clone()),
+        )
     }
 
     fn cancel_active_reply(&mut self) {

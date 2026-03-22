@@ -147,6 +147,7 @@ impl SessionStats {
     }
 }
 
+#[derive(Clone)]
 pub struct StatsStore {
     state: Arc<Mutex<StatsState>>,
 }

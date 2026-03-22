@@ -1,14 +1,13 @@
 use ratatui::layout::Rect;
 use ratatui_textarea::{CursorMove, Input, TextArea};
-use rig::completion::{
-    Message as RigMessage,
-    message::{
-        AssistantContent, DocumentSourceKind, ReasoningContent, ToolResultContent, UserContent,
-    },
+use rig::completion::Message as RigMessage;
+use std::{
+    collections::VecDeque,
+    path::{Path, PathBuf},
 };
-use std::path::{Path, PathBuf};
 
 use crate::{
+    completion_request::estimated_history_context_tokens,
     config::ReasoningEffort,
     model_registry,
     stats::StatsTotals,
@@ -23,9 +22,6 @@ const COMMANDS: [SlashCommand; 5] = [
     SlashCommand::Quit,
 ];
 const DEFAULT_COMMAND_HISTORY_LIMIT: usize = 20;
-const ESTIMATED_MESSAGE_OVERHEAD_TOKENS: u64 = 4;
-const ESTIMATED_CONTENT_OVERHEAD_TOKENS: u64 = 2;
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SlashCommand {
     NewSession,
@@ -173,6 +169,7 @@ pub struct PendingWriteApproval {
     pub arguments: String,
     pub summary: String,
     pub target: Option<String>,
+    pub source_label: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -217,11 +214,27 @@ pub struct ToolResultEntry {
     pub output: String,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SubagentDisplayState {
+    Running,
+    Completed,
+    Failed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SubagentStatusEntry {
+    pub id: String,
+    pub state: SubagentDisplayState,
+    pub status_text: String,
+    pub latest_tool_name: Option<String>,
+}
+
 #[derive(Clone, Debug)]
 pub enum TranscriptEntry {
     Message(ChatMessage),
     ToolCall(ToolCall),
     ToolResult(ToolResultEntry),
+    SubagentStatus(SubagentStatusEntry),
 }
 
 #[derive(Debug)]
@@ -264,7 +277,7 @@ pub struct App {
     pub(super) initial_approval_mode: ApprovalMode,
     pub(super) mode: AccessMode,
     pub(super) approval_mode: ApprovalMode,
-    pub(super) pending_write_approval: Option<PendingWriteApproval>,
+    pub(super) pending_write_approvals: VecDeque<PendingWriteApproval>,
     pub(super) should_quit: bool,
     pub(super) composer: TextArea<'static>,
     pub(super) entries: Vec<TranscriptEntry>,
@@ -315,7 +328,7 @@ impl App {
             initial_approval_mode,
             mode: initial_mode,
             approval_mode: initial_approval_mode,
-            pending_write_approval: None,
+            pending_write_approvals: VecDeque::new(),
             should_quit: false,
             composer: new_composer(),
             entries: vec![TranscriptEntry::Message(ChatMessage {
@@ -352,11 +365,11 @@ impl App {
     }
 
     pub fn pending_write_approval(&self) -> Option<&PendingWriteApproval> {
-        self.pending_write_approval.as_ref()
+        self.pending_write_approvals.front()
     }
 
     pub fn has_pending_write_approval(&self) -> bool {
-        self.pending_write_approval.is_some()
+        !self.pending_write_approvals.is_empty()
     }
 
     pub fn should_quit(&self) -> bool {
@@ -583,7 +596,7 @@ impl App {
         self.mode = self.initial_mode;
         self.session_history.clear();
         self.pending_reply = None;
-        self.pending_write_approval = None;
+        self.pending_write_approvals.clear();
         self.approval_mode = self.initial_approval_mode;
         self.resume_history_follow();
         self.history.reset();
@@ -615,7 +628,7 @@ impl App {
 
     pub(crate) fn cancel_pending_reply(&mut self) {
         self.pending_reply = None;
-        self.pending_write_approval = None;
+        self.pending_write_approvals.clear();
         self.push_error_message("Request cancelled.");
     }
 
@@ -625,39 +638,75 @@ impl App {
         tool_name: String,
         arguments: String,
     ) {
+        self.enqueue_write_approval(None, request_id, tool_name, arguments);
+    }
+
+    pub(super) fn begin_subagent_write_approval(
+        &mut self,
+        subagent_id: String,
+        request_id: String,
+        tool_name: String,
+        arguments: String,
+    ) {
+        self.enqueue_write_approval(Some(subagent_id), request_id, tool_name, arguments);
+    }
+
+    fn enqueue_write_approval(
+        &mut self,
+        source_label: Option<String>,
+        request_id: String,
+        tool_name: String,
+        arguments: String,
+    ) {
         let preview = mutation_preview(&tool_name, &arguments, &self.workspace_root);
+        let source_context = source_label
+            .as_ref()
+            .map(|source| format!(" from `{source}`"))
+            .unwrap_or_default();
         let approval = PendingWriteApproval {
             request_id,
             tool_name: tool_name.clone(),
             arguments: arguments.clone(),
             summary: write_approval_summary(&tool_name, &arguments, &self.workspace_root),
             target: preview.as_ref().map(|preview| preview.target.clone()),
+            source_label,
         };
         self.push_agent_message(format!(
-            "Write approval required for `{}`.",
-            approval.tool_name
+            "Write approval required for `{}`{}.",
+            approval.tool_name, source_context
         ));
-        self.pending_write_approval = Some(approval);
+        self.pending_write_approvals.push_back(approval);
     }
 
     pub(super) fn resolve_write_approval(
         &mut self,
         decision: WriteApprovalDecision,
     ) -> Option<PendingWriteApproval> {
-        let pending = self.pending_write_approval.take()?;
+        let pending = self.pending_write_approvals.pop_front()?;
+        let source_context = pending
+            .source_label
+            .as_ref()
+            .map(|source| format!(" from `{source}`"))
+            .unwrap_or_default();
         match decision {
             WriteApprovalDecision::AllowOnce => {
-                self.push_agent_message(format!("Approved `{}` once.", pending.tool_name));
+                self.push_agent_message(format!(
+                    "Approved `{}` once{}.",
+                    pending.tool_name, source_context
+                ));
             }
             WriteApprovalDecision::AllowAllSession => {
                 self.approval_mode = ApprovalMode::Disabled;
                 self.push_agent_message(format!(
-                    "Approved `{}` and all future writes for this session.",
-                    pending.tool_name
+                    "Approved `{}` and all future writes for this session{}.",
+                    pending.tool_name, source_context
                 ));
             }
             WriteApprovalDecision::Deny => {
-                self.push_error_message(format!("Denied `{}`.", pending.tool_name));
+                self.push_error_message(format!(
+                    "Denied `{}`{}.",
+                    pending.tool_name, source_context
+                ));
             }
         }
         Some(pending)
@@ -688,6 +737,46 @@ impl App {
             .push(TranscriptEntry::ToolResult(ToolResultEntry {
                 name,
                 output,
+            }));
+    }
+
+    pub(super) fn upsert_subagent_status(
+        &mut self,
+        id: String,
+        state: SubagentDisplayState,
+        status_text: String,
+    ) {
+        if let Some(TranscriptEntry::SubagentStatus(entry)) = self.entries.iter_mut().find(
+            |entry| matches!(entry, TranscriptEntry::SubagentStatus(status) if status.id == id),
+        ) {
+            entry.state = state;
+            entry.status_text = status_text;
+            return;
+        }
+
+        self.entries
+            .push(TranscriptEntry::SubagentStatus(SubagentStatusEntry {
+                id,
+                state,
+                status_text,
+                latest_tool_name: None,
+            }));
+    }
+
+    pub(super) fn set_subagent_latest_tool(&mut self, id: String, latest_tool_name: String) {
+        if let Some(TranscriptEntry::SubagentStatus(entry)) = self.entries.iter_mut().find(
+            |entry| matches!(entry, TranscriptEntry::SubagentStatus(status) if status.id == id),
+        ) {
+            entry.latest_tool_name = Some(latest_tool_name);
+            return;
+        }
+
+        self.entries
+            .push(TranscriptEntry::SubagentStatus(SubagentStatusEntry {
+                id,
+                state: SubagentDisplayState::Running,
+                status_text: "running".into(),
+                latest_tool_name: Some(latest_tool_name),
             }));
     }
 
@@ -1279,154 +1368,6 @@ fn new_composer_with_text(text: &str) -> TextArea<'static> {
     composer
 }
 
-fn estimated_history_context_tokens(history: &[RigMessage]) -> u64 {
-    history.iter().map(estimated_message_tokens).sum()
-}
-
-fn estimated_message_tokens(message: &RigMessage) -> u64 {
-    match message {
-        RigMessage::System { content } => {
-            ESTIMATED_MESSAGE_OVERHEAD_TOKENS + estimated_text_tokens(content)
-        }
-        RigMessage::User { content } => {
-            ESTIMATED_MESSAGE_OVERHEAD_TOKENS
-                + content
-                    .iter()
-                    .map(estimated_user_content_tokens)
-                    .sum::<u64>()
-        }
-        RigMessage::Assistant { id, content } => {
-            ESTIMATED_MESSAGE_OVERHEAD_TOKENS
-                + id.as_deref().map(estimated_text_tokens).unwrap_or(0)
-                + content
-                    .iter()
-                    .map(estimated_assistant_content_tokens)
-                    .sum::<u64>()
-        }
-    }
-}
-
-fn estimated_user_content_tokens(content: &UserContent) -> u64 {
-    ESTIMATED_CONTENT_OVERHEAD_TOKENS
-        + match content {
-            UserContent::Text(text) => estimated_text_tokens(text.text()),
-            UserContent::ToolResult(tool_result) => {
-                estimated_text_tokens(&tool_result.id)
-                    + tool_result
-                        .call_id
-                        .as_deref()
-                        .map(estimated_text_tokens)
-                        .unwrap_or(0)
-                    + tool_result
-                        .content
-                        .iter()
-                        .map(estimated_tool_result_content_tokens)
-                        .sum::<u64>()
-            }
-            UserContent::Image(image) => estimated_document_source_tokens(&image.data),
-            UserContent::Audio(audio) => estimated_document_source_tokens(&audio.data),
-            UserContent::Video(video) => estimated_document_source_tokens(&video.data),
-            UserContent::Document(document) => estimated_document_source_tokens(&document.data),
-        }
-}
-
-fn estimated_assistant_content_tokens(content: &AssistantContent) -> u64 {
-    ESTIMATED_CONTENT_OVERHEAD_TOKENS
-        + match content {
-            AssistantContent::Text(text) => estimated_text_tokens(text.text()),
-            AssistantContent::ToolCall(tool_call) => {
-                estimated_text_tokens(&tool_call.id)
-                    + tool_call
-                        .call_id
-                        .as_deref()
-                        .map(estimated_text_tokens)
-                        .unwrap_or(0)
-                    + estimated_text_tokens(&tool_call.function.name)
-                    + estimated_json_tokens(&tool_call.function.arguments)
-                    + tool_call
-                        .signature
-                        .as_deref()
-                        .map(estimated_text_tokens)
-                        .unwrap_or(0)
-                    + tool_call
-                        .additional_params
-                        .as_ref()
-                        .map(estimated_json_tokens)
-                        .unwrap_or(0)
-            }
-            AssistantContent::Reasoning(reasoning) => {
-                reasoning
-                    .id
-                    .as_deref()
-                    .map(estimated_text_tokens)
-                    .unwrap_or(0)
-                    + reasoning
-                        .content
-                        .iter()
-                        .map(estimated_reasoning_content_tokens)
-                        .sum::<u64>()
-            }
-            AssistantContent::Image(image) => estimated_document_source_tokens(&image.data),
-        }
-}
-
-fn estimated_tool_result_content_tokens(content: &ToolResultContent) -> u64 {
-    match content {
-        ToolResultContent::Text(text) => estimated_text_tokens(text.text()),
-        ToolResultContent::Image(image) => estimated_document_source_tokens(&image.data),
-    }
-}
-
-fn estimated_reasoning_content_tokens(content: &ReasoningContent) -> u64 {
-    match content {
-        ReasoningContent::Text { text, signature } => {
-            estimated_text_tokens(text)
-                + signature.as_deref().map(estimated_text_tokens).unwrap_or(0)
-        }
-        ReasoningContent::Encrypted(_) => 0,
-        ReasoningContent::Redacted { data } => estimated_text_tokens(data),
-        ReasoningContent::Summary(summary) => estimated_text_tokens(summary),
-        _ => {
-            debug_assert!(
-                false,
-                "unhandled reasoning content variant in context estimation: {content:?}"
-            );
-            0
-        }
-    }
-}
-
-fn estimated_document_source_tokens(source: &DocumentSourceKind) -> u64 {
-    match source {
-        DocumentSourceKind::Url(value)
-        | DocumentSourceKind::Base64(value)
-        | DocumentSourceKind::String(value) => estimated_text_tokens(value),
-        DocumentSourceKind::Raw(value) => value.len().div_ceil(4) as u64,
-        DocumentSourceKind::Unknown => 0,
-        _ => {
-            debug_assert!(
-                false,
-                "unhandled document source variant in context estimation: {source:?}"
-            );
-            0
-        }
-    }
-}
-
-fn estimated_json_tokens(value: &serde_json::Value) -> u64 {
-    serde_json::to_string(value)
-        .map(|json| estimated_text_tokens(&json))
-        .unwrap_or(0)
-}
-
-fn estimated_text_tokens(text: &str) -> u64 {
-    if text.is_empty() {
-        0
-    } else {
-        text.chars().count().div_ceil(4) as u64
-    }
-}
-
 fn slice_line(line: &str, start: usize, end: usize) -> String {
     line.chars()
         .skip(start)
@@ -1612,10 +1553,15 @@ mod tests {
     #[test]
     fn next_request_context_percent_uses_session_history_and_model_window() {
         let mut app = App::new(true, false, "gpt-5.4-mini", ReasoningEffort::Medium);
-        app.replace_session_history(vec![RigMessage::assistant("a".repeat(16_000))]);
+        app.replace_session_history(vec![RigMessage::assistant("token ".repeat(8_000))]);
 
-        assert_eq!(app.next_request_context_percent(), 1);
-        assert!(app.estimated_next_request_context_tokens() >= 4_000);
+        let estimated = app.estimated_next_request_context_tokens();
+
+        assert!(estimated >= 4_000);
+        assert_eq!(
+            app.next_request_context_percent(),
+            estimated * 100 / 400_000
+        );
     }
 
     #[test]

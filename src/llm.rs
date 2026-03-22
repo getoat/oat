@@ -20,10 +20,13 @@ use serde_json::json;
 use tokio::sync::{mpsc::UnboundedSender, oneshot};
 
 use crate::{
+    agent::{AgentContext, AgentRole},
     app::{AccessMode, ApprovalMode, WriteApprovalDecision},
+    completion_request::CompletionRequestSnapshot,
     config::AppConfig,
     stats::StatsHook,
-    tools::{is_mutation_tool, tool_names_for_mode, tools_for_mode},
+    subagents::SubagentManager,
+    tools::{ToolContext, is_mutation_tool, tool_names_for_context, tools_for_context},
 };
 
 const MAX_TOOL_STEPS_PER_TURN: usize = 64;
@@ -52,6 +55,7 @@ pub enum StreamEvent {
 }
 
 type LlmAgent = rig::agent::Agent<openai::CompletionModel>;
+pub type EventCallback = Arc<dyn Fn(u64, StreamEvent) -> bool + Send + Sync>;
 
 #[derive(Clone)]
 pub struct WriteApprovalController {
@@ -67,8 +71,13 @@ struct WriteApprovalState {
 #[derive(Clone)]
 struct WriteApprovalHook {
     reply_id: u64,
-    events: UnboundedSender<(u64, StreamEvent)>,
+    emit: EventCallback,
     approvals: WriteApprovalController,
+}
+
+#[derive(Clone, Default)]
+struct CompletionCaptureHook {
+    capture: Option<CompletionCapture>,
 }
 
 #[derive(Clone)]
@@ -87,11 +96,22 @@ pub struct LlmService {
     preamble: String,
 }
 
+pub struct PromptRunResult {
+    pub output: String,
+    pub history: Option<Vec<RigMessage>>,
+}
+
+#[derive(Clone, Default)]
+pub struct CompletionCapture {
+    inner: Arc<Mutex<Option<CompletionRequestSnapshot>>>,
+}
+
 impl LlmService {
     pub fn from_config(
         config: &AppConfig,
-        access_mode: AccessMode,
+        context: AgentContext,
         approvals: WriteApprovalController,
+        subagents: Option<SubagentManager>,
     ) -> Result<Self> {
         let workspace_root = env::current_dir().context("failed to determine workspace root")?;
         let client = openai::CompletionsClient::builder()
@@ -100,13 +120,26 @@ impl LlmService {
             .build()
             .context("failed to build OpenAI-compatible Azure client")?;
 
-        let preamble = mode_preamble(access_mode);
-        let tool_names = tool_names_for_mode(access_mode);
+        let preamble = mode_preamble(&context);
+        let tool_context = ToolContext {
+            root: workspace_root,
+            agent: context.clone(),
+            config: config.clone(),
+            approval_mode: approvals.mode(),
+            approvals: approvals.clone(),
+            subagents,
+        };
+        let tool_names = tool_names_for_context(&tool_context);
         let agent = client
-            .agent(config.azure.model_name.clone())
+            .agent(
+                context
+                    .model_name_override
+                    .clone()
+                    .unwrap_or_else(|| config.azure.model_name.clone()),
+            )
             .preamble(&preamble)
             .additional_params(reasoning_params(config))
-            .tools(tools_for_mode(&workspace_root, access_mode))
+            .tools(tools_for_context(tool_context))
             .build();
 
         Ok(Self {
@@ -141,14 +174,33 @@ impl LlmService {
         stats_hook: StatsHook,
         events: UnboundedSender<(u64, StreamEvent)>,
     ) {
-        let hook = WriteApprovalHook {
+        let emit: EventCallback =
+            Arc::new(move |reply_id, event| events.send((reply_id, event)).is_ok());
+        let _ = self
+            .run_prompt(reply_id, prompt, history, stats_hook, None, emit)
+            .await;
+    }
+
+    pub async fn run_prompt(
+        &self,
+        reply_id: u64,
+        prompt: String,
+        history: Vec<RigMessage>,
+        stats_hook: StatsHook,
+        capture: Option<CompletionCapture>,
+        emit: EventCallback,
+    ) -> Result<PromptRunResult> {
+        let write_approval_hook = WriteApprovalHook {
             reply_id,
-            events: events.clone(),
+            emit: emit.clone(),
             approvals: self.approvals.clone(),
         };
         let hook = CombinedHook {
             first: stats_hook,
-            second: hook,
+            second: CombinedHook {
+                first: CompletionCaptureHook { capture },
+                second: write_approval_hook,
+            },
         };
         let mut stream = self
             .agent
@@ -157,12 +209,16 @@ impl LlmService {
             .multi_turn(MAX_TOOL_STEPS_PER_TURN)
             .await;
         let mut tool_calls = HashMap::<String, String>::new();
+        let mut output = String::new();
 
         while let Some(chunk) = stream.next().await {
             let event = match chunk {
                 Ok(MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(
                     text,
-                ))) => Some(StreamEvent::TextDelta(text.text)),
+                ))) => {
+                    output.push_str(&text.text);
+                    Some(StreamEvent::TextDelta(text.text))
+                }
                 Ok(MultiTurnStreamItem::StreamAssistantItem(
                     StreamedAssistantContent::Reasoning(reasoning),
                 )) => Some(StreamEvent::ReasoningDelta(reasoning.display_text())),
@@ -190,22 +246,49 @@ impl LlmService {
                         .unwrap_or_else(|| tool_result.id.clone()),
                     output: format_tool_result(&tool_result),
                 }),
-                Ok(MultiTurnStreamItem::FinalResponse(response)) => Some(StreamEvent::Finished {
-                    history: response.history().map(ToOwned::to_owned),
-                }),
+                Ok(MultiTurnStreamItem::FinalResponse(response)) => {
+                    let history = response.history().map(ToOwned::to_owned);
+                    let event = StreamEvent::Finished {
+                        history: history.clone(),
+                    };
+                    if !(emit)(reply_id, event) {
+                        return Err(anyhow::anyhow!("event sink unavailable"));
+                    }
+                    return Ok(PromptRunResult { output, history });
+                }
                 Ok(_) => None,
                 Err(error) => {
-                    let _ = events.send((reply_id, StreamEvent::Failed(error.to_string())));
-                    return;
+                    let message = error.to_string();
+                    let _ = (emit)(reply_id, StreamEvent::Failed(message.clone()));
+                    return Err(error.into());
                 }
             };
 
             if let Some(event) = event
-                && events.send((reply_id, event)).is_err()
+                && !(emit)(reply_id, event)
             {
-                return;
+                return Err(anyhow::anyhow!("event sink unavailable"));
             }
         }
+
+        let message = "Request ended before response completed.".to_string();
+        let _ = (emit)(reply_id, StreamEvent::Failed(message.clone()));
+        Err(anyhow::anyhow!(message))
+    }
+}
+
+impl CompletionCapture {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn snapshot(&self) -> Option<CompletionRequestSnapshot> {
+        self.inner.lock().expect("completion capture lock").clone()
+    }
+
+    fn record(&self, prompt: &RigMessage, history: &[RigMessage]) {
+        let mut snapshot = self.inner.lock().expect("completion capture lock");
+        *snapshot = Some(CompletionRequestSnapshot::capture(prompt, history));
     }
 }
 
@@ -237,7 +320,7 @@ impl WriteApprovalController {
         tool_name: &str,
         internal_call_id: &str,
         args: &str,
-        events: &UnboundedSender<(u64, StreamEvent)>,
+        emit: &EventCallback,
     ) -> ToolCallHookAction {
         let rx = {
             let mut state = self.inner.lock().expect("approval state lock");
@@ -250,17 +333,14 @@ impl WriteApprovalController {
             rx
         };
 
-        if events
-            .send((
-                reply_id,
-                StreamEvent::WriteApprovalRequested {
-                    request_id: internal_call_id.to_string(),
-                    tool_name: tool_name.to_string(),
-                    arguments: args.to_string(),
-                },
-            ))
-            .is_err()
-        {
+        if !(emit)(
+            reply_id,
+            StreamEvent::WriteApprovalRequested {
+                request_id: internal_call_id.to_string(),
+                tool_name: tool_name.to_string(),
+                arguments: args.to_string(),
+            },
+        ) {
             let mut state = self.inner.lock().expect("approval state lock");
             state.pending.remove(internal_call_id);
             return ToolCallHookAction::skip(
@@ -317,14 +397,24 @@ impl PromptHook<openai::CompletionModel> for WriteApprovalHook {
         }
 
         self.approvals
-            .request_approval(
-                self.reply_id,
-                tool_name,
-                internal_call_id,
-                args,
-                &self.events,
-            )
+            .request_approval(self.reply_id, tool_name, internal_call_id, args, &self.emit)
             .await
+    }
+}
+
+impl<M> PromptHook<M> for CompletionCaptureHook
+where
+    M: CompletionModel,
+{
+    async fn on_completion_call(
+        &self,
+        prompt: &rig::completion::Message,
+        history: &[rig::completion::Message],
+    ) -> HookAction {
+        if let Some(capture) = &self.capture {
+            capture.record(prompt, history);
+        }
+        HookAction::Continue
     }
 }
 
@@ -449,7 +539,7 @@ fn azure_openai_base_url(config: &AppConfig) -> String {
     )
 }
 
-fn mode_preamble(access_mode: AccessMode) -> String {
+fn mode_preamble(context: &AgentContext) -> String {
     let mut preamble = concat!(
         "You are 'oat: an opinionated agent thing'. In normal conversation, you can refer to yourself in the first person as `I`. If you refer to yourself in the third person, use exactly the name `oat` in lowercase for the short name. If the user asks you who or what you are and you want to introduce yourself fully, use exactly 'oat: an opinionated agent thing'. You are a coding assistant and can explore codebases, plan additional features, fixes, refactors, etc.\n\n",
         "You have two modes: read-only and write mode. In read-only mode you have access to non-mutating tools that help you explore and understand codebases. In write mode your mutating tools allow you to make changes to the codebase, including creating, editing, and deleting files.\n\n",
@@ -461,7 +551,20 @@ fn mode_preamble(access_mode: AccessMode) -> String {
     )
     .to_string();
 
-    match access_mode {
+    match context.role {
+        AgentRole::Main => {
+            preamble.push_str(
+                "\n\nYou can delegate bounded parallel tasks to subagents when that will help you cover more ground. Give them enough local context to work independently, then inspect or wait on them instead of assuming they completed.",
+            );
+        }
+        AgentRole::Subagent => {
+            preamble.push_str(
+                "\n\nYou are running as a subagent on behalf of the main agent. You start with fresh context, so rely on the delegated prompt and your own tool exploration. Focus tightly on the delegated task and return a concise result that the main agent can use directly. You cannot spawn subagents of your own.",
+            );
+        }
+    }
+
+    match context.access_mode {
         AccessMode::ReadOnly => {
             preamble.push_str(
                 "\n\nYou are currently in read-only mode. Use the provided readonly workspace tools when they are useful. If the user asks you to edit, create, or delete files, explain that you are in read-only mode and the user must switch to write mode before you can modify the workspace. Do not print large amounts of code in read-only mode unless the user explicitly asks for it.",
@@ -501,7 +604,10 @@ fn format_tool_result(tool_result: &ToolResult) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{AzureConfig, ReasoningEffort, UiConfig};
+    use crate::{
+        agent::AgentContext,
+        config::{AzureConfig, ReasoningEffort, SubagentConfig, ToolConfig, UiConfig},
+    };
     use rig::{OneOrMany, completion::message::Text};
 
     fn sample_config() -> AppConfig {
@@ -518,6 +624,8 @@ mod tests {
                 show_tool_output: false,
                 command_history_limit: 20,
             },
+            subagents: SubagentConfig { max_concurrent: 4 },
+            tools: ToolConfig::default(),
         }
     }
 
@@ -563,8 +671,25 @@ mod tests {
     }
 
     #[test]
+    fn completion_capture_keeps_latest_request_snapshot() {
+        let capture = CompletionCapture::new();
+        let first_history = vec![RigMessage::system("be concise")];
+        let first_prompt = RigMessage::user("inspect src");
+        capture.record(&first_prompt, &first_history);
+
+        let second_history = vec![RigMessage::assistant("Working on it.")];
+        let second_prompt = RigMessage::user("continue");
+        capture.record(&second_prompt, &second_history);
+
+        let snapshot = capture.snapshot().expect("snapshot captured");
+        assert_eq!(snapshot.history, second_history);
+        assert_eq!(snapshot.prompt, second_prompt);
+        assert_eq!(snapshot.message_count, 2);
+    }
+
+    #[test]
     fn read_only_mode_preamble_uses_shared_prompt_and_read_only_suffix() {
-        let preamble = mode_preamble(AccessMode::ReadOnly);
+        let preamble = mode_preamble(&AgentContext::main(AccessMode::ReadOnly));
         assert!(preamble.contains("You are 'oat: an opinionated agent thing'."));
         assert!(preamble.contains("refer to yourself in the first person as `I`"));
         assert!(preamble.contains("use exactly the name `oat` in lowercase"));
@@ -580,8 +705,9 @@ mod tests {
     async fn read_write_mode_registers_mutation_tools() {
         let service = LlmService::from_config(
             &sample_config(),
-            AccessMode::ReadWrite,
+            AgentContext::main(AccessMode::ReadWrite),
             WriteApprovalController::default(),
+            None,
         )
         .expect("service builds");
 
@@ -620,8 +746,9 @@ mod tests {
     async fn read_only_mode_omits_mutation_tools() {
         let service = LlmService::from_config(
             &sample_config(),
-            AccessMode::ReadOnly,
+            AgentContext::main(AccessMode::ReadOnly),
             WriteApprovalController::default(),
+            None,
         )
         .expect("service builds");
 
@@ -641,15 +768,17 @@ mod tests {
     async fn write_mode_preamble_is_the_same_for_both_approval_modes() {
         let manual = LlmService::from_config(
             &sample_config(),
-            AccessMode::ReadWrite,
+            AgentContext::main(AccessMode::ReadWrite),
             WriteApprovalController::new(ApprovalMode::Manual),
+            None,
         )
         .expect("manual service builds")
         .preamble;
         let disabled = LlmService::from_config(
             &sample_config(),
-            AccessMode::ReadWrite,
+            AgentContext::main(AccessMode::ReadWrite),
             WriteApprovalController::new(ApprovalMode::Disabled),
+            None,
         )
         .expect("disabled service builds")
         .preamble;

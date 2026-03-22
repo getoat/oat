@@ -69,10 +69,23 @@ fn render_write_approval_prompt(
     area: Rect,
     accent: Color,
 ) {
-    let mut lines = vec![Line::from(Span::styled(
+    let mut lines = Vec::new();
+    if let Some(source_label) = &pending.source_label {
+        lines.push(Line::from(vec![
+            Span::styled(
+                "Source:",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" "),
+            Span::styled(source_label.clone(), Style::default().fg(Color::Yellow)),
+        ]));
+    }
+    lines.push(Line::from(Span::styled(
         pending.summary.clone(),
         Style::default().fg(accent).add_modifier(Modifier::BOLD),
-    ))];
+    )));
 
     lines.push(Line::from(vec![
         Span::styled(
@@ -220,7 +233,15 @@ fn render_mode(frame: &mut Frame, app: &App, area: Rect, accent: Color) {
     if let Some(pending) = app.pending_write_approval() {
         spans.push(Span::raw("  "));
         spans.push(Span::styled(
-            format!("Approval pending: {}", pending.tool_name),
+            format!(
+                "Approval pending: {}{}",
+                pending.tool_name,
+                pending
+                    .source_label
+                    .as_ref()
+                    .map(|source| format!(" from {source}"))
+                    .unwrap_or_default()
+            ),
             Style::default().fg(Color::Yellow),
         ));
     } else {
@@ -252,8 +273,13 @@ fn pending_write_approval_height(
     panel_width: u16,
 ) -> u16 {
     let content_width = panel_width.saturating_sub(4) as usize;
+    let source_lines = pending
+        .source_label
+        .as_ref()
+        .map(|source| wrap_text(&format!("Source: {source}"), content_width.max(1)).len())
+        .unwrap_or(0);
     let summary_lines = wrap_text(&pending.summary, content_width.max(1)).len();
-    (summary_lines + 3 + 2) as u16
+    (source_lines + summary_lines + 3 + 2) as u16
 }
 
 fn command_palette_line(
@@ -647,6 +673,7 @@ mod tests {
             arguments: "{\"filename\":\"src/lib.rs\",\"patches\":[{\"old_text\":\"a\",\"new_text\":\"b\"}],\"intent\":\"Fix startup\"}".into(),
             summary: "Fix startup".into(),
             target: Some("src/lib.rs".into()),
+            source_label: None,
         };
         assert_eq!(pending_write_approval_height(&short, 120), 6);
 
@@ -658,6 +685,7 @@ mod tests {
                 "Fix the broken startup path so the app launches again after config bootstrap changes"
                     .into(),
             target: Some("src/lib.rs".into()),
+            source_label: None,
         };
         assert!(pending_write_approval_height(&wrapped, 36) > 6);
     }
@@ -693,6 +721,58 @@ mod tests {
                 .any(|line| line.contains("[s] allow all this session"))
         );
         assert!(lines.iter().any(|line| line.contains("[d] deny")));
+    }
+
+    #[test]
+    fn render_write_approval_panel_identifies_subagent_source() {
+        let backend = TestBackend::new(120, 12);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut app = App::new(true, false, "gpt-5-mini", ReasoningEffort::Medium);
+        app.apply(Action::SubagentEvent(
+            crate::subagents::SubagentUiEvent::WriteApprovalRequested {
+                id: "subagent-2".into(),
+                request_id: "call-2".into(),
+                tool_name: "WriteFile".into(),
+                arguments:
+                    "{\"filename\":\"src/new.rs\",\"content\":\"hi\",\"intent\":\"Add helper\"}"
+                        .into(),
+            },
+        ));
+
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render succeeds");
+
+        let rendered = buffer_string(terminal.backend());
+        assert!(rendered.contains("Source: subagent-2"));
+        assert!(rendered.contains("Approval pending: WriteFile from subagent-2"));
+    }
+
+    #[test]
+    fn render_shows_latest_subagent_tool_name() {
+        let backend = TestBackend::new(80, 12);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut app = App::new(true, false, "gpt-5-mini", ReasoningEffort::Medium);
+        app.apply(Action::SubagentEvent(
+            crate::subagents::SubagentUiEvent::Spawned {
+                id: "subagent-2".into(),
+                access_mode: crate::app::AccessMode::ReadOnly,
+            },
+        ));
+        app.apply(Action::SubagentEvent(
+            crate::subagents::SubagentUiEvent::Updated {
+                id: "subagent-2".into(),
+                latest_tool_name: Some("Grep".into()),
+            },
+        ));
+
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render succeeds");
+
+        let lines = buffer_lines(terminal.backend());
+        assert!(lines.iter().any(|line| line.contains("subagent-2")));
+        assert!(lines.iter().any(|line| line.contains("tool: Grep")));
     }
 
     #[test]

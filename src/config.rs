@@ -6,7 +6,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
-use crate::model_registry;
+use crate::{model_registry, tool_policy};
 
 const DEFAULT_CONFIG_PATH: &str = "config.toml";
 const HOME_CONFIG_RELATIVE_PATH: &str = ".config/oat/config.toml";
@@ -17,6 +17,10 @@ pub struct AppConfig {
     pub azure: AzureConfig,
     #[serde(default)]
     pub ui: UiConfig,
+    #[serde(default)]
+    pub subagents: SubagentConfig,
+    #[serde(default)]
+    pub tools: ToolConfig,
 }
 
 impl AppConfig {
@@ -142,6 +146,16 @@ impl AppConfig {
             );
         }
 
+        if self.subagents.max_concurrent == 0 {
+            bail!("subagents.max_concurrent must be at least 1");
+        }
+
+        if self.tools.max_output_tokens == 0 {
+            bail!("tools.max_output_tokens must be at least 1");
+        }
+
+        tool_policy::SearchPathPolicy::validate_patterns(&self.tools.search_include_patterns)?;
+
         Ok(())
     }
 }
@@ -150,6 +164,8 @@ impl AppConfig {
 struct PartialAppConfig {
     azure: Option<PartialAzureConfig>,
     ui: Option<PartialUiConfig>,
+    subagents: Option<PartialSubagentConfig>,
+    tools: Option<PartialToolConfig>,
 }
 
 impl PartialAppConfig {
@@ -165,6 +181,18 @@ impl PartialAppConfig {
                 .get_or_insert_with(PartialUiConfig::default)
                 .merge(ui);
         }
+
+        if let Some(subagents) = other.subagents {
+            self.subagents
+                .get_or_insert_with(PartialSubagentConfig::default)
+                .merge(subagents);
+        }
+
+        if let Some(tools) = other.tools {
+            self.tools
+                .get_or_insert_with(PartialToolConfig::default)
+                .merge(tools);
+        }
     }
 
     fn finalize(self) -> Result<AppConfig> {
@@ -174,6 +202,8 @@ impl PartialAppConfig {
                 .context("config is missing the [azure] table")?
                 .finalize()?,
             ui: self.ui.unwrap_or_default().finalize(),
+            subagents: self.subagents.unwrap_or_default().finalize(),
+            tools: self.tools.unwrap_or_default().finalize(),
         })
     }
 }
@@ -254,6 +284,53 @@ impl PartialUiConfig {
     }
 }
 
+#[derive(Debug, Clone, Default, Deserialize)]
+struct PartialSubagentConfig {
+    max_concurrent: Option<usize>,
+}
+
+impl PartialSubagentConfig {
+    fn merge(&mut self, other: Self) {
+        if other.max_concurrent.is_some() {
+            self.max_concurrent = other.max_concurrent;
+        }
+    }
+
+    fn finalize(self) -> SubagentConfig {
+        SubagentConfig {
+            max_concurrent: self
+                .max_concurrent
+                .unwrap_or_else(default_max_concurrent_subagents),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct PartialToolConfig {
+    search_include_patterns: Option<Vec<String>>,
+    max_output_tokens: Option<usize>,
+}
+
+impl PartialToolConfig {
+    fn merge(&mut self, other: Self) {
+        if other.search_include_patterns.is_some() {
+            self.search_include_patterns = other.search_include_patterns;
+        }
+        if other.max_output_tokens.is_some() {
+            self.max_output_tokens = other.max_output_tokens;
+        }
+    }
+
+    fn finalize(self) -> ToolConfig {
+        ToolConfig {
+            search_include_patterns: self.search_include_patterns.unwrap_or_default(),
+            max_output_tokens: self
+                .max_output_tokens
+                .unwrap_or_else(tool_policy::default_tool_output_max_tokens),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct AzureConfig {
     pub resource_name: String,
@@ -286,6 +363,37 @@ impl Default for UiConfig {
             show_thinking: default_show_thinking(),
             show_tool_output: false,
             command_history_limit: default_command_history_limit(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct SubagentConfig {
+    #[serde(default = "default_max_concurrent_subagents")]
+    pub max_concurrent: usize,
+}
+
+impl Default for SubagentConfig {
+    fn default() -> Self {
+        Self {
+            max_concurrent: default_max_concurrent_subagents(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct ToolConfig {
+    #[serde(default)]
+    pub search_include_patterns: Vec<String>,
+    #[serde(default = "tool_policy::default_tool_output_max_tokens")]
+    pub max_output_tokens: usize,
+}
+
+impl Default for ToolConfig {
+    fn default() -> Self {
+        Self {
+            search_include_patterns: Vec::new(),
+            max_output_tokens: tool_policy::default_tool_output_max_tokens(),
         }
     }
 }
@@ -333,6 +441,10 @@ fn default_show_thinking() -> bool {
 
 fn default_command_history_limit() -> usize {
     20
+}
+
+fn default_max_concurrent_subagents() -> usize {
+    4
 }
 
 fn default_api_version() -> String {
@@ -448,6 +560,13 @@ mod tests {
             show_thinking = false
             show_tool_output = true
             command_history_limit = 42
+
+            [subagents]
+            max_concurrent = 6
+
+            [tools]
+            search_include_patterns = [".research/**"]
+            max_output_tokens = 2048
             "#,
         )
         .expect("config parses");
@@ -457,6 +576,9 @@ mod tests {
         assert!(!config.ui.show_thinking);
         assert!(config.ui.show_tool_output);
         assert_eq!(config.ui.command_history_limit, 42);
+        assert_eq!(config.subagents.max_concurrent, 6);
+        assert_eq!(config.tools.search_include_patterns, vec![".research/**"]);
+        assert_eq!(config.tools.max_output_tokens, 2048);
         assert_eq!(config.azure.api_version, DEFAULT_API_VERSION);
     }
 
@@ -476,6 +598,12 @@ mod tests {
         assert!(config.ui.show_thinking);
         assert!(!config.ui.show_tool_output);
         assert_eq!(config.ui.command_history_limit, 20);
+        assert_eq!(config.subagents.max_concurrent, 4);
+        assert!(config.tools.search_include_patterns.is_empty());
+        assert_eq!(
+            config.tools.max_output_tokens,
+            tool_policy::default_tool_output_max_tokens()
+        );
     }
 
     #[test]
@@ -502,6 +630,8 @@ mod tests {
                 api_version: default_api_version(),
             },
             ui: UiConfig::default(),
+            subagents: SubagentConfig::default(),
+            tools: ToolConfig::default(),
         };
 
         assert!(config.validate().is_err());
@@ -534,6 +664,8 @@ mod tests {
                 api_version: default_api_version(),
             },
             ui: UiConfig::default(),
+            subagents: SubagentConfig::default(),
+            tools: ToolConfig::default(),
         };
 
         assert!(config.validate().is_err());
@@ -557,6 +689,12 @@ mod tests {
             show_thinking = true
             show_tool_output = false
             command_history_limit = 50
+
+            [subagents]
+            max_concurrent = 8
+
+            [tools]
+            max_output_tokens = 4000
             "#,
         )
         .expect("write home config");
@@ -571,6 +709,12 @@ mod tests {
             [ui]
             show_tool_output = true
             command_history_limit = 7
+
+            [subagents]
+            max_concurrent = 2
+
+            [tools]
+            search_include_patterns = [".scratch/**"]
             "#,
         )
         .expect("write cwd config");
@@ -585,6 +729,9 @@ mod tests {
         assert!(config.ui.show_thinking);
         assert!(config.ui.show_tool_output);
         assert_eq!(config.ui.command_history_limit, 7);
+        assert_eq!(config.subagents.max_concurrent, 2);
+        assert_eq!(config.tools.max_output_tokens, 4000);
+        assert_eq!(config.tools.search_include_patterns, vec![".scratch/**"]);
 
         fs::remove_file(home_path).expect("remove home config");
         fs::remove_file(cwd_path).expect("remove cwd config");
@@ -624,6 +771,11 @@ mod tests {
         assert!(!config.ui.show_thinking);
         assert!(!config.ui.show_tool_output);
         assert_eq!(config.ui.command_history_limit, 9);
+        assert_eq!(config.subagents.max_concurrent, 4);
+        assert_eq!(
+            config.tools.max_output_tokens,
+            tool_policy::default_tool_output_max_tokens()
+        );
 
         fs::remove_file(home_path).expect("remove home config");
         fs::remove_file(cwd_path).expect("remove cwd config");
@@ -718,5 +870,65 @@ mod tests {
             default_config_update_path(Some(&home_path), Some(&cwd_path)).expect("select path");
 
         assert_eq!(selected, home_path);
+    }
+
+    #[test]
+    fn validation_rejects_zero_subagent_concurrency() {
+        let config = AppConfig {
+            azure: AzureConfig {
+                resource_name: "demo-resource".into(),
+                api_key: "secret".into(),
+                model_name: "gpt-5.4-mini".into(),
+                reasoning_effort: ReasoningEffort::Medium,
+                api_version: default_api_version(),
+            },
+            ui: UiConfig::default(),
+            subagents: SubagentConfig { max_concurrent: 0 },
+            tools: ToolConfig::default(),
+        };
+
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validation_rejects_zero_tool_output_token_limit() {
+        let config = AppConfig {
+            azure: AzureConfig {
+                resource_name: "demo-resource".into(),
+                api_key: "secret".into(),
+                model_name: "gpt-5.4-mini".into(),
+                reasoning_effort: ReasoningEffort::Medium,
+                api_version: default_api_version(),
+            },
+            ui: UiConfig::default(),
+            subagents: SubagentConfig::default(),
+            tools: ToolConfig {
+                search_include_patterns: Vec::new(),
+                max_output_tokens: 0,
+            },
+        };
+
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validation_rejects_invalid_search_include_patterns() {
+        let config = AppConfig {
+            azure: AzureConfig {
+                resource_name: "demo-resource".into(),
+                api_key: "secret".into(),
+                model_name: "gpt-5.4-mini".into(),
+                reasoning_effort: ReasoningEffort::Medium,
+                api_version: default_api_version(),
+            },
+            ui: UiConfig::default(),
+            subagents: SubagentConfig::default(),
+            tools: ToolConfig {
+                search_include_patterns: vec!["[".into()],
+                max_output_tokens: tool_policy::default_tool_output_max_tokens(),
+            },
+        };
+
+        assert!(config.validate().is_err());
     }
 }
