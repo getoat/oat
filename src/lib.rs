@@ -1,4 +1,5 @@
 pub mod app;
+mod command_history;
 pub mod config;
 pub mod input;
 pub mod llm;
@@ -22,7 +23,9 @@ use crossterm::{
 use ratatui::{Terminal, backend::CrosstermBackend};
 use tokio::{runtime::Runtime, sync::mpsc, task::JoinHandle};
 
-use crate::{config::AppConfig, llm::LlmService, stats::StatsStore};
+use crate::{
+    command_history::CommandHistoryStore, config::AppConfig, llm::LlmService, stats::StatsStore,
+};
 
 pub type Tui = Terminal<CrosstermBackend<Stdout>>;
 
@@ -46,6 +49,11 @@ pub fn run(terminal: &mut Tui, config: AppConfig) -> Result<(), Box<dyn Error>> 
         config.azure.model_name.clone(),
         config.azure.reasoning_effort,
     );
+    let command_history = CommandHistoryStore::new(config.ui.command_history_limit);
+    match command_history.load() {
+        Ok(entries) => app.restore_command_history(entries, config.ui.command_history_limit),
+        Err(error) => app.push_error_message(format!("Failed to load input history: {error}")),
+    }
     let mut llm = {
         let _guard = runtime.enter();
         LlmService::from_config(&config, app.mode(), llm::WriteApprovalController::default())?
@@ -68,6 +76,7 @@ pub fn run(terminal: &mut Tui, config: AppConfig) -> Result<(), Box<dyn Error>> 
                 active_reply_task = None;
             }
             app.apply(Action::StreamEvent { reply_id, event });
+            persist_command_history_if_needed(&mut app, &command_history);
         }
 
         terminal.draw(|frame| ui::render(frame, &mut app))?;
@@ -91,10 +100,14 @@ pub fn run(terminal: &mut Tui, config: AppConfig) -> Result<(), Box<dyn Error>> 
             if let Err(error) = runner.run(effect) {
                 app.push_error_message(format!("Command failed: {error}"));
             }
+            persist_command_history_if_needed(&mut app, &command_history);
+        } else {
+            persist_command_history_if_needed(&mut app, &command_history);
         }
 
         if last_tick.elapsed() >= tick_rate {
             app.apply(app::Action::Tick);
+            persist_command_history_if_needed(&mut app, &command_history);
             last_tick = Instant::now();
         }
     }
@@ -213,6 +226,16 @@ impl EffectRunner<'_> {
         if let Some((_, task)) = self.active_reply_task.take() {
             task.abort();
         }
+    }
+}
+
+fn persist_command_history_if_needed(app: &mut App, store: &CommandHistoryStore) {
+    let Some(entries) = app.take_command_history_to_persist() else {
+        return;
+    };
+
+    if let Err(error) = store.save(&entries) {
+        app.push_error_message(format!("Failed to save input history: {error}"));
     }
 }
 

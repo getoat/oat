@@ -1,5 +1,5 @@
 use ratatui::layout::Rect;
-use ratatui_textarea::{CursorMove, TextArea};
+use ratatui_textarea::{CursorMove, Input, TextArea};
 use rig::completion::Message as RigMessage;
 use std::path::{Path, PathBuf};
 
@@ -14,6 +14,7 @@ const COMMANDS: [SlashCommand; 4] = [
     SlashCommand::Effort,
     SlashCommand::Quit,
 ];
+const DEFAULT_COMMAND_HISTORY_LIMIT: usize = 20;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SlashCommand {
@@ -215,6 +216,15 @@ pub(super) struct HistoryViewState {
 }
 
 #[derive(Debug)]
+struct CommandRecallState {
+    entries: Vec<String>,
+    browsing_index: Option<usize>,
+    draft: Option<String>,
+    limit: usize,
+    dirty: bool,
+}
+
+#[derive(Debug)]
 pub struct App {
     pub(super) workspace_root: PathBuf,
     pub(super) mode: AccessMode,
@@ -233,6 +243,7 @@ pub struct App {
     pub(super) reasoning_effort: ReasoningEffort,
     pub(super) selected_command: SlashCommand,
     pub(super) history: HistoryViewState,
+    command_history: CommandRecallState,
 }
 
 impl App {
@@ -265,6 +276,7 @@ impl App {
             reasoning_effort,
             selected_command: SlashCommand::NewSession,
             history: HistoryViewState::default(),
+            command_history: CommandRecallState::default(),
         }
     }
 
@@ -415,10 +427,25 @@ impl App {
     }
 
     pub(super) fn set_composer_text(&mut self, text: &str) {
+        self.set_composer_text_internal(text, true);
+    }
+
+    fn set_composer_text_internal(&mut self, text: &str, reset_command_history: bool) {
         let mut composer = new_composer_with_text(text);
         composer.move_cursor(CursorMove::End);
         self.composer = composer;
+        if reset_command_history {
+            self.command_history.reset_navigation();
+        }
         self.sync_command_selection();
+    }
+
+    pub(crate) fn restore_command_history(&mut self, entries: Vec<String>, limit: usize) {
+        self.command_history.restore(entries, limit);
+    }
+
+    pub(crate) fn take_command_history_to_persist(&mut self) -> Option<Vec<String>> {
+        self.command_history.take_dirty_entries()
     }
 
     pub(super) fn reset_session(&mut self) {
@@ -433,6 +460,7 @@ impl App {
         self.write_approval_policy = WriteApprovalPolicy::AskEveryTime;
         self.resume_history_follow();
         self.history.reset();
+        self.command_history.reset_navigation();
         self.clear_composer();
     }
 
@@ -582,8 +610,55 @@ impl App {
     }
 
     pub(super) fn clear_composer(&mut self) {
-        self.composer = new_composer();
+        self.set_composer_text_internal("", true);
+    }
+
+    pub(super) fn insert_composer_newline(&mut self) {
+        self.command_history.reset_navigation();
+        self.composer.insert_newline();
         self.sync_command_selection();
+    }
+
+    pub(super) fn apply_composer_input(&mut self, input: Input) {
+        self.command_history.reset_navigation();
+        self.composer.input(input);
+        self.sync_command_selection();
+    }
+
+    pub(super) fn paste_into_composer(&mut self, text: &str) {
+        self.command_history.reset_navigation();
+        self.composer.insert_str(text);
+        self.sync_command_selection();
+    }
+
+    pub(super) fn record_submitted_input(&mut self, text: &str) {
+        self.command_history.record(text);
+    }
+
+    pub(super) fn should_recall_previous_input(&self) -> bool {
+        self.composer.cursor().0 == 0
+    }
+
+    pub(super) fn should_recall_next_input(&self) -> bool {
+        let current_row = self.composer.cursor().0;
+        current_row + 1 >= self.composer.lines().len()
+    }
+
+    pub(super) fn recall_previous_input(&mut self) -> bool {
+        let current = self.composer.lines().join("\n");
+        let Some(previous) = self.command_history.previous(&current) else {
+            return false;
+        };
+        self.set_composer_text_internal(&previous, false);
+        true
+    }
+
+    pub(super) fn recall_next_input(&mut self) -> bool {
+        let Some(next) = self.command_history.next() else {
+            return false;
+        };
+        self.set_composer_text_internal(&next, false);
+        true
     }
 
     pub(crate) fn sync_history_viewport(
@@ -862,6 +937,94 @@ impl HistoryViewState {
         }
 
         lines.join("\n")
+    }
+}
+
+impl Default for CommandRecallState {
+    fn default() -> Self {
+        Self {
+            entries: Vec::new(),
+            browsing_index: None,
+            draft: None,
+            limit: DEFAULT_COMMAND_HISTORY_LIMIT,
+            dirty: false,
+        }
+    }
+}
+
+impl CommandRecallState {
+    fn restore(&mut self, mut entries: Vec<String>, limit: usize) {
+        self.limit = limit;
+        self.browsing_index = None;
+        self.draft = None;
+        self.dirty = false;
+        self.entries.clear();
+        self.entries.append(&mut entries);
+        self.trim_to_limit();
+    }
+
+    fn record(&mut self, text: &str) {
+        if text.trim().is_empty() {
+            return;
+        }
+
+        self.entries.push(text.to_string());
+        self.trim_to_limit();
+        self.browsing_index = None;
+        self.draft = None;
+        self.dirty = true;
+    }
+
+    fn previous(&mut self, current: &str) -> Option<String> {
+        if self.entries.is_empty() {
+            return None;
+        }
+
+        match self.browsing_index {
+            Some(index) if index > 0 => self.browsing_index = Some(index - 1),
+            Some(_) => {}
+            None => {
+                self.draft = Some(current.to_string());
+                self.browsing_index = Some(self.entries.len() - 1);
+            }
+        }
+
+        self.browsing_index.map(|index| self.entries[index].clone())
+    }
+
+    fn next(&mut self) -> Option<String> {
+        match self.browsing_index {
+            None => None,
+            Some(index) if index + 1 < self.entries.len() => {
+                self.browsing_index = Some(index + 1);
+                self.browsing_index.map(|index| self.entries[index].clone())
+            }
+            Some(_) => {
+                self.browsing_index = None;
+                Some(self.draft.take().unwrap_or_default())
+            }
+        }
+    }
+
+    fn reset_navigation(&mut self) {
+        self.browsing_index = None;
+        self.draft = None;
+    }
+
+    fn take_dirty_entries(&mut self) -> Option<Vec<String>> {
+        if !self.dirty {
+            return None;
+        }
+
+        self.dirty = false;
+        Some(self.entries.clone())
+    }
+
+    fn trim_to_limit(&mut self) {
+        self.entries.retain(|entry| !entry.trim().is_empty());
+        if self.entries.len() > self.limit {
+            self.entries.drain(..self.entries.len() - self.limit);
+        }
     }
 }
 

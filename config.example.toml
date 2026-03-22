@@ -15,3 +15,6 @@ api_version = "2025-01-01-preview"
 [ui]
 show_thinking = true
 show_tool_output = false
+
+# Number of submitted prompts/commands to keep for up/down recall.
+command_history_limit = 20

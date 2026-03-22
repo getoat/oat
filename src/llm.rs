@@ -474,6 +474,7 @@ mod tests {
             ui: UiConfig {
                 show_thinking: true,
                 show_tool_output: false,
+                command_history_limit: 20,
             },
         }
     }

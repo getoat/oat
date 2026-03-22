@@ -92,6 +92,7 @@ impl App {
             Action::SelectPreviousCommand => {
                 if self.command_palette_visible() {
                     self.move_command_selection_up();
+                } else if self.should_recall_previous_input() && self.recall_previous_input() {
                 } else {
                     self.move_composer_cursor_up();
                 }
@@ -100,6 +101,7 @@ impl App {
             Action::SelectNextCommand => {
                 if self.command_palette_visible() {
                     self.move_command_selection_down();
+                } else if self.should_recall_next_input() && self.recall_next_input() {
                 } else {
                     self.move_composer_cursor_down();
                 }
@@ -133,7 +135,7 @@ impl App {
                 if self.has_pending_write_approval() {
                     return None;
                 }
-                self.composer.insert_newline();
+                self.insert_composer_newline();
                 None
             }
             Action::SubmitMessage => submit_message(self),
@@ -153,16 +155,14 @@ impl App {
                 if self.has_pending_write_approval() {
                     return None;
                 }
-                self.composer.input(input);
-                self.sync_command_selection();
+                self.apply_composer_input(input);
                 None
             }
             Action::Paste(text) => {
                 if self.has_pending_write_approval() {
                     return None;
                 }
-                self.composer.insert_str(text);
-                self.sync_command_selection();
+                self.paste_into_composer(&text);
                 None
             }
             Action::StartHistorySelection { column, row } => {
@@ -193,25 +193,27 @@ fn submit_message(app: &mut App) -> Option<Effect> {
         return None;
     }
 
+    let submitted = app.composer.lines().join("\n");
+    let submitted = submitted.trim().to_owned();
+
     if app.command_query().is_some() {
         let command_name = app.command_name().unwrap_or_default().to_owned();
         let arguments = app.command_arguments().unwrap_or_default().to_owned();
-        return submit_command(app, &command_name, &arguments);
+        return submit_command(app, &command_name, &arguments, &submitted);
     }
 
     if app.pending_reply.is_some() {
         return None;
     }
 
-    let prompt = app.composer.lines().join("\n");
-    let prompt = prompt.trim().to_owned();
-    if prompt.is_empty() {
+    if submitted.is_empty() {
         return None;
     }
 
+    app.record_submitted_input(&submitted);
     app.entries.push(TranscriptEntry::Message(ChatMessage {
         speaker: Speaker::User,
-        text: prompt.clone(),
+        text: submitted.clone(),
         style: MessageStyle::Plain,
     }));
     app.resume_history_follow();
@@ -225,13 +227,19 @@ fn submit_message(app: &mut App) -> Option<Effect> {
 
     Some(Effect::PromptModel {
         reply_id,
-        prompt,
+        prompt: submitted,
         history: app.session_history().to_vec(),
     })
 }
 
-fn submit_command(app: &mut App, command_name: &str, arguments: &str) -> Option<Effect> {
+fn submit_command(
+    app: &mut App,
+    command_name: &str,
+    arguments: &str,
+    submitted: &str,
+) -> Option<Effect> {
     let Some(command) = app.selected_command() else {
+        app.record_submitted_input(submitted);
         app.push_error_message(format!(
             "Unknown command `{command_name}`. Try /new, /stats, /quit, or /effort."
         ));
@@ -243,6 +251,7 @@ fn submit_command(app: &mut App, command_name: &str, arguments: &str) -> Option<
         return None;
     }
 
+    app.record_submitted_input(submitted);
     match command {
         SlashCommand::NewSession => {
             app.reset_session();
@@ -505,6 +514,45 @@ mod tests {
                 history: vec![RigMessage::assistant("previous")],
             })
         );
+    }
+
+    #[test]
+    fn up_arrow_recalls_previous_submitted_input() {
+        let mut app = new_app(true);
+        app.restore_command_history(vec!["first".into(), "second".into()], 20);
+
+        app.apply(Action::SelectPreviousCommand);
+
+        assert_eq!(app.composer.lines(), ["second"]);
+        app.apply(Action::SelectPreviousCommand);
+        assert_eq!(app.composer.lines(), ["first"]);
+    }
+
+    #[test]
+    fn down_arrow_restores_newer_history_and_original_draft() {
+        let mut app = new_app(true);
+        app.restore_command_history(vec!["first".into(), "second".into()], 20);
+        app.composer.insert_str("draft");
+
+        app.apply(Action::SelectPreviousCommand);
+        assert_eq!(app.composer.lines(), ["second"]);
+
+        app.apply(Action::SelectNextCommand);
+        assert_eq!(app.composer.lines(), ["draft"]);
+    }
+
+    #[test]
+    fn up_arrow_keeps_multiline_cursor_navigation_when_not_at_top() {
+        let mut app = new_app(true);
+        app.restore_command_history(vec!["previous".into()], 20);
+        app.composer.insert_str("line one");
+        app.composer.insert_newline();
+        app.composer.insert_str("line two");
+
+        app.apply(Action::SelectPreviousCommand);
+
+        assert_eq!(app.composer.lines(), ["line one", "line two"]);
+        assert_eq!(app.composer.cursor().0, 0);
     }
 
     #[test]

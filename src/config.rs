@@ -189,6 +189,7 @@ impl PartialAzureConfig {
 struct PartialUiConfig {
     show_thinking: Option<bool>,
     show_tool_output: Option<bool>,
+    command_history_limit: Option<usize>,
 }
 
 impl PartialUiConfig {
@@ -199,12 +200,18 @@ impl PartialUiConfig {
         if other.show_tool_output.is_some() {
             self.show_tool_output = other.show_tool_output;
         }
+        if other.command_history_limit.is_some() {
+            self.command_history_limit = other.command_history_limit;
+        }
     }
 
     fn finalize(self) -> UiConfig {
         UiConfig {
             show_thinking: self.show_thinking.unwrap_or_else(default_show_thinking),
             show_tool_output: self.show_tool_output.unwrap_or(false),
+            command_history_limit: self
+                .command_history_limit
+                .unwrap_or_else(default_command_history_limit),
         }
     }
 }
@@ -231,6 +238,8 @@ pub struct UiConfig {
     pub show_thinking: bool,
     #[serde(default)]
     pub show_tool_output: bool,
+    #[serde(default = "default_command_history_limit")]
+    pub command_history_limit: usize,
 }
 
 impl Default for UiConfig {
@@ -238,6 +247,7 @@ impl Default for UiConfig {
         Self {
             show_thinking: default_show_thinking(),
             show_tool_output: false,
+            command_history_limit: default_command_history_limit(),
         }
     }
 }
@@ -281,6 +291,10 @@ impl ReasoningEffort {
 
 fn default_show_thinking() -> bool {
     true
+}
+
+fn default_command_history_limit() -> usize {
+    20
 }
 
 fn default_api_version() -> String {
@@ -383,6 +397,7 @@ mod tests {
             [ui]
             show_thinking = false
             show_tool_output = true
+            command_history_limit = 42
             "#,
         )
         .expect("config parses");
@@ -391,6 +406,7 @@ mod tests {
         assert_eq!(config.azure.reasoning_effort, ReasoningEffort::Medium);
         assert!(!config.ui.show_thinking);
         assert!(config.ui.show_tool_output);
+        assert_eq!(config.ui.command_history_limit, 42);
         assert_eq!(config.azure.api_version, DEFAULT_API_VERSION);
     }
 
@@ -409,6 +425,7 @@ mod tests {
 
         assert!(config.ui.show_thinking);
         assert!(!config.ui.show_tool_output);
+        assert_eq!(config.ui.command_history_limit, 20);
     }
 
     #[test]
@@ -473,6 +490,7 @@ mod tests {
             [ui]
             show_thinking = true
             show_tool_output = false
+            command_history_limit = 50
             "#,
         )
         .expect("write home config");
@@ -486,6 +504,7 @@ mod tests {
 
             [ui]
             show_tool_output = true
+            command_history_limit = 7
             "#,
         )
         .expect("write cwd config");
@@ -499,6 +518,7 @@ mod tests {
         assert_eq!(config.azure.reasoning_effort, ReasoningEffort::High);
         assert!(config.ui.show_thinking);
         assert!(config.ui.show_tool_output);
+        assert_eq!(config.ui.command_history_limit, 7);
 
         fs::remove_file(home_path).expect("remove home config");
         fs::remove_file(cwd_path).expect("remove cwd config");
@@ -526,6 +546,7 @@ mod tests {
             r#"
             [ui]
             show_thinking = false
+            command_history_limit = 9
             "#,
         )
         .expect("write cwd config");
@@ -536,6 +557,7 @@ mod tests {
         assert_eq!(config.azure.model_name, "gpt-5-mini");
         assert!(!config.ui.show_thinking);
         assert!(!config.ui.show_tool_output);
+        assert_eq!(config.ui.command_history_limit, 9);
 
         fs::remove_file(home_path).expect("remove home config");
         fs::remove_file(cwd_path).expect("remove cwd config");
