@@ -15,11 +15,7 @@ use super::{
 
 const MAX_VISIBLE_TOOL_ACTIVITY: usize = 5;
 const STARTUP_VERSION: &str = env!("CARGO_PKG_VERSION");
-const STARTUP_SHIMMER_STEP: isize = 4;
-const STARTUP_SHIMMER_WIDTH: isize = 2;
-const STARTUP_BANNER_FRONT_OFFSET: isize = 15;
-const STARTUP_BANNER_LINE_DELAY: isize = 2;
-const STARTUP_VERSION_FRONT_DELAY: isize = 8;
+const STARTUP_SPARKLE_INTERVAL_TICKS: usize = 3;
 const STARTUP_BANNER_LINES: [&str; 7] = [
     "                         ░██    ",
     "                         ░██    ",
@@ -313,51 +309,74 @@ fn push_startup_banner_lines(lines: &mut Vec<Line<'static>>, accent: Color, tick
         STARTUP_BANNER_LINES
             .iter()
             .enumerate()
-            .map(|(line_index, line)| {
-                animated_startup_line(
-                    line,
-                    accent,
-                    Style::default().fg(accent).add_modifier(Modifier::BOLD),
-                    STARTUP_BANNER_FRONT_OFFSET + tick_count as isize * STARTUP_SHIMMER_STEP
-                        - line_index as isize * STARTUP_BANNER_LINE_DELAY,
-                )
-            }),
+            .map(|(line_index, line)| sparkling_startup_line(line, accent, line_index, tick_count)),
     );
-    lines.push(animated_startup_line(
-        &centered_startup_version(),
-        accent,
+    lines.push(Line::from(Span::styled(
+        centered_startup_version(),
         Style::default().fg(accent),
-        tick_count as isize * STARTUP_SHIMMER_STEP - STARTUP_VERSION_FRONT_DELAY,
-    ));
+    )));
 }
 
-fn animated_startup_line(
+fn sparkling_startup_line(
     text: &str,
     accent: Color,
-    settled_style: Style,
-    front: isize,
+    row: usize,
+    tick_count: usize,
 ) -> Line<'static> {
-    let pending_style = Style::default()
-        .fg(Color::DarkGray)
-        .add_modifier(Modifier::DIM);
-    let shimmer_style = settled_style.fg(startup_highlight_color(accent));
-    let mut spans = Vec::with_capacity(text.chars().count());
-
-    for (column, ch) in text.chars().enumerate() {
-        let column = column as isize;
-        let style = if column <= front {
-            if column >= front - STARTUP_SHIMMER_WIDTH {
-                shimmer_style
+    let phase = tick_count / STARTUP_SPARKLE_INTERVAL_TICKS;
+    let base_style = Style::default().fg(accent).add_modifier(Modifier::BOLD);
+    let lighter_style = Style::default()
+        .fg(startup_highlight_color(accent))
+        .add_modifier(Modifier::BOLD);
+    let darker_style = Style::default()
+        .fg(startup_shadow_color(accent))
+        .add_modifier(Modifier::BOLD);
+    let spans: Vec<_> = text
+        .chars()
+        .enumerate()
+        .map(|(column, ch)| {
+            let style = if is_startup_banner_block(ch) {
+                startup_sparkle_style(base_style, lighter_style, darker_style, row, column, phase)
             } else {
-                settled_style
-            }
-        } else {
-            pending_style
-        };
-        spans.push(Span::styled(ch.to_string(), style));
-    }
+                base_style
+            };
+            Span::styled(ch.to_string(), style)
+        })
+        .collect();
 
     Line::from(spans)
+}
+
+fn startup_sparkle_style(
+    base_style: Style,
+    lighter_style: Style,
+    darker_style: Style,
+    row: usize,
+    column: usize,
+    phase: usize,
+) -> Style {
+    match sparkle_roll(row, column, phase) {
+        0 | 1 => lighter_style,
+        2 => darker_style,
+        _ => base_style,
+    }
+}
+
+fn sparkle_roll(row: usize, column: usize, phase: usize) -> usize {
+    let seed = row as u64 * 37 + column as u64 * 17 + phase as u64 * 29 + 11;
+    ((seed ^ (seed >> 3) ^ (seed >> 7)) % 23) as usize
+}
+
+fn is_startup_banner_block(ch: char) -> bool {
+    matches!(ch, '█' | '░')
+}
+
+fn startup_shadow_color(accent: Color) -> Color {
+    match accent {
+        Color::Magenta => Color::Rgb(144, 72, 176),
+        Color::Cyan => Color::Rgb(0, 146, 168),
+        other => other,
+    }
 }
 
 fn startup_highlight_color(accent: Color) -> Color {

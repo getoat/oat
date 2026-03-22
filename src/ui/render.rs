@@ -534,12 +534,10 @@ mod tests {
             "expected startup version to render underneath the banner"
         );
         assert!(
-            word_has_foreground(
-                terminal.backend().buffer(),
-                "░███████",
-                accent_color(app.mode())
-            ),
-            "expected startup banner to use the accent color"
+            banner_foregrounds(terminal.backend().buffer())
+                .iter()
+                .any(|color| *color == accent_color(app.mode())),
+            "expected startup banner to retain the base accent color"
         );
 
         app.apply(Action::ToggleMode);
@@ -558,7 +556,7 @@ mod tests {
     }
 
     #[test]
-    fn render_animates_startup_version_into_accent_color() {
+    fn render_keeps_startup_banner_sparkling() {
         let backend = TestBackend::new(140, 16);
         let mut terminal = Terminal::new(backend).expect("test terminal");
         let mut app = App::new(true, false, "gpt-5.4-mini", ReasoningEffort::Medium);
@@ -566,25 +564,23 @@ mod tests {
         terminal
             .draw(|frame| render(frame, &mut app))
             .expect("initial render succeeds");
+        let before = banner_foregrounds(terminal.backend().buffer());
         assert!(
-            word_has_foreground(terminal.backend().buffer(), "v0.1.0", Color::DarkGray),
-            "expected startup version to begin dim before the shimmer passes"
+            has_multiple_unique_colors(&before),
+            "expected startup banner to use more than one shade while sparkling"
         );
 
-        for _ in 0..8 {
+        for _ in 0..4 {
             app.apply(Action::Tick);
         }
 
         terminal
             .draw(|frame| render(frame, &mut app))
-            .expect("animated render succeeds");
+            .expect("sparkle render succeeds");
+        let after = banner_foregrounds(terminal.backend().buffer());
         assert!(
-            word_has_foreground(
-                terminal.backend().buffer(),
-                "v0.1.0",
-                accent_color(app.mode())
-            ),
-            "expected startup version to settle into the accent color"
+            before != after,
+            "expected startup banner sparkle colors to change over time"
         );
     }
 
@@ -1668,6 +1664,22 @@ mod tests {
         }
 
         false
+    }
+
+    fn banner_foregrounds(buffer: &ratatui::buffer::Buffer) -> Vec<Color> {
+        buffer
+            .content
+            .iter()
+            .filter(|cell| matches!(cell.symbol(), "█" | "░"))
+            .map(|cell| cell.fg)
+            .collect()
+    }
+
+    fn has_multiple_unique_colors(colors: &[Color]) -> bool {
+        colors
+            .iter()
+            .enumerate()
+            .any(|(index, color)| colors.iter().skip(index + 1).any(|other| other != color))
     }
 
     fn longest_background_run(row: &[ratatui::buffer::Cell], background: Color) -> usize {
