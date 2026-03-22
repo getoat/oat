@@ -14,7 +14,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use app::{Action, App, Effect};
+use anyhow::anyhow;
+use app::{Action, App, ApprovalMode, Effect};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture},
@@ -30,6 +31,21 @@ use crate::{
 
 pub type Tui = Terminal<CrosstermBackend<Stdout>>;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StartupOptions {
+    pub access_mode: app::AccessMode,
+    pub approval_mode: ApprovalMode,
+}
+
+impl Default for StartupOptions {
+    fn default() -> Self {
+        Self {
+            access_mode: app::AccessMode::ReadOnly,
+            approval_mode: ApprovalMode::Manual,
+        }
+    }
+}
+
 struct EffectRunner<'a> {
     runtime: &'a Runtime,
     terminal: &'a mut Tui,
@@ -42,13 +58,23 @@ struct EffectRunner<'a> {
 }
 
 pub fn run(terminal: &mut Tui, config: AppConfig) -> Result<(), Box<dyn Error>> {
+    run_with_options(terminal, config, StartupOptions::default())
+}
+
+pub fn run_with_options(
+    terminal: &mut Tui,
+    config: AppConfig,
+    startup: StartupOptions,
+) -> Result<(), Box<dyn Error>> {
     let runtime = Runtime::new()?;
     let mut config = config;
-    let mut app = App::new(
+    let mut app = App::with_startup(
         config.ui.show_thinking,
         config.ui.show_tool_output,
         config.azure.model_name.clone(),
         config.azure.reasoning_effort,
+        startup.access_mode,
+        startup.approval_mode,
     );
     let command_history = CommandHistoryStore::new(config.ui.command_history_limit);
     match command_history.load() {
@@ -57,7 +83,11 @@ pub fn run(terminal: &mut Tui, config: AppConfig) -> Result<(), Box<dyn Error>> 
     }
     let mut llm = {
         let _guard = runtime.enter();
-        LlmService::from_config(&config, app.mode(), llm::WriteApprovalController::default())?
+        LlmService::from_config(
+            &config,
+            app.mode(),
+            llm::WriteApprovalController::new(startup.approval_mode),
+        )?
     };
     let (stream_tx, mut stream_rx) = mpsc::unbounded_channel();
     let stats = StatsStore::new();
@@ -116,6 +146,60 @@ pub fn run(terminal: &mut Tui, config: AppConfig) -> Result<(), Box<dyn Error>> 
 
     stats.finalize_current_session()?;
     Ok(())
+}
+
+pub fn run_headless(
+    config: AppConfig,
+    startup: StartupOptions,
+    prompt: String,
+) -> Result<String, Box<dyn Error>> {
+    let runtime = Runtime::new()?;
+    let stats = StatsStore::new();
+    let llm = {
+        let _guard = runtime.enter();
+        LlmService::from_config(
+            &config,
+            startup.access_mode,
+            llm::WriteApprovalController::new(startup.approval_mode),
+        )?
+    };
+    let (stream_tx, mut stream_rx) = mpsc::unbounded_channel();
+    let stats_hook = stats.hook_for_model(config.azure.model_name.clone());
+    let task = runtime.spawn({
+        let llm = llm.clone();
+        async move {
+            llm.stream_prompt(1, prompt, Vec::new(), stats_hook, stream_tx)
+                .await;
+        }
+    });
+
+    let result = runtime.block_on(async {
+        let mut output = String::new();
+
+        while let Some((reply_id, event)) = stream_rx.recv().await {
+            if reply_id != 1 {
+                continue;
+            }
+
+            match event {
+                llm::StreamEvent::TextDelta(delta) => output.push_str(&delta),
+                llm::StreamEvent::Finished { .. } => return Ok(output),
+                llm::StreamEvent::Failed(error) => {
+                    return Err(anyhow!("Request failed: {error}"));
+                }
+                llm::StreamEvent::ReasoningDelta(_)
+                | llm::StreamEvent::ToolCall { .. }
+                | llm::StreamEvent::ToolResult { .. }
+                | llm::StreamEvent::WriteApprovalRequested { .. } => {}
+            }
+        }
+
+        Err(anyhow!("Request ended before response completed."))
+    });
+
+    task.abort();
+    stats.finalize_current_session()?;
+    result.map_err(Into::into)
 }
 
 pub fn setup_terminal() -> Result<Tui, Box<dyn Error>> {

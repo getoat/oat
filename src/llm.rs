@@ -20,7 +20,7 @@ use serde_json::json;
 use tokio::sync::{mpsc::UnboundedSender, oneshot};
 
 use crate::{
-    app::{AccessMode, WriteApprovalDecision},
+    app::{AccessMode, ApprovalMode, WriteApprovalDecision},
     config::AppConfig,
     stats::StatsHook,
     tools::{is_mutation_tool, tool_names_for_mode, tools_for_mode},
@@ -53,14 +53,14 @@ pub enum StreamEvent {
 
 type LlmAgent = rig::agent::Agent<openai::CompletionModel>;
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct WriteApprovalController {
     inner: Arc<Mutex<WriteApprovalState>>,
 }
 
-#[derive(Default)]
 struct WriteApprovalState {
-    allow_all_session: bool,
+    default_mode: ApprovalMode,
+    mode: ApprovalMode,
     pending: HashMap<String, oneshot::Sender<WriteApprovalDecision>>,
 }
 
@@ -100,7 +100,7 @@ impl LlmService {
             .build()
             .context("failed to build OpenAI-compatible Azure client")?;
 
-        let preamble = mode_preamble(access_mode);
+        let preamble = mode_preamble(access_mode, approvals.mode());
         let tool_names = tool_names_for_mode(access_mode);
         let agent = client
             .agent(config.azure.model_name.clone())
@@ -209,7 +209,28 @@ impl LlmService {
     }
 }
 
+impl Default for WriteApprovalController {
+    fn default() -> Self {
+        Self::new(ApprovalMode::Manual)
+    }
+}
+
 impl WriteApprovalController {
+    pub fn new(mode: ApprovalMode) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(WriteApprovalState {
+                default_mode: mode,
+                mode,
+                pending: HashMap::new(),
+            })),
+        }
+    }
+
+    pub fn mode(&self) -> ApprovalMode {
+        let state = self.inner.lock().expect("approval state lock");
+        state.mode
+    }
+
     async fn request_approval(
         &self,
         reply_id: u64,
@@ -220,7 +241,7 @@ impl WriteApprovalController {
     ) -> ToolCallHookAction {
         let rx = {
             let mut state = self.inner.lock().expect("approval state lock");
-            if state.allow_all_session {
+            if matches!(state.mode, ApprovalMode::Disabled) {
                 return ToolCallHookAction::Continue;
             }
 
@@ -262,7 +283,7 @@ impl WriteApprovalController {
         let sender = {
             let mut state = self.inner.lock().expect("approval state lock");
             if matches!(decision, WriteApprovalDecision::AllowAllSession) {
-                state.allow_all_session = true;
+                state.mode = ApprovalMode::Disabled;
             }
             state.pending.remove(request_id)
         };
@@ -276,7 +297,7 @@ impl WriteApprovalController {
 
     fn reset_session(&self) {
         let mut state = self.inner.lock().expect("approval state lock");
-        state.allow_all_session = false;
+        state.mode = state.default_mode;
         for (_, sender) in state.pending.drain() {
             let _ = sender.send(WriteApprovalDecision::Deny);
         }
@@ -428,10 +449,11 @@ fn azure_openai_base_url(config: &AppConfig) -> String {
     )
 }
 
-fn mode_preamble(access_mode: AccessMode) -> String {
-    match access_mode {
-        AccessMode::ReadOnly => "You are oat, an opinionated agent thing. If you refer to yourself, use exactly the name `oat` in lowercase. If the user asks who you are, answer with `oat - an opinionated agent thing` and then briefly describe what you can do in this workspace. Keep that capability summary concise and practical. In read-only mode, emphasize that you can inspect files, explain code, answer questions, and use read-only workspace tools, but cannot modify the workspace. Do not call yourself an AI assistant, and do not describe yourself as helping via an API. Answer only the user's most recent message directly and helpfully. You are currently in read-only mode. Use the provided readonly workspace tools when they are useful. If the user asks you to edit, create, or delete files, explain that oat is in read-only mode and the user must switch to write mode before you can modify the workspace. Within a single turn, you may call tools multiple times and use prior tool calls and tool outputs from that same turn. Do not rely on memory from previous turns.".to_string(),
-        AccessMode::ReadWrite => "You are oat, an opinionated agent thing. If you refer to yourself, use exactly the name `oat` in lowercase. If the user asks who you are, answer with `oat - an opinionated agent thing` and then briefly describe what you can do in this workspace. Keep that capability summary concise and practical. In write mode, emphasize that you can inspect files, explain code, and make workspace changes with tool use and user approval for mutations. Do not call yourself an AI assistant, and do not describe yourself as helping via an API. Answer only the user's most recent message directly and helpfully. You are currently in write mode. Read and mutation tools may be available. Any mutation tool call requires user approval before it executes, and the user may deny it. For every mutation tool call, include the required `intent` field as a short sentence explaining why the change is needed for the user. Explain purpose or outcome, not the mechanical edit. If a write is denied, acknowledge that and continue from the current workspace state. Within a single turn, you may call tools multiple times and use prior tool calls and tool outputs from that same turn. Do not rely on memory from previous turns.".to_string(),
+fn mode_preamble(access_mode: AccessMode, approval_mode: ApprovalMode) -> String {
+    match (access_mode, approval_mode) {
+        (AccessMode::ReadOnly, _) => "You are oat, an opinionated agent thing. If you refer to yourself, use exactly the name `oat` in lowercase. If the user asks who you are, answer with `oat - an opinionated agent thing` and then briefly describe what you can do in this workspace. Keep that capability summary concise and practical. In read-only mode, emphasize that you can inspect files, explain code, answer questions, and use read-only workspace tools, but cannot modify the workspace. Do not call yourself an AI assistant, and do not describe yourself as helping via an API. Answer only the user's most recent message directly and helpfully. You are currently in read-only mode. Use the provided readonly workspace tools when they are useful. If the user asks you to edit, create, or delete files, explain that oat is in read-only mode and the user must switch to write mode before you can modify the workspace. Within a single turn, you may call tools multiple times and use prior tool calls and tool outputs from that same turn. Do not rely on memory from previous turns.".to_string(),
+        (AccessMode::ReadWrite, ApprovalMode::Manual) => "You are oat, an opinionated agent thing. If you refer to yourself, use exactly the name `oat` in lowercase. If the user asks who you are, answer with `oat - an opinionated agent thing` and then briefly describe what you can do in this workspace. Keep that capability summary concise and practical. In write mode, emphasize that you can inspect files, explain code, and make workspace changes with tool use and user approval for mutations. Do not call yourself an AI assistant, and do not describe yourself as helping via an API. Answer only the user's most recent message directly and helpfully. You are currently in write mode. Read and mutation tools may be available. Any mutation tool call requires user approval before it executes, and the user may deny it. For every mutation tool call, include the required `intent` field as a short sentence explaining why the change is needed for the user. Explain purpose or outcome, not the mechanical edit. If a write is denied, acknowledge that and continue from the current workspace state. Within a single turn, you may call tools multiple times and use prior tool calls and tool outputs from that same turn. Do not rely on memory from previous turns.".to_string(),
+        (AccessMode::ReadWrite, ApprovalMode::Disabled) => "You are oat, an opinionated agent thing. If you refer to yourself, use exactly the name `oat` in lowercase. If the user asks who you are, answer with `oat - an opinionated agent thing` and then briefly describe what you can do in this workspace. Keep that capability summary concise and practical. In write mode, emphasize that you can inspect files, explain code, and make workspace changes with tool use. Do not call yourself an AI assistant, and do not describe yourself as helping via an API. Answer only the user's most recent message directly and helpfully. You are currently in write mode. Read and mutation tools may be available. Mutation approvals are already disabled for this session, so approved write tools can execute immediately. For every mutation tool call, include the required `intent` field as a short sentence explaining why the change is needed for the user. Explain purpose or outcome, not the mechanical edit. Within a single turn, you may call tools multiple times and use prior tool calls and tool outputs from that same turn. Do not rely on memory from previous turns.".to_string(),
     }
 }
 
@@ -522,7 +544,7 @@ mod tests {
 
     #[test]
     fn read_only_mode_preamble_mentions_switching_to_write_mode() {
-        let preamble = mode_preamble(AccessMode::ReadOnly);
+        let preamble = mode_preamble(AccessMode::ReadOnly, ApprovalMode::Manual);
         assert!(preamble.contains("You are oat, an opinionated agent thing."));
         assert!(preamble.contains("use exactly the name `oat` in lowercase"));
         assert!(preamble.contains("answer with `oat - an opinionated agent thing`"));
@@ -599,5 +621,20 @@ mod tests {
         let approvals = WriteApprovalController::default();
         assert!(!approvals.resolve("missing", WriteApprovalDecision::AllowAllSession));
         approvals.reset_session();
+    }
+
+    #[test]
+    fn disabled_approval_mode_preamble_mentions_preapproved_writes() {
+        let preamble = mode_preamble(AccessMode::ReadWrite, ApprovalMode::Disabled);
+        assert!(preamble.contains("Mutation approvals are already disabled for this session"));
+        assert!(!preamble.contains("requires user approval before it executes"));
+    }
+
+    #[test]
+    fn write_approval_controller_can_start_disabled_and_reset_to_default() {
+        let approvals = WriteApprovalController::new(ApprovalMode::Disabled);
+        assert_eq!(approvals.mode(), ApprovalMode::Disabled);
+        approvals.reset_session();
+        assert_eq!(approvals.mode(), ApprovalMode::Disabled);
     }
 }

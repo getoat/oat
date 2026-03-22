@@ -197,7 +197,7 @@ fn render_selection_picker(frame: &mut Frame, picker: &SelectionPicker, area: Re
 }
 
 fn render_mode(frame: &mut Frame, app: &App, area: Rect, accent: Color) {
-    let mode_label = mode_status_label(app.mode(), app.write_approval_policy());
+    let mode_label = mode_status_label(app.mode(), app.approval_mode());
     let session_stats = app.session_stats();
     let context_percent = app.next_request_context_percent();
 
@@ -239,12 +239,10 @@ fn render_mode(frame: &mut Frame, app: &App, area: Rect, accent: Color) {
 
 fn mode_status_label(
     mode: crate::app::AccessMode,
-    policy: crate::app::WriteApprovalPolicy,
+    approval_mode: crate::app::ApprovalMode,
 ) -> &'static str {
-    match (mode, policy) {
-        (crate::app::AccessMode::ReadWrite, crate::app::WriteApprovalPolicy::AllowAllSession) => {
-            "Write (!)"
-        }
+    match (mode, approval_mode) {
+        (crate::app::AccessMode::ReadWrite, crate::app::ApprovalMode::Disabled) => "Write (!)",
         _ => mode.label(),
     }
 }
@@ -579,14 +577,14 @@ mod tests {
         assert_eq!(
             mode_status_label(
                 crate::app::AccessMode::ReadWrite,
-                crate::app::WriteApprovalPolicy::AskEveryTime,
+                crate::app::ApprovalMode::Manual,
             ),
             "Write"
         );
         assert_eq!(
             mode_status_label(
                 crate::app::AccessMode::ReadWrite,
-                crate::app::WriteApprovalPolicy::AllowAllSession,
+                crate::app::ApprovalMode::Disabled,
             ),
             "Write (!)"
         );

@@ -161,9 +161,9 @@ pub enum WriteApprovalDecision {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum WriteApprovalPolicy {
-    AskEveryTime,
-    AllowAllSession,
+pub enum ApprovalMode {
+    Manual,
+    Disabled,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -260,8 +260,10 @@ struct CommandRecallState {
 #[derive(Debug)]
 pub struct App {
     pub(super) workspace_root: PathBuf,
+    pub(super) initial_mode: AccessMode,
+    pub(super) initial_approval_mode: ApprovalMode,
     pub(super) mode: AccessMode,
-    pub(super) write_approval_policy: WriteApprovalPolicy,
+    pub(super) approval_mode: ApprovalMode,
     pub(super) pending_write_approval: Option<PendingWriteApproval>,
     pub(super) should_quit: bool,
     pub(super) composer: TextArea<'static>,
@@ -288,17 +290,37 @@ impl App {
         model_name: impl Into<String>,
         reasoning_effort: ReasoningEffort,
     ) -> Self {
+        Self::with_startup(
+            show_thinking,
+            show_tool_output,
+            model_name,
+            reasoning_effort,
+            AccessMode::ReadOnly,
+            ApprovalMode::Manual,
+        )
+    }
+
+    pub fn with_startup(
+        show_thinking: bool,
+        show_tool_output: bool,
+        model_name: impl Into<String>,
+        reasoning_effort: ReasoningEffort,
+        initial_mode: AccessMode,
+        initial_approval_mode: ApprovalMode,
+    ) -> Self {
         let model_name = model_name.into();
         Self {
             workspace_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-            mode: AccessMode::ReadOnly,
-            write_approval_policy: WriteApprovalPolicy::AskEveryTime,
+            initial_mode,
+            initial_approval_mode,
+            mode: initial_mode,
+            approval_mode: initial_approval_mode,
             pending_write_approval: None,
             should_quit: false,
             composer: new_composer(),
             entries: vec![TranscriptEntry::Message(ChatMessage {
                 speaker: Speaker::Agent,
-                text: welcome_message(&model_name, AccessMode::ReadOnly),
+                text: welcome_message(&model_name, initial_mode),
                 style: MessageStyle::Plain,
             })],
             session_history: Vec::new(),
@@ -325,8 +347,8 @@ impl App {
         &self.workspace_root
     }
 
-    pub fn write_approval_policy(&self) -> WriteApprovalPolicy {
-        self.write_approval_policy
+    pub fn approval_mode(&self) -> ApprovalMode {
+        self.approval_mode
     }
 
     pub fn pending_write_approval(&self) -> Option<&PendingWriteApproval> {
@@ -541,13 +563,14 @@ impl App {
     pub(super) fn reset_session(&mut self) {
         self.entries = vec![TranscriptEntry::Message(ChatMessage {
             speaker: Speaker::Agent,
-            text: welcome_message(&self.model_name, self.mode),
+            text: welcome_message(&self.model_name, self.initial_mode),
             style: MessageStyle::Plain,
         })];
+        self.mode = self.initial_mode;
         self.session_history.clear();
         self.pending_reply = None;
         self.pending_write_approval = None;
-        self.write_approval_policy = WriteApprovalPolicy::AskEveryTime;
+        self.approval_mode = self.initial_approval_mode;
         self.resume_history_follow();
         self.history.reset();
         self.picker = None;
@@ -613,7 +636,7 @@ impl App {
                 self.push_agent_message(format!("Approved `{}` once.", pending.tool_name));
             }
             WriteApprovalDecision::AllowAllSession => {
-                self.write_approval_policy = WriteApprovalPolicy::AllowAllSession;
+                self.approval_mode = ApprovalMode::Disabled;
                 self.push_agent_message(format!(
                     "Approved `{}` and all future writes for this session.",
                     pending.tool_name
@@ -1425,10 +1448,7 @@ mod tests {
         let app = App::new(true, false, "gpt-5-mini", ReasoningEffort::Medium);
 
         assert_eq!(app.mode(), AccessMode::ReadOnly);
-        assert_eq!(
-            app.write_approval_policy(),
-            WriteApprovalPolicy::AskEveryTime
-        );
+        assert_eq!(app.approval_mode(), ApprovalMode::Manual);
         assert!(!app.has_pending_write_approval());
         assert!(!app.should_quit());
         assert!(!app.has_pending_reply());
@@ -1602,10 +1622,26 @@ mod tests {
             .expect("pending approval");
 
         assert_eq!(pending.request_id, "call-1");
-        assert_eq!(
-            app.write_approval_policy(),
-            WriteApprovalPolicy::AllowAllSession
-        );
+        assert_eq!(app.approval_mode(), ApprovalMode::Disabled);
         assert!(!app.has_pending_write_approval());
+    }
+
+    #[test]
+    fn custom_startup_defaults_restore_on_new_session() {
+        let mut app = App::with_startup(
+            true,
+            false,
+            "gpt-5-mini",
+            ReasoningEffort::Medium,
+            AccessMode::ReadWrite,
+            ApprovalMode::Disabled,
+        );
+
+        app.mode = AccessMode::ReadOnly;
+        app.approval_mode = ApprovalMode::Manual;
+        app.reset_session();
+
+        assert_eq!(app.mode(), AccessMode::ReadWrite);
+        assert_eq!(app.approval_mode(), ApprovalMode::Disabled);
     }
 }
