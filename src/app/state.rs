@@ -3,7 +3,10 @@ use ratatui_textarea::{CursorMove, TextArea};
 use rig::completion::Message as RigMessage;
 use std::path::{Path, PathBuf};
 
-use crate::config::ReasoningEffort;
+use crate::{
+    config::ReasoningEffort,
+    tools::{MutationPreview, mutation_preview, write_approval_summary},
+};
 
 const COMMANDS: [SlashCommand; 4] = [
     SlashCommand::NewSession,
@@ -134,6 +137,8 @@ pub struct PendingWriteApproval {
     pub request_id: String,
     pub tool_name: String,
     pub arguments: String,
+    pub summary: String,
+    pub target: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -169,6 +174,7 @@ pub enum MessageStyle {
 pub struct ToolCall {
     pub name: String,
     pub parameter: String,
+    pub preview: Option<MutationPreview>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -197,6 +203,17 @@ struct HistorySelectionPoint {
     column: usize,
 }
 
+#[derive(Debug, Default)]
+pub(super) struct HistoryViewState {
+    pub(super) scroll_top: Option<usize>,
+    viewport_rows: usize,
+    total_lines: usize,
+    snapshot_area: Rect,
+    snapshot_lines: Vec<String>,
+    selection_anchor: Option<HistorySelectionPoint>,
+    selection_focus: Option<HistorySelectionPoint>,
+}
+
 #[derive(Debug)]
 pub struct App {
     pub(super) workspace_root: PathBuf,
@@ -215,13 +232,7 @@ pub struct App {
     pub(super) model_name: String,
     pub(super) reasoning_effort: ReasoningEffort,
     pub(super) selected_command: SlashCommand,
-    pub(super) history_scroll_top: Option<usize>,
-    pub(super) history_viewport_rows: usize,
-    pub(super) history_total_lines: usize,
-    pub(super) history_snapshot_area: Rect,
-    pub(super) history_snapshot_lines: Vec<String>,
-    history_selection_anchor: Option<HistorySelectionPoint>,
-    history_selection_focus: Option<HistorySelectionPoint>,
+    pub(super) history: HistoryViewState,
 }
 
 impl App {
@@ -253,13 +264,7 @@ impl App {
             model_name,
             reasoning_effort,
             selected_command: SlashCommand::NewSession,
-            history_scroll_top: None,
-            history_viewport_rows: 1,
-            history_total_lines: 0,
-            history_snapshot_area: Rect::default(),
-            history_snapshot_lines: Vec::new(),
-            history_selection_anchor: None,
-            history_selection_focus: None,
+            history: HistoryViewState::default(),
         }
     }
 
@@ -356,7 +361,7 @@ impl App {
     }
 
     pub fn history_is_pinned(&self) -> bool {
-        self.history_scroll_top.is_some()
+        self.history.is_pinned()
     }
 
     pub fn history_status_label(&self) -> &'static str {
@@ -427,7 +432,7 @@ impl App {
         self.pending_write_approval = None;
         self.write_approval_policy = WriteApprovalPolicy::AskEveryTime;
         self.resume_history_follow();
-        self.history_total_lines = 0;
+        self.history.reset();
         self.clear_composer();
     }
 
@@ -456,10 +461,13 @@ impl App {
         tool_name: String,
         arguments: String,
     ) {
+        let preview = mutation_preview(&tool_name, &arguments, &self.workspace_root);
         let approval = PendingWriteApproval {
             request_id,
-            tool_name,
-            arguments,
+            tool_name: tool_name.clone(),
+            arguments: arguments.clone(),
+            summary: write_approval_summary(&tool_name, &arguments, &self.workspace_root),
+            target: preview.as_ref().map(|preview| preview.target.clone()),
         };
         self.push_agent_message(format!(
             "Write approval required for `{}`.",
@@ -492,18 +500,68 @@ impl App {
     }
 
     pub fn push_agent_message(&mut self, text: impl Into<String>) {
-        self.entries.push(TranscriptEntry::Message(ChatMessage {
-            speaker: Speaker::Agent,
-            text: text.into(),
-            style: MessageStyle::Plain,
-        }));
+        self.push_message(Speaker::Agent, text, MessageStyle::Plain);
     }
 
     pub fn push_error_message(&mut self, text: impl Into<String>) {
+        self.push_message(Speaker::Agent, text, MessageStyle::Error);
+    }
+
+    pub(super) fn push_agent_error(&mut self, text: impl Into<String>) {
+        self.push_error_message(text);
+    }
+
+    pub(super) fn push_tool_call(&mut self, name: String, parameter: String) {
+        self.entries.push(TranscriptEntry::ToolCall(ToolCall {
+            preview: mutation_preview(&name, &parameter, &self.workspace_root),
+            name,
+            parameter,
+        }));
+    }
+
+    pub(super) fn push_tool_result(&mut self, name: String, output: String) {
+        self.entries
+            .push(TranscriptEntry::ToolResult(ToolResultEntry {
+                name,
+                output,
+            }));
+    }
+
+    pub(super) fn append_pending_stream_message(&mut self, delta: &str, style: MessageStyle) {
+        if delta.is_empty() {
+            return;
+        }
+
+        let Some(existing_index) = self.pending_reply.as_ref().and_then(|pending| match style {
+            MessageStyle::Plain => pending.text_entry_index,
+            MessageStyle::Thinking => pending.reasoning_entry_index,
+            MessageStyle::Error => None,
+        }) else {
+            if self.pending_reply.is_none() || style == MessageStyle::Error {
+                return;
+            }
+            self.push_message(Speaker::Agent, delta.to_string(), style);
+            let index = self.entries.len() - 1;
+            if let Some(pending) = self.pending_reply.as_mut() {
+                match style {
+                    MessageStyle::Plain => pending.text_entry_index = Some(index),
+                    MessageStyle::Thinking => pending.reasoning_entry_index = Some(index),
+                    MessageStyle::Error => {}
+                }
+            }
+            return;
+        };
+
+        if let Some(TranscriptEntry::Message(message)) = self.entries.get_mut(existing_index) {
+            message.text.push_str(delta);
+        }
+    }
+
+    fn push_message(&mut self, speaker: Speaker, text: impl Into<String>, style: MessageStyle) {
         self.entries.push(TranscriptEntry::Message(ChatMessage {
-            speaker: Speaker::Agent,
+            speaker,
             text: text.into(),
-            style: MessageStyle::Error,
+            style,
         }));
     }
 
@@ -533,101 +591,63 @@ impl App {
         total_lines: usize,
         viewport_rows: usize,
     ) -> usize {
-        self.history_total_lines = total_lines;
-        self.history_viewport_rows = viewport_rows.max(1);
-        let max_start = self.history_max_start();
-        if let Some(top) = self.history_scroll_top.as_mut() {
-            *top = (*top).min(max_start);
-            *top
-        } else {
-            max_start
-        }
+        self.history.sync_viewport(total_lines, viewport_rows)
     }
 
     pub(crate) fn history_total_lines(&self) -> usize {
-        self.history_total_lines
+        self.history.total_lines()
     }
 
     pub(crate) fn history_viewport_rows(&self) -> usize {
-        self.history_viewport_rows
+        self.history.viewport_rows()
     }
 
     pub(crate) fn history_scroll_position(&self) -> usize {
-        self.history_current_start()
+        self.history.scroll_position()
     }
 
     pub(crate) fn update_history_snapshot(&mut self, area: Rect, lines: Vec<String>) {
-        self.history_snapshot_area = area;
-        self.history_snapshot_lines = lines;
+        self.history.update_snapshot(area, lines);
     }
 
     pub(super) fn scroll_history_page_up(&mut self) {
-        self.scroll_history_up(self.history_page_rows());
+        self.scroll_history_up(self.history.page_rows());
     }
 
     pub(super) fn scroll_history_page_down(&mut self) {
-        self.scroll_history_down(self.history_page_rows());
+        self.scroll_history_down(self.history.page_rows());
     }
 
     pub(super) fn scroll_history_up(&mut self, lines: usize) {
-        let current = self.history_current_start();
-        self.history_scroll_top = Some(current.saturating_sub(lines));
+        self.history.scroll_up(lines);
     }
 
     pub(super) fn scroll_history_down(&mut self, lines: usize) {
-        let current = self.history_current_start();
-        self.history_scroll_top = Some(current.saturating_add(lines).min(self.history_max_start()));
+        self.history.scroll_down(lines);
     }
 
     pub(super) fn scroll_history_to_top(&mut self) {
-        self.history_scroll_top = Some(0);
+        self.history.scroll_to_top();
     }
 
     pub(super) fn resume_history_follow(&mut self) {
-        self.history_scroll_top = None;
+        self.history.resume_follow();
     }
 
     pub(super) fn start_history_selection(&mut self, column: u16, row: u16) {
-        let point = self.history_selection_point(column, row, false);
-        self.history_selection_anchor = point;
-        self.history_selection_focus = point;
+        self.history.start_selection(column, row);
     }
 
     pub(super) fn update_history_selection(&mut self, column: u16, row: u16) {
-        if self.history_selection_anchor.is_none() {
-            return;
-        }
-        self.history_selection_focus = self.history_selection_point(column, row, true);
+        self.history.update_selection(column, row);
     }
 
     pub(super) fn finish_history_selection(&mut self, column: u16, row: u16) -> Option<String> {
-        let anchor = self.history_selection_anchor?;
-        let focus = self
-            .history_selection_point(column, row, true)
-            .or(self.history_selection_focus)?;
-        self.history_selection_anchor = None;
-        self.history_selection_focus = None;
-        (anchor != focus).then(|| self.selected_history_text(anchor, focus))
+        self.history.finish_selection(column, row)
     }
 
     pub(crate) fn history_selection_span_for_row(&self, row: usize) -> Option<(usize, usize)> {
-        let (start, end) = self.ordered_history_selection_points()?;
-        if row < start.row || row > end.row {
-            return None;
-        }
-
-        let line_width = self.history_snapshot_lines.get(row)?.chars().count().max(1);
-        let span = if start.row == end.row {
-            (start.column, end.column + 1)
-        } else if row == start.row {
-            (start.column, line_width)
-        } else if row == end.row {
-            (0, end.column + 1)
-        } else {
-            (0, line_width)
-        };
-
-        Some((span.0.min(line_width), span.1.min(line_width)))
+        self.history.selection_span_for_row(row)
     }
 
     fn move_command_selection(&mut self, direction: isize) {
@@ -646,41 +666,135 @@ impl App {
 
     pub(super) fn sync_command_selection(&mut self) {
         let commands = self.filtered_commands();
-        if let Some(command) = commands.first().copied() {
-            if !commands.contains(&self.selected_command) {
-                self.selected_command = command;
-            }
+        if let Some(command) = commands.first().copied()
+            && !commands.contains(&self.selected_command)
+        {
+            self.selected_command = command;
+        }
+    }
+}
+
+impl HistoryViewState {
+    fn is_pinned(&self) -> bool {
+        self.scroll_top.is_some()
+    }
+
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    fn sync_viewport(&mut self, total_lines: usize, viewport_rows: usize) -> usize {
+        self.total_lines = total_lines;
+        self.viewport_rows = viewport_rows.max(1);
+        let max_start = self.max_start();
+        if let Some(top) = self.scroll_top.as_mut() {
+            *top = (*top).min(max_start);
+            *top
+        } else {
+            max_start
         }
     }
 
-    fn history_current_start(&self) -> usize {
-        self.history_scroll_top.unwrap_or(self.history_max_start())
+    fn total_lines(&self) -> usize {
+        self.total_lines
     }
 
-    fn history_max_start(&self) -> usize {
-        self.history_total_lines
-            .saturating_sub(self.history_viewport_rows.max(1))
+    fn viewport_rows(&self) -> usize {
+        self.viewport_rows.max(1)
     }
 
-    fn history_page_rows(&self) -> usize {
-        self.history_viewport_rows.max(1)
+    fn scroll_position(&self) -> usize {
+        self.current_start()
     }
 
-    fn history_selection_point(
-        &self,
-        column: u16,
-        row: u16,
-        clamp: bool,
-    ) -> Option<HistorySelectionPoint> {
-        if self.history_snapshot_lines.is_empty() || self.history_snapshot_area.width == 0 {
+    fn update_snapshot(&mut self, area: Rect, lines: Vec<String>) {
+        self.snapshot_area = area;
+        self.snapshot_lines = lines;
+    }
+
+    fn page_rows(&self) -> usize {
+        self.viewport_rows.max(1)
+    }
+
+    fn scroll_up(&mut self, lines: usize) {
+        let current = self.current_start();
+        self.scroll_top = Some(current.saturating_sub(lines));
+    }
+
+    fn scroll_down(&mut self, lines: usize) {
+        let current = self.current_start();
+        self.scroll_top = Some(current.saturating_add(lines).min(self.max_start()));
+    }
+
+    fn scroll_to_top(&mut self) {
+        self.scroll_top = Some(0);
+    }
+
+    fn resume_follow(&mut self) {
+        self.scroll_top = None;
+    }
+
+    fn start_selection(&mut self, column: u16, row: u16) {
+        let point = self.selection_point(column, row, false);
+        self.selection_anchor = point;
+        self.selection_focus = point;
+    }
+
+    fn update_selection(&mut self, column: u16, row: u16) {
+        if self.selection_anchor.is_none() {
+            return;
+        }
+        self.selection_focus = self.selection_point(column, row, true);
+    }
+
+    fn finish_selection(&mut self, column: u16, row: u16) -> Option<String> {
+        let anchor = self.selection_anchor?;
+        let focus = self
+            .selection_point(column, row, true)
+            .or(self.selection_focus)?;
+        self.selection_anchor = None;
+        self.selection_focus = None;
+        (anchor != focus).then(|| self.selected_text(anchor, focus))
+    }
+
+    fn selection_span_for_row(&self, row: usize) -> Option<(usize, usize)> {
+        let (start, end) = self.ordered_selection_points()?;
+        if row < start.row || row > end.row {
             return None;
         }
 
-        let area = self.history_snapshot_area;
+        let line_width = self.snapshot_lines.get(row)?.chars().count().max(1);
+        let span = if start.row == end.row {
+            (start.column, end.column + 1)
+        } else if row == start.row {
+            (start.column, line_width)
+        } else if row == end.row {
+            (0, end.column + 1)
+        } else {
+            (0, line_width)
+        };
+
+        Some((span.0.min(line_width), span.1.min(line_width)))
+    }
+
+    fn current_start(&self) -> usize {
+        self.scroll_top.unwrap_or(self.max_start())
+    }
+
+    fn max_start(&self) -> usize {
+        self.total_lines.saturating_sub(self.viewport_rows.max(1))
+    }
+
+    fn selection_point(&self, column: u16, row: u16, clamp: bool) -> Option<HistorySelectionPoint> {
+        if self.snapshot_lines.is_empty() || self.snapshot_area.width == 0 {
+            return None;
+        }
+
+        let area = self.snapshot_area;
         let min_row = area.y;
         let max_row = area
             .y
-            .saturating_add(self.history_snapshot_lines.len().saturating_sub(1) as u16);
+            .saturating_add(self.snapshot_lines.len().saturating_sub(1) as u16);
         let row = if clamp {
             row.clamp(min_row, max_row)
         } else if row < min_row || row > max_row {
@@ -700,7 +814,7 @@ impl App {
         };
 
         let row_index = row.saturating_sub(area.y) as usize;
-        let line_width = self.history_snapshot_lines[row_index].chars().count();
+        let line_width = self.snapshot_lines[row_index].chars().count();
         let column_index = column.saturating_sub(area.x) as usize;
 
         Some(HistorySelectionPoint {
@@ -709,11 +823,9 @@ impl App {
         })
     }
 
-    fn ordered_history_selection_points(
-        &self,
-    ) -> Option<(HistorySelectionPoint, HistorySelectionPoint)> {
-        let anchor = self.history_selection_anchor?;
-        let focus = self.history_selection_focus?;
+    fn ordered_selection_points(&self) -> Option<(HistorySelectionPoint, HistorySelectionPoint)> {
+        let anchor = self.selection_anchor?;
+        let focus = self.selection_focus?;
         if anchor == focus {
             return None;
         }
@@ -727,11 +839,7 @@ impl App {
         )
     }
 
-    fn selected_history_text(
-        &self,
-        anchor: HistorySelectionPoint,
-        focus: HistorySelectionPoint,
-    ) -> String {
+    fn selected_text(&self, anchor: HistorySelectionPoint, focus: HistorySelectionPoint) -> String {
         let (start, end) = if (anchor.row, anchor.column) <= (focus.row, focus.column) {
             (anchor, focus)
         } else {
@@ -740,7 +848,7 @@ impl App {
 
         let mut lines = Vec::new();
         for row in start.row..=end.row {
-            let line = &self.history_snapshot_lines[row];
+            let line = &self.snapshot_lines[row];
             let segment = if start.row == end.row {
                 slice_line(line, start.column, end.column + 1)
             } else if row == start.row {
@@ -870,12 +978,12 @@ mod tests {
     #[test]
     fn sync_history_viewport_clamps_pinned_position() {
         let mut app = App::new(true, false, "gpt-5-mini", ReasoningEffort::Medium);
-        app.history_scroll_top = Some(50);
+        app.history.scroll_top = Some(50);
 
         let start = app.sync_history_viewport(20, 6);
 
         assert_eq!(start, 14);
-        assert_eq!(app.history_scroll_top, Some(14));
+        assert_eq!(app.history.scroll_top, Some(14));
     }
 
     #[test]

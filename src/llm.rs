@@ -15,7 +15,6 @@ use rig::{
     },
     providers::openai,
     streaming::{StreamedAssistantContent, StreamedUserContent, StreamingChat},
-    tool::{Tool, ToolDyn},
 };
 use serde_json::json;
 use tokio::sync::{mpsc::UnboundedSender, oneshot};
@@ -24,10 +23,7 @@ use crate::{
     app::{AccessMode, WriteApprovalDecision},
     config::AppConfig,
     stats::StatsHook,
-    tools::{
-        ApplyPatchesTool, DeletePathTool, GrepTool, ListTool, ReadFileTool, ReadFilesTool,
-        WriteFileTool,
-    },
+    tools::{is_mutation_tool, tool_names_for_mode, tools_for_mode},
 };
 
 const MAX_TOOL_STEPS_PER_TURN: usize = 64;
@@ -100,7 +96,7 @@ impl LlmService {
         let workspace_root = env::current_dir().context("failed to determine workspace root")?;
         let client = openai::CompletionsClient::builder()
             .api_key(&config.azure.api_key)
-            .base_url(&azure_openai_base_url(config))
+            .base_url(azure_openai_base_url(config))
             .build()
             .context("failed to build OpenAI-compatible Azure client")?;
 
@@ -437,46 +433,6 @@ fn mode_preamble(access_mode: AccessMode) -> String {
         AccessMode::ReadOnly => "You are oat. Answer only the user's most recent message directly and helpfully. You are currently in read-only mode. Use the provided readonly workspace tools when they are useful. If the user asks you to edit, create, or delete files, explain that oat is in read-only mode and the user must switch to write mode before you can modify the workspace. Within a single turn, you may call tools multiple times and use prior tool calls and tool outputs from that same turn. Do not rely on memory from previous turns.".to_string(),
         AccessMode::ReadWrite => "You are oat. Answer only the user's most recent message directly and helpfully. You are currently in write mode. Read and mutation tools may be available. Any mutation tool call requires user approval before it executes, and the user may deny it. For every mutation tool call, include the required `intent` field as a short sentence explaining why the change is needed for the user. Explain purpose or outcome, not the mechanical edit. If a write is denied, acknowledge that and continue from the current workspace state. Within a single turn, you may call tools multiple times and use prior tool calls and tool outputs from that same turn. Do not rely on memory from previous turns.".to_string(),
     }
-}
-
-fn tool_names_for_mode(access_mode: AccessMode) -> Vec<String> {
-    let mut names = vec![
-        ListTool::NAME.to_string(),
-        ReadFileTool::NAME.to_string(),
-        ReadFilesTool::NAME.to_string(),
-        GrepTool::NAME.to_string(),
-    ];
-    if access_mode == AccessMode::ReadWrite {
-        names.extend([
-            ApplyPatchesTool::NAME.to_string(),
-            WriteFileTool::NAME.to_string(),
-            DeletePathTool::NAME.to_string(),
-        ]);
-    }
-    names
-}
-
-fn tools_for_mode(root: &std::path::Path, access_mode: AccessMode) -> Vec<Box<dyn ToolDyn>> {
-    let mut tools: Vec<Box<dyn ToolDyn>> = vec![
-        Box::new(ListTool::new(root.to_path_buf())),
-        Box::new(ReadFileTool::new(root.to_path_buf())),
-        Box::new(ReadFilesTool::new(root.to_path_buf())),
-        Box::new(GrepTool::new(root.to_path_buf())),
-    ];
-
-    if access_mode == AccessMode::ReadWrite {
-        tools.extend([
-            Box::new(ApplyPatchesTool::new(root.to_path_buf())) as Box<dyn ToolDyn>,
-            Box::new(WriteFileTool::new(root.to_path_buf())) as Box<dyn ToolDyn>,
-            Box::new(DeletePathTool::new(root.to_path_buf())) as Box<dyn ToolDyn>,
-        ]);
-    }
-
-    tools
-}
-
-fn is_mutation_tool(tool_name: &str) -> bool {
-    matches!(tool_name, "ApplyPatches" | "WriteFile" | "DeletePath")
 }
 
 fn format_tool_arguments(arguments: &serde_json::Value) -> String {

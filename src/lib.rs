@@ -26,6 +26,17 @@ use crate::{config::AppConfig, llm::LlmService, stats::StatsStore};
 
 pub type Tui = Terminal<CrosstermBackend<Stdout>>;
 
+struct EffectRunner<'a> {
+    runtime: &'a Runtime,
+    terminal: &'a mut Tui,
+    active_reply_task: &'a mut Option<(u64, JoinHandle<()>)>,
+    llm: &'a mut LlmService,
+    config: &'a mut AppConfig,
+    app: &'a mut App,
+    stats: &'a StatsStore,
+    stream_tx: mpsc::UnboundedSender<(u64, llm::StreamEvent)>,
+}
+
 pub fn run(terminal: &mut Tui, config: AppConfig) -> Result<(), Box<dyn Error>> {
     let runtime = Runtime::new()?;
     let mut config = config;
@@ -62,25 +73,23 @@ pub fn run(terminal: &mut Tui, config: AppConfig) -> Result<(), Box<dyn Error>> 
         terminal.draw(|frame| ui::render(frame, &mut app))?;
 
         let timeout = tick_rate.saturating_sub(last_tick.elapsed());
-        if event::poll(timeout)? {
-            if let Some(action) =
+        if event::poll(timeout)?
+            && let Some(action) =
                 input::map_event_with_state(event::read()?, app.has_pending_write_approval())
-            {
-                if let Some(effect) = app.apply(action) {
-                    if let Err(error) = run_effect(
-                        &runtime,
-                        terminal,
-                        &mut active_reply_task,
-                        &mut llm,
-                        &mut config,
-                        &mut app,
-                        &stats,
-                        stream_tx.clone(),
-                        effect,
-                    ) {
-                        app.push_error_message(format!("Command failed: {error}"));
-                    }
-                }
+            && let Some(effect) = app.apply(action)
+        {
+            let mut runner = EffectRunner {
+                runtime: &runtime,
+                terminal,
+                active_reply_task: &mut active_reply_task,
+                llm: &mut llm,
+                config: &mut config,
+                app: &mut app,
+                stats: &stats,
+                stream_tx: stream_tx.clone(),
+            };
+            if let Err(error) = runner.run(effect) {
+                app.push_error_message(format!("Command failed: {error}"));
             }
         }
 
@@ -114,92 +123,95 @@ pub fn restore_terminal(terminal: &mut Tui) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn run_effect(
-    runtime: &Runtime,
-    terminal: &mut Tui,
-    active_reply_task: &mut Option<(u64, JoinHandle<()>)>,
-    llm: &mut LlmService,
-    config: &mut AppConfig,
-    app: &mut App,
-    stats: &StatsStore,
-    stream_tx: mpsc::UnboundedSender<(u64, llm::StreamEvent)>,
-    effect: Effect,
-) -> anyhow::Result<()> {
-    match effect {
-        Effect::PromptModel {
-            reply_id,
-            prompt,
-            history,
-        } => {
-            if let Some((_, task)) = active_reply_task.take() {
-                task.abort();
+impl EffectRunner<'_> {
+    fn run(&mut self, effect: Effect) -> anyhow::Result<()> {
+        match effect {
+            Effect::PromptModel {
+                reply_id,
+                prompt,
+                history,
+            } => {
+                self.cancel_active_reply();
+                let llm = self.llm.clone();
+                let stats_hook = self.stats.hook();
+                let stream_tx = self.stream_tx.clone();
+                let task = self.runtime.spawn(async move {
+                    llm.stream_prompt(reply_id, prompt, history, stats_hook, stream_tx)
+                        .await;
+                });
+                *self.active_reply_task = Some((reply_id, task));
+                Ok(())
             }
-            let llm = llm.clone();
-            let stats_hook = stats.hook();
-            let task = runtime.spawn(async move {
-                llm.stream_prompt(reply_id, prompt, history, stats_hook, stream_tx)
-                    .await;
-            });
-            *active_reply_task = Some((reply_id, task));
-            Ok(())
-        }
-        Effect::ShowStats => {
-            app.push_agent_message(stats.report()?.render());
-            Ok(())
-        }
-        Effect::RotateSession => {
-            stats.rotate_session()?;
-            llm.reset_write_approvals();
-            Ok(())
-        }
-        Effect::SetReasoningEffort { reasoning_effort } => {
-            let updated_config = AppConfig::set_default_reasoning_effort(reasoning_effort)?;
-            let rebuilt = {
-                let _guard = runtime.enter();
-                LlmService::from_config(&updated_config, app.mode(), llm.approvals())?
-            };
-            *config = updated_config;
-            *llm = rebuilt;
-            app.set_reasoning_effort(reasoning_effort);
-            app.push_agent_message(format!(
-                "Reasoning effort set to `{}` for model `{}` and saved to the active config.",
-                reasoning_effort.as_str(),
-                app.model_name()
-            ));
-            Ok(())
-        }
-        Effect::RebuildLlm { access_mode } => {
-            let rebuilt = {
-                let _guard = runtime.enter();
-                LlmService::from_config(config, access_mode, llm.approvals())?
-            };
-            *llm = rebuilt;
-            Ok(())
-        }
-        Effect::ResolveWriteApproval {
-            request_id,
-            decision,
-        } => {
-            if !llm.resolve_write_approval(&request_id, decision) {
-                app.push_error_message("Write approval request is no longer active.");
+            Effect::ShowStats => {
+                self.app.push_agent_message(self.stats.report()?.render());
+                Ok(())
             }
-            Ok(())
-        }
-        Effect::CopyToClipboard { text } => {
-            write!(terminal.backend_mut(), "{}", osc52_copy_sequence(&text))?;
-            terminal.backend_mut().flush()?;
-            let line_count = text.lines().count().max(1);
-            app.push_agent_message(format!(
-                "Copied {line_count} line{} to the terminal clipboard.",
-                if line_count == 1 { "" } else { "s" }
-            ));
-            Ok(())
-        }
-        Effect::CancelPendingReply => {
-            if let Some((_, task)) = active_reply_task.take() {
-                task.abort();
+            Effect::RotateSession => {
+                self.stats.rotate_session()?;
+                self.llm.reset_write_approvals();
+                Ok(())
             }
-            Ok(())
+            Effect::SetReasoningEffort { reasoning_effort } => {
+                let updated_config = AppConfig::set_default_reasoning_effort(reasoning_effort)?;
+                let rebuilt = self.rebuild_llm(&updated_config, self.app.mode())?;
+                *self.config = updated_config;
+                *self.llm = rebuilt;
+                self.app.set_reasoning_effort(reasoning_effort);
+                self.app.push_agent_message(format!(
+                    "Reasoning effort set to `{}` for model `{}` and saved to the active config.",
+                    reasoning_effort.as_str(),
+                    self.app.model_name()
+                ));
+                Ok(())
+            }
+            Effect::RebuildLlm { access_mode } => {
+                let rebuilt = self.rebuild_llm(self.config, access_mode)?;
+                *self.llm = rebuilt;
+                Ok(())
+            }
+            Effect::ResolveWriteApproval {
+                request_id,
+                decision,
+            } => {
+                if !self.llm.resolve_write_approval(&request_id, decision) {
+                    self.app
+                        .push_error_message("Write approval request is no longer active.");
+                }
+                Ok(())
+            }
+            Effect::CopyToClipboard { text } => {
+                write!(
+                    self.terminal.backend_mut(),
+                    "{}",
+                    osc52_copy_sequence(&text)
+                )?;
+                self.terminal.backend_mut().flush()?;
+                let line_count = text.lines().count().max(1);
+                self.app.push_agent_message(format!(
+                    "Copied {line_count} line{} to the terminal clipboard.",
+                    if line_count == 1 { "" } else { "s" }
+                ));
+                Ok(())
+            }
+            Effect::CancelPendingReply => {
+                self.cancel_active_reply();
+                Ok(())
+            }
+        }
+    }
+
+    fn rebuild_llm(
+        &self,
+        config: &AppConfig,
+        access_mode: app::AccessMode,
+    ) -> anyhow::Result<LlmService> {
+        let _guard = self.runtime.enter();
+        LlmService::from_config(config, access_mode, self.llm.approvals())
+    }
+
+    fn cancel_active_reply(&mut self) {
+        if let Some((_, task)) = self.active_reply_task.take() {
+            task.abort();
         }
     }
 }

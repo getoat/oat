@@ -137,6 +137,12 @@ pub struct StatsStore {
     state: Arc<Mutex<StatsState>>,
 }
 
+impl Default for StatsStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl StatsStore {
     pub fn new() -> Self {
         Self::with_stats_dir(default_stats_dir())

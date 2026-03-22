@@ -2,8 +2,8 @@ use ratatui_textarea::Input;
 use rig::completion::Message as RigMessage;
 
 use super::state::{
-    App, ChatMessage, MessageStyle, PendingReply, SlashCommand, Speaker, ToolCall, ToolResultEntry,
-    TranscriptEntry, WriteApprovalDecision,
+    App, ChatMessage, MessageStyle, PendingReply, SlashCommand, Speaker, TranscriptEntry,
+    WriteApprovalDecision,
 };
 use crate::config::ReasoningEffort;
 use crate::llm::StreamEvent;
@@ -305,21 +305,16 @@ fn on_stream_event(app: &mut App, reply_id: u64, event: StreamEvent) {
     }
 
     match event {
-        StreamEvent::TextDelta(delta) => append_stream_text(app, &delta),
-        StreamEvent::ReasoningDelta(delta) => append_stream_reasoning(app, &delta),
-        StreamEvent::ToolCall { name, arguments } => {
-            app.entries.push(TranscriptEntry::ToolCall(ToolCall {
-                name,
-                parameter: arguments,
-            }));
+        StreamEvent::TextDelta(delta) => {
+            app.append_pending_stream_message(&delta, MessageStyle::Plain)
         }
-        StreamEvent::ToolResult { name, output } => {
-            app.entries
-                .push(TranscriptEntry::ToolResult(ToolResultEntry {
-                    name,
-                    output,
-                }));
+        StreamEvent::ReasoningDelta(delta) => {
+            if app.show_thinking() {
+                app.append_pending_stream_message(&delta, MessageStyle::Thinking);
+            }
         }
+        StreamEvent::ToolCall { name, arguments } => app.push_tool_call(name, arguments),
+        StreamEvent::ToolResult { name, output } => app.push_tool_result(name, output),
         StreamEvent::WriteApprovalRequested {
             request_id,
             tool_name,
@@ -337,61 +332,9 @@ fn on_stream_event(app: &mut App, reply_id: u64, event: StreamEvent) {
         StreamEvent::Failed(error) => {
             app.pending_reply = None;
             app.pending_write_approval = None;
-            app.entries.push(TranscriptEntry::Message(ChatMessage {
-                speaker: Speaker::Agent,
-                text: format!("Request failed: {error}"),
-                style: MessageStyle::Error,
-            }));
+            app.push_agent_error(format!("Request failed: {error}"));
         }
     }
-}
-
-fn append_stream_text(app: &mut App, delta: &str) {
-    if delta.is_empty() {
-        return;
-    }
-
-    let Some(pending) = app.pending_reply.as_mut() else {
-        return;
-    };
-
-    if let Some(index) = pending.text_entry_index
-        && let Some(TranscriptEntry::Message(message)) = app.entries.get_mut(index)
-    {
-        message.text.push_str(delta);
-        return;
-    }
-
-    app.entries.push(TranscriptEntry::Message(ChatMessage {
-        speaker: Speaker::Agent,
-        text: delta.to_string(),
-        style: MessageStyle::Plain,
-    }));
-    pending.text_entry_index = Some(app.entries.len() - 1);
-}
-
-fn append_stream_reasoning(app: &mut App, delta: &str) {
-    if delta.is_empty() || !app.show_thinking {
-        return;
-    }
-
-    let Some(pending) = app.pending_reply.as_mut() else {
-        return;
-    };
-
-    if let Some(index) = pending.reasoning_entry_index
-        && let Some(TranscriptEntry::Message(message)) = app.entries.get_mut(index)
-    {
-        message.text.push_str(delta);
-        return;
-    }
-
-    app.entries.push(TranscriptEntry::Message(ChatMessage {
-        speaker: Speaker::Agent,
-        text: delta.to_string(),
-        style: MessageStyle::Thinking,
-    }));
-    pending.reasoning_entry_index = Some(app.entries.len() - 1);
 }
 
 fn apply_write_approval(app: &mut App, decision: WriteApprovalDecision) -> Option<String> {
@@ -521,7 +464,7 @@ mod tests {
     #[test]
     fn submit_message_resumes_live_history_follow() {
         let mut app = new_app(true);
-        app.history_scroll_top = Some(3);
+        app.history.scroll_top = Some(3);
         app.composer.insert_str("hello");
 
         let _ = app.apply(Action::SubmitMessage);
@@ -832,7 +775,7 @@ mod tests {
 
         app.apply(Action::ScrollHistoryPageUp);
 
-        assert_eq!(app.history_scroll_top, Some(20));
+        assert_eq!(app.history.scroll_top, Some(20));
         assert!(app.history_is_pinned());
     }
 
@@ -840,18 +783,18 @@ mod tests {
     fn page_down_clamps_at_bottom_without_resuming_follow() {
         let mut app = new_app(true);
         app.sync_history_viewport(30, 5);
-        app.history_scroll_top = Some(24);
+        app.history.scroll_top = Some(24);
 
         app.apply(Action::ScrollHistoryPageDown);
 
-        assert_eq!(app.history_scroll_top, Some(25));
+        assert_eq!(app.history.scroll_top, Some(25));
         assert!(app.history_is_pinned());
     }
 
     #[test]
     fn jump_to_bottom_resumes_live_follow() {
         let mut app = new_app(true);
-        app.history_scroll_top = Some(7);
+        app.history.scroll_top = Some(7);
 
         app.apply(Action::ScrollHistoryToBottom);
 
@@ -862,13 +805,13 @@ mod tests {
     fn line_scroll_clamps_to_history_bounds() {
         let mut app = new_app(true);
         app.sync_history_viewport(18, 6);
-        app.history_scroll_top = Some(2);
+        app.history.scroll_top = Some(2);
 
         app.apply(Action::ScrollHistoryUp { lines: 10 });
-        assert_eq!(app.history_scroll_top, Some(0));
+        assert_eq!(app.history.scroll_top, Some(0));
 
         app.apply(Action::ScrollHistoryDown { lines: 20 });
-        assert_eq!(app.history_scroll_top, Some(12));
+        assert_eq!(app.history.scroll_top, Some(12));
     }
 
     #[test]
