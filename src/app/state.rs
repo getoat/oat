@@ -3102,7 +3102,7 @@ mod tests {
         assert!(estimated >= 4_000);
         assert_eq!(
             app.next_request_context_percent(),
-            estimated * 100 / 400_000
+            estimated * 100 / 272_000
         );
     }
 

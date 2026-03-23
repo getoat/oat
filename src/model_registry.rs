@@ -67,26 +67,19 @@ const MODELS: [ModelInfo; 3] = [
     ModelInfo {
         name: "gpt-5.4",
         provider: ModelProvider::AzureOpenAi,
-        context_length: 1_050_000,
+        context_length: 272_000,
         pricing: ModelPricing {
             input_per_million_tokens: 2.50,
             cache_read_per_million_tokens: 0.25,
             output_per_million_tokens: 15.00,
         },
-        long_context_pricing: Some(LongContextPricing {
-            input_tokens_threshold: 272_000,
-            pricing: ModelPricing {
-                input_per_million_tokens: 5.00,
-                cache_read_per_million_tokens: 0.50,
-                output_per_million_tokens: 22.50,
-            },
-        }),
+        long_context_pricing: None,
         supported_reasoning_levels: &GPT_5_4_REASONING_LEVELS,
     },
     ModelInfo {
         name: "gpt-5.4-mini",
         provider: ModelProvider::AzureOpenAi,
-        context_length: 400_000,
+        context_length: 272_000,
         pricing: ModelPricing {
             input_per_million_tokens: 0.75,
             cache_read_per_million_tokens: 0.075,
@@ -98,7 +91,7 @@ const MODELS: [ModelInfo; 3] = [
     ModelInfo {
         name: "gpt-5.4-nano",
         provider: ModelProvider::AzureOpenAi,
-        context_length: 400_000,
+        context_length: 272_000,
         pricing: ModelPricing {
             input_per_million_tokens: 0.20,
             cache_read_per_million_tokens: 0.02,
@@ -149,23 +142,39 @@ mod tests {
     }
 
     #[test]
-    fn gpt_5_4_exposes_long_context_pricing_tier() {
+    fn gpt_5_4_uses_base_pricing_only() {
         let model = find_model("gpt-5.4").expect("registry model");
 
-        assert_eq!(
-            model.long_context_pricing,
-            Some(LongContextPricing {
-                input_tokens_threshold: 272_000,
-                pricing: ModelPricing {
-                    input_per_million_tokens: 5.00,
-                    cache_read_per_million_tokens: 0.50,
-                    output_per_million_tokens: 22.50,
-                },
-            })
-        );
+        assert_eq!(model.long_context_pricing, None);
         assert_eq!(model.pricing_for_input_tokens(272_000), model.pricing);
+        assert_eq!(model.pricing_for_input_tokens(272_001), model.pricing);
+    }
+
+    #[test]
+    fn long_context_pricing_still_applies_for_tiered_models() {
+        let model = ModelInfo {
+            name: "synthetic-tiered-model",
+            provider: ModelProvider::AzureOpenAi,
+            context_length: 272_000,
+            pricing: ModelPricing {
+                input_per_million_tokens: 1.0,
+                cache_read_per_million_tokens: 0.1,
+                output_per_million_tokens: 2.0,
+            },
+            long_context_pricing: Some(LongContextPricing {
+                input_tokens_threshold: 100_000,
+                pricing: ModelPricing {
+                    input_per_million_tokens: 3.0,
+                    cache_read_per_million_tokens: 0.3,
+                    output_per_million_tokens: 6.0,
+                },
+            }),
+            supported_reasoning_levels: &GPT_5_4_REASONING_LEVELS,
+        };
+
+        assert_eq!(model.pricing_for_input_tokens(100_000), model.pricing);
         assert_eq!(
-            model.pricing_for_input_tokens(272_001),
+            model.pricing_for_input_tokens(100_001),
             model.long_context_pricing.expect("long tier").pricing
         );
     }
@@ -174,8 +183,10 @@ mod tests {
     fn recommended_prompt_budget_uses_conservative_headroom() {
         let gpt_54 = find_model("gpt-5.4").expect("registry model");
         let gpt_54_mini = find_model("gpt-5.4-mini").expect("registry model");
+        let gpt_54_nano = find_model("gpt-5.4-nano").expect("registry model");
 
-        assert_eq!(gpt_54.recommended_prompt_token_budget(), 240_000);
-        assert_eq!(gpt_54_mini.recommended_prompt_token_budget(), 168_000);
+        assert_eq!(gpt_54.recommended_prompt_token_budget(), 104_000);
+        assert_eq!(gpt_54_mini.recommended_prompt_token_budget(), 104_000);
+        assert_eq!(gpt_54_nano.recommended_prompt_token_budget(), 104_000);
     }
 }

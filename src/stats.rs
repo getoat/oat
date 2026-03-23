@@ -669,7 +669,7 @@ mod tests {
     }
 
     #[test]
-    fn estimate_request_cost_uses_long_context_tier_for_gpt_5_4() {
+    fn estimate_request_cost_uses_base_pricing_for_gpt_5_4() {
         let cost = estimate_request_cost_nanos_usd(
             "gpt-5.4",
             Usage {
@@ -680,7 +680,7 @@ mod tests {
             },
         );
 
-        assert_eq!(cost, 1_360_230_000);
+        assert_eq!(cost, 680_152_500);
     }
 
     #[test]
@@ -711,7 +711,7 @@ mod tests {
         assert_eq!(report.current.input_tokens, 301_000);
         assert_eq!(report.current.cached_input_tokens, 50_200);
         assert_eq!(report.current.output_tokens, 1_500);
-        assert_eq!(report.current.estimated_cost_nanos_usd, 1_300_365_000);
+        assert_eq!(report.current.estimated_cost_nanos_usd, 655_365_000);
 
         drop(mini_hook);
         drop(main_hook);

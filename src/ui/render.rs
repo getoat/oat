@@ -1601,8 +1601,8 @@ mod tests {
         assert!(rendered.contains("Models"));
         assert!(rendered.contains("gpt-5.4"));
         assert!(rendered.contains("Azure OpenAI"));
-        assert!(rendered.contains("ctx 1.05M"));
-        assert!(rendered.contains(">272K"));
+        assert!(rendered.contains("ctx 272K"));
+        assert!(!rendered.contains(">272K"));
     }
 
     #[test]
