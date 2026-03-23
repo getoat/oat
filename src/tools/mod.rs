@@ -1,5 +1,6 @@
 mod apply_patches;
 mod ask_user;
+mod commentary;
 mod common;
 mod delete_path;
 mod grep;
@@ -28,6 +29,7 @@ use output_limit::OutputLimitedTool;
 
 pub use apply_patches::{ApplyPatchesArgs, ApplyPatchesTool, TextPatch};
 pub use ask_user::AskUserTool;
+pub use commentary::{CommentaryArgs, CommentaryTool};
 pub use delete_path::{DeletePathArgs, DeletePathTool};
 pub use grep::{GrepArgs, GrepTool};
 pub use list::{ListArgs, ListTool};
@@ -86,9 +88,12 @@ enum ToolRoleScope {
     MainWithManager,
 }
 
-const TOOL_DESCRIPTORS: [ToolDescriptor; 12] = [
+const TOOL_DESCRIPTORS: [ToolDescriptor; 13] = [
     ToolDescriptor::read_only(AskUserTool::NAME, ToolRoleScope::MainOnly, |_context| {
         Box::new(AskUserTool)
+    }),
+    ToolDescriptor::read_only(CommentaryTool::NAME, ToolRoleScope::Any, |_context| {
+        Box::new(CommentaryTool)
     }),
     ToolDescriptor::read_only(ListTool::NAME, ToolRoleScope::Any, |context| {
         let search_policy = context.search_policy();
@@ -251,6 +256,7 @@ mod tests {
             tool_names,
             vec![
                 "AskUser",
+                "Commentary",
                 "List",
                 "ReadFile",
                 "ReadFiles",
@@ -276,6 +282,7 @@ mod tests {
         });
 
         assert!(tool_names.contains(&"AskUser".to_string()));
+        assert!(tool_names.contains(&"Commentary".to_string()));
         assert!(tool_names.contains(&"RunShellScript".to_string()));
         assert!(tool_names.contains(&"ApplyPatches".to_string()));
         assert!(tool_names.contains(&"WriteFile".to_string()));
@@ -338,7 +345,14 @@ mod tests {
 
         assert_eq!(
             tool_names,
-            vec!["List", "ReadFile", "ReadFiles", "Grep", "RunShellScript"]
+            vec![
+                "Commentary",
+                "List",
+                "ReadFile",
+                "ReadFiles",
+                "Grep",
+                "RunShellScript"
+            ]
         );
     }
 

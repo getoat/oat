@@ -54,6 +54,9 @@ pub(super) fn push_pending_lines(
 pub(super) fn message_style(style: MessageStyle) -> Style {
     match style {
         MessageStyle::Plain => Style::default(),
+        MessageStyle::Commentary => Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::ITALIC),
         MessageStyle::Thinking => Style::default()
             .fg(Color::Gray)
             .add_modifier(Modifier::ITALIC),

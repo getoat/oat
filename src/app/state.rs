@@ -310,6 +310,7 @@ pub struct ChatMessage {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MessageStyle {
     Plain,
+    Commentary,
     Thinking,
     Error,
 }
@@ -359,6 +360,8 @@ pub(super) struct PendingReply {
     pub(super) kind: PendingReplyKind,
     pub(super) reasoning_entry_index: Option<usize>,
     pub(super) text_entry_index: Option<usize>,
+    pub(super) plain_text: String,
+    pub(super) has_visible_content: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -382,7 +385,14 @@ impl PendingReply {
             kind,
             reasoning_entry_index: None,
             text_entry_index: None,
+            plain_text: String::new(),
+            has_visible_content: false,
         }
+    }
+
+    fn reset_active_stream_segment(&mut self) {
+        self.reasoning_entry_index = None;
+        self.text_entry_index = None;
     }
 }
 
@@ -704,10 +714,9 @@ impl App {
     }
 
     pub fn has_visible_pending_content(&self) -> bool {
-        self.pending_reply.as_ref().is_some_and(|pending| {
-            pending.text_entry_index.is_some()
-                || (self.show_thinking && pending.reasoning_entry_index.is_some())
-        })
+        self.pending_reply
+            .as_ref()
+            .is_some_and(|pending| pending.has_visible_content)
     }
 
     pub fn composer_height(&mut self) -> u16 {
@@ -1328,7 +1337,19 @@ impl App {
         self.push_error_message(text);
     }
 
+    pub(super) fn push_agent_commentary(&mut self, text: impl Into<String>) {
+        if let Some(pending) = self.pending_reply.as_mut() {
+            pending.reset_active_stream_segment();
+            pending.has_visible_content = true;
+        }
+        self.push_message(Speaker::Agent, text, MessageStyle::Commentary);
+    }
+
     pub(super) fn push_tool_call(&mut self, name: String, parameter: String) {
+        if let Some(pending) = self.pending_reply.as_mut() {
+            pending.reset_active_stream_segment();
+            pending.has_visible_content = true;
+        }
         self.entries.push(TranscriptEntry::ToolCall(ToolCall {
             preview: mutation_preview(&name, &parameter, &self.workspace_root),
             name,
@@ -1338,6 +1359,12 @@ impl App {
     }
 
     pub(super) fn push_tool_result(&mut self, name: String, output: String) {
+        if let Some(pending) = self.pending_reply.as_mut() {
+            pending.reset_active_stream_segment();
+            if self.show_tool_output {
+                pending.has_visible_content = true;
+            }
+        }
         self.entries
             .push(TranscriptEntry::ToolResult(ToolResultEntry {
                 name,
@@ -1403,28 +1430,59 @@ impl App {
             return;
         }
 
-        let Some(existing_index) = self.pending_reply.as_ref().and_then(|pending| match style {
-            MessageStyle::Plain => pending.text_entry_index,
-            MessageStyle::Thinking => pending.reasoning_entry_index,
-            MessageStyle::Error => None,
-        }) else {
-            if self.pending_reply.is_none() || style == MessageStyle::Error {
-                return;
+        if self.pending_reply.is_none() || style == MessageStyle::Error {
+            return;
+        }
+
+        let existing_index = {
+            let pending = self
+                .pending_reply
+                .as_mut()
+                .expect("pending reply checked above");
+            let crossed_style_boundary = match style {
+                MessageStyle::Plain => pending.reasoning_entry_index.is_some(),
+                MessageStyle::Commentary => true,
+                MessageStyle::Thinking => pending.text_entry_index.is_some(),
+                MessageStyle::Error => false,
+            };
+            if crossed_style_boundary {
+                pending.reset_active_stream_segment();
             }
+            match style {
+                MessageStyle::Plain => pending.text_entry_index,
+                MessageStyle::Commentary => None,
+                MessageStyle::Thinking => pending.reasoning_entry_index,
+                MessageStyle::Error => None,
+            }
+        };
+
+        let Some(existing_index) = existing_index else {
             self.push_message(Speaker::Agent, delta.to_string(), style);
             let index = self.entries.len() - 1;
-            if let Some(pending) = self.pending_reply.as_mut() {
-                match style {
-                    MessageStyle::Plain => pending.text_entry_index = Some(index),
-                    MessageStyle::Thinking => pending.reasoning_entry_index = Some(index),
-                    MessageStyle::Error => {}
+            let pending = self
+                .pending_reply
+                .as_mut()
+                .expect("pending reply checked above");
+            pending.has_visible_content = true;
+            match style {
+                MessageStyle::Plain => {
+                    pending.text_entry_index = Some(index);
+                    pending.plain_text.push_str(delta);
                 }
+                MessageStyle::Commentary => {}
+                MessageStyle::Thinking => pending.reasoning_entry_index = Some(index),
+                MessageStyle::Error => {}
             }
             return;
         };
 
         if let Some(TranscriptEntry::Message(message)) = self.entries.get_mut(existing_index) {
             message.text.push_str(delta);
+            if style == MessageStyle::Plain
+                && let Some(pending) = self.pending_reply.as_mut()
+            {
+                pending.plain_text.push_str(delta);
+            }
             self.bump_transcript_revision();
         }
     }

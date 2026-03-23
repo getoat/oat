@@ -662,6 +662,10 @@ fn on_stream_event(app: &mut App, reply_id: u64, event: StreamEvent) -> Option<E
             app.append_pending_stream_message(&delta, MessageStyle::Plain);
             None
         }
+        StreamEvent::Commentary(message) => {
+            app.push_agent_commentary(message);
+            None
+        }
         StreamEvent::ReasoningDelta(delta) => {
             if app.show_thinking() {
                 app.append_pending_stream_message(&delta, MessageStyle::Thinking);
@@ -719,12 +723,7 @@ fn on_stream_event(app: &mut App, reply_id: u64, event: StreamEvent) -> Option<E
             let final_text = app
                 .pending_reply
                 .as_ref()
-                .and_then(|pending| pending.text_entry_index)
-                .and_then(|index| app.entries().get(index))
-                .and_then(|entry| match entry {
-                    TranscriptEntry::Message(message) => Some(message.text.clone()),
-                    _ => None,
-                })
+                .map(|pending| pending.plain_text.clone())
                 .unwrap_or_default();
             if let Some(history) = history {
                 app.replace_session_history(history);
@@ -1262,6 +1261,24 @@ mod tests {
     }
 
     #[test]
+    fn stream_commentary_adds_agent_commentary_entry() {
+        let mut app = new_app(true);
+        app.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
+
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: StreamEvent::Commentary("Checking the current failure mode.".into()),
+        });
+
+        assert!(matches!(
+            &app.entries[1],
+            TranscriptEntry::Message(message)
+                if message.style == MessageStyle::Commentary
+                    && message.text == "Checking the current failure mode."
+        ));
+    }
+
+    #[test]
     fn stream_tool_call_adds_transcript_entry() {
         let mut app = new_app(true);
         app.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
@@ -1284,6 +1301,42 @@ mod tests {
     }
 
     #[test]
+    fn stream_text_after_tool_call_starts_new_message_entry() {
+        let mut app = new_app(true);
+        app.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
+
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: StreamEvent::TextDelta("Before tool".into()),
+        });
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: StreamEvent::ToolCall {
+                name: "List".into(),
+                arguments: r#"{"dir":"src"}"#.into(),
+            },
+        });
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: StreamEvent::TextDelta("After tool".into()),
+        });
+
+        assert!(matches!(
+            &app.entries[1],
+            TranscriptEntry::Message(message) if message.text == "Before tool"
+        ));
+        assert!(matches!(
+            &app.entries[2],
+            TranscriptEntry::ToolCall(tool_call)
+                if tool_call.name == "List" && tool_call.parameter == r#"{"dir":"src"}"#
+        ));
+        assert!(matches!(
+            &app.entries[3],
+            TranscriptEntry::Message(message) if message.text == "After tool"
+        ));
+    }
+
+    #[test]
     fn stream_tool_result_adds_transcript_entry() {
         let mut app = new_app(true);
         app.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
@@ -1303,6 +1356,146 @@ mod tests {
             }
             entry => panic!("expected tool result, got {entry:?}"),
         }
+    }
+
+    #[test]
+    fn commentary_between_text_segments_stays_separate_from_final_reply_text() {
+        let mut app = new_app(true);
+        app.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
+
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: StreamEvent::TextDelta("Before".into()),
+        });
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: StreamEvent::Commentary("Inspecting the failing path.".into()),
+        });
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: StreamEvent::TextDelta("After".into()),
+        });
+
+        assert!(matches!(
+            &app.entries[1],
+            TranscriptEntry::Message(message)
+                if message.style == MessageStyle::Plain && message.text == "Before"
+        ));
+        assert!(matches!(
+            &app.entries[2],
+            TranscriptEntry::Message(message)
+                if message.style == MessageStyle::Commentary
+                    && message.text == "Inspecting the failing path."
+        ));
+        assert!(matches!(
+            &app.entries[3],
+            TranscriptEntry::Message(message)
+                if message.style == MessageStyle::Plain && message.text == "After"
+        ));
+        assert_eq!(
+            app.pending_reply
+                .as_ref()
+                .expect("pending reply")
+                .plain_text,
+            "BeforeAfter"
+        );
+    }
+
+    #[test]
+    fn stream_text_after_tool_result_starts_new_message_entry() {
+        let mut app = App::new(true, true, "gpt-5-mini", ReasoningEffort::Medium);
+        app.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
+
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: StreamEvent::TextDelta("Before result".into()),
+        });
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: StreamEvent::ToolResult {
+                name: "ReadFile".into(),
+                output: "1 | line".into(),
+            },
+        });
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: StreamEvent::TextDelta("After result".into()),
+        });
+
+        assert!(matches!(
+            &app.entries[1],
+            TranscriptEntry::Message(message) if message.text == "Before result"
+        ));
+        assert!(matches!(
+            &app.entries[2],
+            TranscriptEntry::ToolResult(tool_result)
+                if tool_result.name == "ReadFile" && tool_result.output == "1 | line"
+        ));
+        assert!(matches!(
+            &app.entries[3],
+            TranscriptEntry::Message(message) if message.text == "After result"
+        ));
+    }
+
+    #[test]
+    fn reasoning_followed_by_text_creates_distinct_entries_in_order() {
+        let mut app = new_app(true);
+        app.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
+
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: StreamEvent::ReasoningDelta("thinking".into()),
+        });
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: StreamEvent::TextDelta("answer".into()),
+        });
+
+        assert!(matches!(
+            &app.entries[1],
+            TranscriptEntry::Message(message)
+                if message.style == MessageStyle::Thinking && message.text == "thinking"
+        ));
+        assert!(matches!(
+            &app.entries[2],
+            TranscriptEntry::Message(message)
+                if message.style == MessageStyle::Plain && message.text == "answer"
+        ));
+    }
+
+    #[test]
+    fn text_reasoning_text_creates_three_ordered_segments() {
+        let mut app = new_app(true);
+        app.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
+
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: StreamEvent::TextDelta("first".into()),
+        });
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: StreamEvent::ReasoningDelta("thought".into()),
+        });
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: StreamEvent::TextDelta("second".into()),
+        });
+
+        assert!(matches!(
+            &app.entries[1],
+            TranscriptEntry::Message(message)
+                if message.style == MessageStyle::Plain && message.text == "first"
+        ));
+        assert!(matches!(
+            &app.entries[2],
+            TranscriptEntry::Message(message)
+                if message.style == MessageStyle::Thinking && message.text == "thought"
+        ));
+        assert!(matches!(
+            &app.entries[3],
+            TranscriptEntry::Message(message)
+                if message.style == MessageStyle::Plain && message.text == "second"
+        ));
     }
 
     #[test]
@@ -1952,9 +2145,18 @@ mod tests {
 
         app.apply(Action::StreamEvent {
             reply_id: 2,
-            event: StreamEvent::TextDelta(
-                "<planning_ready>\n## Summary\nStable brief\n</planning_ready>".into(),
-            ),
+            event: StreamEvent::TextDelta("<planning_ready>\n## Summary\n".into()),
+        });
+        app.apply(Action::StreamEvent {
+            reply_id: 2,
+            event: StreamEvent::ToolCall {
+                name: "List".into(),
+                arguments: r#"{"dir":"src"}"#.into(),
+            },
+        });
+        app.apply(Action::StreamEvent {
+            reply_id: 2,
+            event: StreamEvent::TextDelta("Stable brief\n</planning_ready>".into()),
         });
         let effect = app.apply(Action::StreamEvent {
             reply_id: 2,

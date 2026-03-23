@@ -387,6 +387,7 @@ impl SubagentManager {
     fn handle_stream_event(&self, id: &str, event: StreamEvent) {
         match event {
             StreamEvent::TextDelta(_)
+            | StreamEvent::Commentary(_)
             | StreamEvent::ReasoningDelta(_)
             | StreamEvent::ToolResult { .. }
             | StreamEvent::AskUserRequested { .. }

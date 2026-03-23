@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     env,
     sync::{Arc, Mutex},
 };
@@ -30,18 +30,20 @@ use crate::{
     stats::StatsHook,
     subagents::SubagentManager,
     tools::{
-        AskUserTool, RUN_SHELL_SCRIPT_TOOL_NAME, RunShellScriptArgs, ToolContext,
-        display_requested_shell_cwd, display_shell_command, is_mutation_tool,
-        tool_names_for_context, tools_for_context,
+        AskUserTool, CommentaryArgs, CommentaryTool, RUN_SHELL_SCRIPT_TOOL_NAME,
+        RunShellScriptArgs, ToolContext, display_requested_shell_cwd, display_shell_command,
+        is_mutation_tool, tool_names_for_context, tools_for_context,
     },
 };
 
 const MAX_TOOL_STEPS_PER_TURN: usize = 64;
+const SYSTEM_PROMPT: &str = include_str!("../prompts/system.md");
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum StreamEvent {
     TextDelta(String),
     ReasoningDelta(String),
+    Commentary(String),
     ToolCall {
         name: String,
         arguments: String,
@@ -357,33 +359,55 @@ impl LlmService {
             .multi_turn(MAX_TOOL_STEPS_PER_TURN)
             .await;
         let mut tool_calls = HashMap::<String, String>::new();
+        let mut commentary_calls = HashSet::<String>::new();
         let mut output = String::new();
+        let mut replay_offset = None;
 
         while let Some(chunk) = stream.next().await {
             let event = match chunk {
                 Ok(MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(
                     text,
                 ))) => {
-                    output.push_str(&text.text);
-                    Some(StreamEvent::TextDelta(text.text))
+                    let delta = reconcile_stream_text(&output, &text.text, &mut replay_offset);
+                    if delta.is_empty() {
+                        None
+                    } else {
+                        output.push_str(&delta);
+                        Some(StreamEvent::TextDelta(delta))
+                    }
                 }
                 Ok(MultiTurnStreamItem::StreamAssistantItem(
                     StreamedAssistantContent::Reasoning(reasoning),
-                )) => Some(StreamEvent::ReasoningDelta(reasoning.display_text())),
+                )) => {
+                    replay_offset = (!output.is_empty()).then_some(0);
+                    Some(StreamEvent::ReasoningDelta(reasoning.display_text()))
+                }
                 Ok(MultiTurnStreamItem::StreamAssistantItem(
                     StreamedAssistantContent::ReasoningDelta { reasoning, .. },
-                )) => Some(StreamEvent::ReasoningDelta(reasoning)),
+                )) => {
+                    replay_offset = (!output.is_empty()).then_some(0);
+                    Some(StreamEvent::ReasoningDelta(reasoning))
+                }
                 Ok(MultiTurnStreamItem::StreamAssistantItem(
                     StreamedAssistantContent::ToolCall {
                         tool_call,
                         internal_call_id,
                     },
                 )) => {
+                    replay_offset = (!output.is_empty()).then_some(0);
                     let name = tool_call.function.name.clone();
                     let arguments = format_tool_arguments(&tool_call.function.arguments);
-                    tool_calls.insert(internal_call_id, name.clone());
+                    tool_calls.insert(internal_call_id.clone(), name.clone());
                     if name == AskUserTool::NAME {
                         None
+                    } else if name == CommentaryTool::NAME {
+                        match parse_commentary_message(&arguments) {
+                            Ok(message) => {
+                                commentary_calls.insert(internal_call_id);
+                                Some(StreamEvent::Commentary(message))
+                            }
+                            Err(_) => Some(StreamEvent::ToolCall { name, arguments }),
+                        }
                     } else {
                         Some(StreamEvent::ToolCall { name, arguments })
                     }
@@ -392,11 +416,14 @@ impl LlmService {
                     tool_result,
                     internal_call_id,
                 })) => {
+                    replay_offset = (!output.is_empty()).then_some(0);
                     let name = tool_calls
                         .get(&internal_call_id)
                         .cloned()
                         .unwrap_or_else(|| tool_result.id.clone());
                     if name == AskUserTool::NAME {
+                        None
+                    } else if commentary_calls.contains(&internal_call_id) {
                         None
                     } else {
                         Some(StreamEvent::ToolResult {
@@ -1170,17 +1197,18 @@ fn azure_openai_base_url(config: &AppConfig) -> String {
     )
 }
 
+fn execution_mode_label(access_mode: AccessMode) -> &'static str {
+    match access_mode {
+        AccessMode::ReadOnly => "read-only mode",
+        AccessMode::ReadWrite => "write mode",
+    }
+}
+
 fn mode_preamble(context: &AgentContext) -> String {
-    let mut preamble = concat!(
-        "You are 'oat: an opinionated agent thing'. In normal conversation, you can refer to yourself in the first person as `I`. If you refer to yourself in the third person, use exactly the name `oat` in lowercase for the short name. If the user asks you who or what you are and you want to introduce yourself fully, use exactly 'oat: an opinionated agent thing'. You are a coding assistant and can explore codebases, plan additional features, fixes, refactors, etc.\n\n",
-        "You have two modes: read-only and write mode. In read-only mode you have access to non-mutating tools that help you explore and understand codebases. In write mode your mutating tools allow you to make changes to the codebase, including creating, editing, and deleting files.\n\n",
-        "If the user asks, briefly describe what you can do in this workspace. Keep that capability summary concise and practical. Emphasize that you can inspect files, explain code, answer questions, and use both mutating and non-mutating tools depending on the mode you are currently in.\n\n",
-        "Do not call yourself an AI assistant, and do not describe yourself as helping via an API. Answer the user's most recent message directly and helpfully. When the user asks you to perform a task, do so in a focused manner. Always prioritise implementations that are maintainable, follow best practices, and are well thought through.\n\n",
-        "In general, your responses should be concise but complete: don't sacrifice detail for the sake of a short response, but also don't explain and qualify everything excessively. Your responses should be formatted in markdown. Make use of this markup to provide structure through headings, emphasis through italics and bold text, and to format code using code blocks. However, if your response is short, you do not have to use excessive formatting.\n\n",
-        "Within a single turn, you may call tools multiple times and use prior tool calls and tool outputs. Whilst you should use your context where possible, it can be useful to re-call read/explore tools if you've made edits, in order to prevent drift.\n\n",
-        "If there is ever any ambiguity, or you are not sure what the user means, or you need clarification: ask the user. It is better to double check with the user than to make assumptions and get it wrong. If there's something that you think you could help with as a logical next step, concisely ask the user if they want you to do so. Good examples of this are running tests, committing changes, or building out the next logical component. If there’s something that you couldn't do (even with approval) but that the user might want to do (such as verifying changes by running the app), include those instructions succinctly."
-    )
-    .to_string();
+    let mut preamble = SYSTEM_PROMPT.trim().replace(
+        "{{EXECUTION_MODE}}",
+        execution_mode_label(context.access_mode),
+    );
 
     match context.role {
         AgentRole::Main => {
@@ -1230,6 +1258,53 @@ fn format_tool_result(tool_result: &ToolResult) -> String {
     } else {
         parts.join("\n")
     }
+}
+
+fn parse_commentary_message(args: &str) -> Result<String> {
+    serde_json::from_str::<CommentaryArgs>(args)?
+        .validated_message()
+        .map_err(Into::into)
+}
+
+fn reconcile_stream_text(
+    output: &str,
+    incoming: &str,
+    replay_offset: &mut Option<usize>,
+) -> String {
+    if incoming.is_empty() {
+        return String::new();
+    }
+
+    let Some(offset) = *replay_offset else {
+        return incoming.to_string();
+    };
+
+    let remaining = match output.get(offset..) {
+        Some(remaining) => remaining,
+        None => {
+            *replay_offset = None;
+            return incoming.to_string();
+        }
+    };
+
+    if remaining.is_empty() {
+        *replay_offset = None;
+        return incoming.to_string();
+    }
+
+    if remaining.starts_with(incoming) {
+        let next_offset = offset + incoming.len();
+        *replay_offset = (next_offset < output.len()).then_some(next_offset);
+        return String::new();
+    }
+
+    if let Some(suffix) = incoming.strip_prefix(remaining) {
+        *replay_offset = None;
+        return suffix.to_string();
+    }
+
+    *replay_offset = None;
+    incoming.to_string()
 }
 
 #[cfg(test)]
@@ -1310,6 +1385,89 @@ mod tests {
     }
 
     #[test]
+    fn reconcile_stream_text_passes_through_normal_deltas() {
+        let mut replay_offset = None;
+        assert_eq!(
+            reconcile_stream_text("message 1", " and more", &mut replay_offset),
+            " and more"
+        );
+    }
+
+    #[test]
+    fn reconcile_stream_text_strips_replayed_prefix_at_new_segment_start() {
+        let mut replay_offset = Some(0);
+        assert_eq!(
+            reconcile_stream_text("message 1", "message 1 and more", &mut replay_offset),
+            " and more"
+        );
+        assert_eq!(replay_offset, None);
+    }
+
+    #[test]
+    fn reconcile_stream_text_suppresses_fully_replayed_chunk() {
+        let mut replay_offset = Some(0);
+        assert_eq!(
+            reconcile_stream_text("message 1", "message 1", &mut replay_offset),
+            ""
+        );
+        assert_eq!(replay_offset, None);
+    }
+
+    #[test]
+    fn reconcile_stream_text_does_not_strip_unrelated_segment_start() {
+        let mut replay_offset = Some(0);
+        assert_eq!(
+            reconcile_stream_text("message 1", "message 2", &mut replay_offset),
+            "message 2"
+        );
+        assert_eq!(replay_offset, None);
+    }
+
+    #[test]
+    fn reconcile_stream_text_suppresses_chunked_replay_before_new_suffix() {
+        let mut output = "Message 1".to_string();
+        let mut replay_offset = Some(0);
+
+        let first = reconcile_stream_text(&output, "Mess", &mut replay_offset);
+        assert_eq!(first, "");
+        assert_eq!(replay_offset, Some(4));
+
+        let second = reconcile_stream_text(&output, "age 1", &mut replay_offset);
+        assert_eq!(second, "");
+        assert_eq!(replay_offset, None);
+
+        let third = reconcile_stream_text(&output, "\n\nMessage 2", &mut replay_offset);
+        assert_eq!(third, "\n\nMessage 2");
+        output.push_str(&third);
+        assert_eq!(output, "Message 1\n\nMessage 2");
+    }
+
+    #[test]
+    fn reconcile_stream_text_emits_only_new_tail_when_chunk_finishes_replay() {
+        let mut replay_offset = Some(4);
+        assert_eq!(
+            reconcile_stream_text("Message 1", "age 1\n\nMessage 2", &mut replay_offset),
+            "\n\nMessage 2"
+        );
+        assert_eq!(replay_offset, None);
+    }
+
+    #[test]
+    fn parse_commentary_message_extracts_trimmed_message() {
+        assert_eq!(
+            parse_commentary_message(r#"{"message":"  Checking the logs now.  "}"#)
+                .expect("valid commentary"),
+            "Checking the logs now."
+        );
+    }
+
+    #[test]
+    fn parse_commentary_message_rejects_invalid_payload() {
+        assert!(parse_commentary_message(r#"{"message":"   "}"#).is_err());
+        assert!(parse_commentary_message(r#"{"text":"missing"}"#).is_err());
+    }
+
+    #[test]
     fn completion_capture_keeps_latest_request_snapshot() {
         let capture = CompletionCapture::new();
         let first_history = vec![RigMessage::system("be concise")];
@@ -1329,12 +1487,16 @@ mod tests {
     #[test]
     fn read_only_mode_preamble_uses_shared_prompt_and_read_only_suffix() {
         let preamble = mode_preamble(&AgentContext::main(AccessMode::ReadOnly));
-        assert!(preamble.contains("You are 'oat: an opinionated agent thing'."));
-        assert!(preamble.contains("refer to yourself in the first person as `I`"));
-        assert!(preamble.contains("use exactly the name `oat` in lowercase"));
-        assert!(preamble.contains("You have two modes: read-only and write mode."));
-        assert!(preamble.contains("Your responses should be formatted in markdown."));
-        assert!(preamble.contains("Do not call yourself an AI assistant"));
+        assert!(preamble.contains("You are oat: an opinionated agent thing."));
+        assert!(preamble.contains("You are a provider-agnostic coding agent."));
+        assert!(preamble.contains("You have three modes: read-only, write, and plan mode."));
+        assert!(
+            preamble.contains(
+                "Intermediary updates are provided to the user via the `Commentary` tool."
+            )
+        );
+        assert!(preamble.contains("You are currently in read-only mode."));
+        assert!(!preamble.contains("{{EXECUTION_MODE}}"));
         assert!(preamble.contains("You are currently in read-only mode."));
         assert!(preamble.contains("Do not print large amounts of code in read-only mode"));
         assert!(!preamble.contains("You are currently in write mode."));
@@ -1358,17 +1520,17 @@ mod tests {
         assert!(
             service
                 .preamble
-                .contains("You are 'oat: an opinionated agent thing'.")
+                .contains("You are oat: an opinionated agent thing.")
         );
         assert!(
             service
                 .preamble
-                .contains("use exactly the name `oat` in lowercase")
+                .contains("You are a provider-agnostic coding agent.")
         );
         assert!(
             service
                 .preamble
-                .contains("Always prioritise implementations that are maintainable")
+                .contains("Persist until the task is fully handled end-to-end")
         );
         assert!(
             service

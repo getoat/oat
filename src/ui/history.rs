@@ -446,3 +446,110 @@ fn centered_startup_version() -> String {
 
     format!("{}{}", " ".repeat(left_padding), version)
 }
+
+#[cfg(test)]
+mod tests {
+    use ratatui::style::Color;
+
+    use super::*;
+    use crate::{
+        app::{Action, Effect},
+        config::ReasoningEffort,
+        llm::StreamEvent,
+    };
+
+    #[test]
+    fn interleaved_stream_history_preserves_visible_order() {
+        let mut app = App::new(true, true, "gpt-5-mini", ReasoningEffort::Medium);
+        app.composer_mut().insert_str("Inspect the repo");
+        let effect = app.apply(Action::SubmitMessage);
+        assert!(matches!(
+            effect,
+            Some(Effect::PromptModel { reply_id: 1, .. })
+        ));
+
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: StreamEvent::TextDelta("Before tool".into()),
+        });
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: StreamEvent::ToolCall {
+                name: "List".into(),
+                arguments: r#"{"dir":"src"}"#.into(),
+            },
+        });
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: StreamEvent::TextDelta("After tool".into()),
+        });
+
+        let lines = build_history_lines(&app, 80, Color::Cyan, "...");
+        let rendered = lines.iter().map(rendered_line_text).collect::<Vec<_>>();
+
+        let before_index = rendered
+            .iter()
+            .position(|line| line.contains("Before tool"))
+            .expect("before-tool line");
+        let tool_index = rendered
+            .iter()
+            .position(|line| line.contains("◇ tool") && line.contains("List"))
+            .expect("tool line");
+        let after_index = rendered
+            .iter()
+            .position(|line| line.contains("After tool"))
+            .expect("after-tool line");
+
+        assert!(before_index < tool_index);
+        assert!(tool_index < after_index);
+    }
+
+    #[test]
+    fn commentary_between_tool_runs_stays_in_visible_order() {
+        let mut app = App::new(true, true, "gpt-5-mini", ReasoningEffort::Medium);
+        app.composer_mut().insert_str("Inspect the repo");
+        let effect = app.apply(Action::SubmitMessage);
+        assert!(matches!(
+            effect,
+            Some(Effect::PromptModel { reply_id: 1, .. })
+        ));
+
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: StreamEvent::ToolCall {
+                name: "List".into(),
+                arguments: r#"{"dir":"src"}"#.into(),
+            },
+        });
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: StreamEvent::Commentary("Found the relevant module. Reading it now.".into()),
+        });
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: StreamEvent::ToolCall {
+                name: "ReadFile".into(),
+                arguments: r#"{"path":"src/main.rs"}"#.into(),
+            },
+        });
+
+        let lines = build_history_lines(&app, 80, Color::Cyan, "...");
+        let rendered = lines.iter().map(rendered_line_text).collect::<Vec<_>>();
+
+        let first_tool_index = rendered
+            .iter()
+            .position(|line| line.contains("◇ tool") && line.contains("List"))
+            .expect("list tool line");
+        let commentary_index = rendered
+            .iter()
+            .position(|line| line.contains("Found the relevant module. Reading it now."))
+            .expect("commentary line");
+        let second_tool_index = rendered
+            .iter()
+            .position(|line| line.contains("◇ tool") && line.contains("ReadFile"))
+            .expect("read file tool line");
+
+        assert!(first_tool_index < commentary_index);
+        assert!(commentary_index < second_tool_index);
+    }
+}

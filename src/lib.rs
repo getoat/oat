@@ -248,7 +248,8 @@ pub fn run_headless(
                 llm::StreamEvent::Failed(error) => {
                     return Err(anyhow!("Request failed: {error}"));
                 }
-                llm::StreamEvent::ReasoningDelta(_)
+                llm::StreamEvent::Commentary(_)
+                | llm::StreamEvent::ReasoningDelta(_)
                 | llm::StreamEvent::PlanningFinalizationStarted
                 | llm::StreamEvent::ToolCall { .. }
                 | llm::StreamEvent::ToolResult { .. }
