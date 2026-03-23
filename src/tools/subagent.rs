@@ -169,7 +169,7 @@ impl Tool for WaitSubagentTool {
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         ToolDefinition {
             name: Self::NAME.to_string(),
-            description: "Wait for one or more subagents. Use this after delegating work instead of duplicating the delegated task in the main agent. This waits until a subagent finishes, fails, or has no activity for timeout_ms. Active subagents reset the timeout whenever they emit new activity.".to_string(),
+            description: "Wait for one or more subagents. Use this after delegating work instead of duplicating the delegated task in the main agent. This waits until a subagent finishes, is cancelled, fails, or has no activity for timeout_ms. Active subagents reset the timeout whenever they emit new activity.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {

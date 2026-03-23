@@ -8,22 +8,26 @@ use crate::app::Action;
 const MOUSE_SCROLL_LINES: usize = 3;
 
 pub fn map_event(event: Event) -> Option<Action> {
-    map_event_with_state(event, false, false)
+    map_event_with_state(event, false, false, false)
 }
 
 pub fn map_event_with_state(
     event: Event,
     awaiting_write_approval: bool,
     selection_picker_visible: bool,
+    awaiting_plan_review: bool,
 ) -> Option<Action> {
     match event {
         Event::Key(key) if key.kind == KeyEventKind::Press => Some(map_key_event(
             key,
             awaiting_write_approval,
             selection_picker_visible,
+            awaiting_plan_review,
         )),
         Event::Mouse(mouse) => map_mouse_event(mouse),
-        Event::Paste(text) => (!awaiting_write_approval).then_some(Action::Paste(text)),
+        Event::Paste(text) => {
+            (!awaiting_write_approval && !awaiting_plan_review).then_some(Action::Paste(text))
+        }
         _ => None,
     }
 }
@@ -32,6 +36,7 @@ fn map_key_event(
     key: KeyEvent,
     awaiting_write_approval: bool,
     selection_picker_visible: bool,
+    awaiting_plan_review: bool,
 ) -> Action {
     if awaiting_write_approval {
         return match (key.code, key.modifiers) {
@@ -42,6 +47,18 @@ fn map_key_event(
             (KeyCode::Char('a'), KeyModifiers::NONE) => Action::ApproveWriteOnce,
             (KeyCode::Char('s'), KeyModifiers::NONE) => Action::ApproveWriteAllSession,
             (KeyCode::Char('d'), KeyModifiers::NONE) => Action::DenyWrite,
+            (KeyCode::PageUp, _) => Action::ScrollHistoryPageUp,
+            (KeyCode::PageDown, _) => Action::ScrollHistoryPageDown,
+            (KeyCode::Home, _) => Action::ScrollHistoryToTop,
+            (KeyCode::End, _) => Action::ScrollHistoryToBottom,
+            _ => Action::Tick,
+        };
+    }
+
+    if awaiting_plan_review {
+        return match (key.code, key.modifiers) {
+            (KeyCode::Char('1'), KeyModifiers::NONE) => Action::AcceptPlanAndImplement,
+            (KeyCode::Char('2'), KeyModifiers::NONE) => Action::SuggestPlanChanges,
             (KeyCode::PageUp, _) => Action::ScrollHistoryPageUp,
             (KeyCode::PageDown, _) => Action::ScrollHistoryPageDown,
             (KeyCode::Home, _) => Action::ScrollHistoryToTop,
@@ -161,7 +178,8 @@ mod tests {
             map_event_with_state(
                 Event::Key(key(KeyCode::Left, KeyModifiers::NONE)),
                 false,
-                true
+                true,
+                false
             ),
             Some(Action::PickerTabLeft)
         );
@@ -169,7 +187,8 @@ mod tests {
             map_event_with_state(
                 Event::Key(key(KeyCode::Right, KeyModifiers::NONE)),
                 false,
-                true
+                true,
+                false
             ),
             Some(Action::PickerTabRight)
         );
@@ -177,7 +196,8 @@ mod tests {
             map_event_with_state(
                 Event::Key(key(KeyCode::Char(' '), KeyModifiers::NONE)),
                 false,
-                true
+                true,
+                false
             ),
             Some(Action::TogglePickerSelection)
         );
@@ -220,6 +240,7 @@ mod tests {
                 Event::Key(key(KeyCode::Char('a'), KeyModifiers::NONE)),
                 true,
                 false,
+                false,
             ),
             Some(Action::ApproveWriteOnce)
         );
@@ -228,6 +249,7 @@ mod tests {
                 Event::Key(key(KeyCode::Char('s'), KeyModifiers::NONE)),
                 true,
                 false,
+                false,
             ),
             Some(Action::ApproveWriteAllSession)
         );
@@ -235,6 +257,7 @@ mod tests {
             map_event_with_state(
                 Event::Key(key(KeyCode::Char('d'), KeyModifiers::NONE)),
                 true,
+                false,
                 false,
             ),
             Some(Action::DenyWrite)
@@ -248,11 +271,51 @@ mod tests {
                 Event::Key(key(KeyCode::Char('x'), KeyModifiers::NONE)),
                 true,
                 false,
+                false,
             ),
             Some(Action::Tick)
         );
         assert_eq!(
-            map_event_with_state(Event::Paste("hello".into()), true, false),
+            map_event_with_state(Event::Paste("hello".into()), true, false, false),
+            None
+        );
+    }
+
+    #[test]
+    fn plan_review_prompt_maps_numeric_choices() {
+        assert_eq!(
+            map_event_with_state(
+                Event::Key(key(KeyCode::Char('1'), KeyModifiers::NONE)),
+                false,
+                false,
+                true,
+            ),
+            Some(Action::AcceptPlanAndImplement)
+        );
+        assert_eq!(
+            map_event_with_state(
+                Event::Key(key(KeyCode::Char('2'), KeyModifiers::NONE)),
+                false,
+                false,
+                true,
+            ),
+            Some(Action::SuggestPlanChanges)
+        );
+    }
+
+    #[test]
+    fn plan_review_prompt_ignores_regular_typing_and_paste() {
+        assert_eq!(
+            map_event_with_state(
+                Event::Key(key(KeyCode::Char('x'), KeyModifiers::NONE)),
+                false,
+                false,
+                true,
+            ),
+            Some(Action::Tick)
+        );
+        assert_eq!(
+            map_event_with_state(Event::Paste("hello".into()), false, false, true),
             None
         );
     }

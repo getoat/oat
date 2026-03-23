@@ -2,8 +2,8 @@ use ratatui_textarea::Input;
 use rig::completion::Message as RigMessage;
 
 use super::state::{
-    App, MessageStyle, PendingReply, PickerSelection, SlashCommand, SubagentDisplayState,
-    SubagentStatusKind, TranscriptEntry, WriteApprovalDecision,
+    App, MessageStyle, PendingReply, PendingReplyKind, PickerSelection, SlashCommand,
+    SubagentDisplayState, SubagentStatusKind, TranscriptEntry, WriteApprovalDecision,
 };
 use crate::config::ReasoningEffort;
 use crate::llm::StreamEvent;
@@ -32,6 +32,8 @@ pub enum Action {
     ApproveWriteOnce,
     ApproveWriteAllSession,
     DenyWrite,
+    AcceptPlanAndImplement,
+    SuggestPlanChanges,
     Editor(Input),
     Paste(String),
     StartHistorySelection { column: u16, row: u16 },
@@ -158,7 +160,7 @@ impl App {
                 None
             }
             Action::InsertComposerNewline => {
-                if self.has_pending_write_approval() {
+                if self.has_pending_write_approval() || self.plan_review_selection_active() {
                     return None;
                 }
                 self.insert_composer_newline();
@@ -188,15 +190,22 @@ impl App {
                 apply_write_approval(self, WriteApprovalDecision::Deny),
                 WriteApprovalDecision::Deny,
             ),
+            Action::AcceptPlanAndImplement => submit_plan_acceptance(self),
+            Action::SuggestPlanChanges => {
+                if self.plan_review_selection_active() {
+                    self.begin_plan_review_feedback();
+                }
+                None
+            }
             Action::Editor(input) => {
-                if self.has_pending_write_approval() {
+                if self.has_pending_write_approval() || self.plan_review_selection_active() {
                     return None;
                 }
                 self.apply_composer_input(input);
                 None
             }
             Action::Paste(text) => {
-                if self.has_pending_write_approval() {
+                if self.has_pending_write_approval() || self.plan_review_selection_active() {
                     return None;
                 }
                 self.paste_into_composer(&text);
@@ -234,12 +243,20 @@ fn submit_message(app: &mut App) -> Option<Effect> {
         return None;
     }
 
+    if app.plan_review_selection_active() {
+        return None;
+    }
+
     if app.selection_picker_visible() {
         return submit_picker_selection(app);
     }
 
     let submitted = app.composer.lines().join("\n");
     let submitted = submitted.trim().to_owned();
+
+    if app.plan_review_feedback_active() {
+        return submit_plan_revision_feedback(app, &submitted);
+    }
 
     if app.planning_draft_mode() {
         return submit_planning_draft(app, &submitted);
@@ -260,19 +277,61 @@ fn submit_message(app: &mut App) -> Option<Effect> {
     }
 
     app.record_submitted_input(&submitted);
+    app.clear_plan_review();
     app.push_user_message(submitted.clone());
     app.resume_history_follow();
     app.clear_composer();
     let reply_id = app.next_reply_id();
-    app.pending_reply = Some(PendingReply {
-        id: reply_id,
-        reasoning_entry_index: None,
-        text_entry_index: None,
-    });
+    app.pending_reply = Some(PendingReply::new(reply_id, PendingReplyKind::Normal));
 
     Some(Effect::PromptModel {
         reply_id,
         prompt: submitted,
+        history: app.session_history().to_vec(),
+    })
+}
+
+fn submit_plan_acceptance(app: &mut App) -> Option<Effect> {
+    if app.pending_reply.is_some() || !app.plan_review_selection_active() {
+        return None;
+    }
+
+    let prompt = accepted_plan_prompt().to_string();
+    app.record_submitted_input(&prompt);
+    app.clear_plan_review();
+    app.push_user_message(prompt.clone());
+    app.resume_history_follow();
+    app.clear_composer();
+    let reply_id = app.next_reply_id();
+    app.pending_reply = Some(PendingReply::new(reply_id, PendingReplyKind::Normal));
+
+    Some(Effect::PromptModel {
+        reply_id,
+        prompt,
+        history: app.session_history().to_vec(),
+    })
+}
+
+fn submit_plan_revision_feedback(app: &mut App, submitted: &str) -> Option<Effect> {
+    if app.pending_reply.is_some() || submitted.is_empty() || !app.plan_review_feedback_active() {
+        return None;
+    }
+
+    let prompt = format!(
+        "Revise the proposed plan based on these comments. Respond with an updated <proposed_plan> block and do not begin implementation yet. Do not use subagents for this revision.\n\n{}",
+        submitted
+    );
+    app.record_submitted_input(submitted);
+    app.clear_plan_review();
+    app.push_user_message(prompt.clone());
+    app.resume_history_follow();
+    app.clear_composer();
+    let reply_id = app.next_reply_id();
+    app.pending_reply = Some(PendingReply::new(reply_id, PendingReplyKind::Planning));
+
+    Some(Effect::PromptModel {
+        reply_id,
+        prompt,
         history: app.session_history().to_vec(),
     })
 }
@@ -288,11 +347,7 @@ fn submit_planning_draft(app: &mut App, submitted: &str) -> Option<Effect> {
     app.resume_history_follow();
     app.clear_composer();
     let reply_id = app.next_reply_id();
-    app.pending_reply = Some(PendingReply {
-        id: reply_id,
-        reasoning_entry_index: None,
-        text_entry_index: None,
-    });
+    app.pending_reply = Some(PendingReply::new(reply_id, PendingReplyKind::Planning));
 
     Some(Effect::RunPlanningWorkflow {
         reply_id,
@@ -471,10 +526,25 @@ fn on_stream_event(app: &mut App, reply_id: u64, event: StreamEvent) {
             app.begin_write_approval(request_id, tool_name, arguments);
         }
         StreamEvent::Finished { history } => {
+            let synthesized_plan = app
+                .pending_reply
+                .as_ref()
+                .and_then(|pending| pending.text_entry_index)
+                .and_then(|index| app.entries().get(index))
+                .and_then(|entry| match entry {
+                    TranscriptEntry::Message(message) => {
+                        extract_proposed_plan(&message.text).map(|_| ())
+                    }
+                    _ => None,
+                })
+                .is_some();
             if let Some(history) = history {
                 app.replace_session_history(history);
             }
             app.pending_reply = None;
+            if synthesized_plan {
+                app.begin_plan_review();
+            }
         }
         StreamEvent::Failed(error) => {
             app.pending_reply = None;
@@ -563,6 +633,25 @@ fn on_subagent_event(app: &mut App, event: SubagentUiEvent) {
                 .unwrap_or_default();
             app.push_error_message(format!("Subagent `{id}` failed: {error}{suffix}"));
         }
+        SubagentUiEvent::Cancelled { id } => {
+            let existing = app
+                .entries()
+                .iter()
+                .find_map(|entry| match entry {
+                    TranscriptEntry::SubagentStatus(status) if status.id == id => {
+                        Some((status.kind, status.display_label.clone()))
+                    }
+                    _ => None,
+                })
+                .unwrap_or((SubagentStatusKind::Subagent, id.clone()));
+            app.upsert_subagent_status(
+                id,
+                existing.0,
+                existing.1,
+                SubagentDisplayState::Cancelled,
+                "cancelled".into(),
+            );
+        }
         SubagentUiEvent::WriteApprovalRequested {
             id,
             request_id,
@@ -587,6 +676,19 @@ fn resolve_write_approval(
         request_id,
         decision,
     })
+}
+
+fn accepted_plan_prompt() -> &'static str {
+    "I accept this plan. Begin implementation now."
+}
+
+fn extract_proposed_plan(text: &str) -> Option<&str> {
+    const START: &str = "<proposed_plan>";
+    const END: &str = "</proposed_plan>";
+
+    let start = text.find(START)?;
+    let end = text[start + START.len()..].find(END)?;
+    Some(&text[start..start + START.len() + end + END.len()])
 }
 
 #[cfg(test)]
@@ -632,11 +734,7 @@ mod tests {
     #[test]
     fn clear_composer_or_quit_cancels_pending_reply_instead_of_quitting() {
         let mut app = new_app(true);
-        app.pending_reply = Some(PendingReply {
-            id: 1,
-            reasoning_entry_index: None,
-            text_entry_index: None,
-        });
+        app.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
 
         let effect = app.apply(Action::ClearComposerOrQuit);
 
@@ -653,11 +751,7 @@ mod tests {
     #[test]
     fn explicit_cancel_pending_reply_adds_cancellation_message() {
         let mut app = new_app(true);
-        app.pending_reply = Some(PendingReply {
-            id: 1,
-            reasoning_entry_index: None,
-            text_entry_index: None,
-        });
+        app.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
 
         let effect = app.apply(Action::CancelPendingReply);
 
@@ -722,11 +816,7 @@ mod tests {
     #[test]
     fn submit_message_does_nothing_while_reply_is_pending() {
         let mut app = new_app(true);
-        app.pending_reply = Some(PendingReply {
-            id: 5,
-            reasoning_entry_index: None,
-            text_entry_index: None,
-        });
+        app.pending_reply = Some(PendingReply::new(5, PendingReplyKind::Normal));
         app.composer.insert_str("new prompt");
 
         let effect = app.apply(Action::SubmitMessage);
@@ -828,11 +918,7 @@ mod tests {
     #[test]
     fn stream_text_creates_and_updates_agent_message() {
         let mut app = new_app(true);
-        app.pending_reply = Some(PendingReply {
-            id: 1,
-            reasoning_entry_index: None,
-            text_entry_index: None,
-        });
+        app.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
 
         app.apply(Action::StreamEvent {
             reply_id: 1,
@@ -855,11 +941,7 @@ mod tests {
     #[test]
     fn stream_reasoning_is_hidden_when_config_disables_it() {
         let mut app = new_app(false);
-        app.pending_reply = Some(PendingReply {
-            id: 1,
-            reasoning_entry_index: None,
-            text_entry_index: None,
-        });
+        app.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
 
         app.apply(Action::StreamEvent {
             reply_id: 1,
@@ -872,11 +954,7 @@ mod tests {
     #[test]
     fn stream_tool_call_adds_transcript_entry() {
         let mut app = new_app(true);
-        app.pending_reply = Some(PendingReply {
-            id: 1,
-            reasoning_entry_index: None,
-            text_entry_index: None,
-        });
+        app.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
 
         app.apply(Action::StreamEvent {
             reply_id: 1,
@@ -898,11 +976,7 @@ mod tests {
     #[test]
     fn stream_tool_result_adds_transcript_entry() {
         let mut app = new_app(true);
-        app.pending_reply = Some(PendingReply {
-            id: 1,
-            reasoning_entry_index: None,
-            text_entry_index: None,
-        });
+        app.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
 
         app.apply(Action::StreamEvent {
             reply_id: 1,
@@ -924,11 +998,7 @@ mod tests {
     #[test]
     fn stream_failure_appends_error_message() {
         let mut app = new_app(true);
-        app.pending_reply = Some(PendingReply {
-            id: 1,
-            reasoning_entry_index: None,
-            text_entry_index: None,
-        });
+        app.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
 
         app.apply(Action::StreamEvent {
             reply_id: 1,
@@ -1039,6 +1109,113 @@ mod tests {
             })
         );
         assert!(!app.planning_draft_mode());
+        assert!(app.plan_active());
+        assert_eq!(
+            app.pending_reply.as_ref().map(|pending| pending.kind),
+            Some(PendingReplyKind::Planning)
+        );
+    }
+
+    #[test]
+    fn finished_plan_response_enters_plan_review_selection_mode() {
+        let mut app = registry_app(true);
+        app.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Planning));
+
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: StreamEvent::TextDelta(
+                "<proposed_plan>\n# Test Plan\n\nSummary\n</proposed_plan>".into(),
+            ),
+        });
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: StreamEvent::Finished { history: None },
+        });
+
+        assert!(app.plan_review_selection_active());
+        assert!(!app.plan_review_feedback_active());
+    }
+
+    #[test]
+    fn accepting_plan_starts_normal_prompt_model_turn() {
+        let mut app = registry_app(true);
+        app.begin_plan_review();
+
+        let effect = app.apply(Action::AcceptPlanAndImplement);
+
+        assert_eq!(
+            effect,
+            Some(Effect::PromptModel {
+                reply_id: 1,
+                prompt: "I accept this plan. Begin implementation now.".into(),
+                history: Vec::new(),
+            })
+        );
+        assert!(app.pending_reply.is_some());
+        assert!(!app.plan_review_selection_active());
+        assert_eq!(
+            app.pending_reply.as_ref().map(|pending| pending.kind),
+            Some(PendingReplyKind::Normal)
+        );
+    }
+
+    #[test]
+    fn suggesting_plan_changes_enters_feedback_mode() {
+        let mut app = registry_app(true);
+        app.begin_plan_review();
+
+        let effect = app.apply(Action::SuggestPlanChanges);
+
+        assert!(effect.is_none());
+        assert!(app.plan_review_feedback_active());
+        assert!(!app.plan_review_selection_active());
+    }
+
+    #[test]
+    fn submitting_plan_feedback_regenerates_plan_with_main_agent_prompt() {
+        let mut app = registry_app(true);
+        app.begin_plan_review_feedback();
+        app.composer.insert_str("Cover rollback and tests.");
+
+        let effect = app.apply(Action::SubmitMessage);
+
+        assert_eq!(
+            effect,
+            Some(Effect::PromptModel {
+                reply_id: 1,
+                prompt: "Revise the proposed plan based on these comments. Respond with an updated <proposed_plan> block and do not begin implementation yet. Do not use subagents for this revision.\n\nCover rollback and tests.".into(),
+                history: Vec::new(),
+            })
+        );
+        assert!(app.pending_reply.is_some());
+        assert_eq!(
+            app.pending_reply.as_ref().map(|pending| pending.kind),
+            Some(PendingReplyKind::Planning)
+        );
+        assert!(!app.plan_review_feedback_active());
+    }
+
+    #[test]
+    fn cancelled_subagent_event_updates_status_without_error_message() {
+        let mut app = new_app(true);
+        app.apply(Action::SubagentEvent(SubagentUiEvent::Spawned {
+            id: "subagent-1".into(),
+            access_mode: crate::app::AccessMode::ReadOnly,
+            activity_kind: SubagentActivityKind::General,
+        }));
+
+        let entry_count_before = app.entries.len();
+        app.apply(Action::SubagentEvent(SubagentUiEvent::Cancelled {
+            id: "subagent-1".into(),
+        }));
+
+        assert_eq!(app.entries.len(), entry_count_before);
+        let TranscriptEntry::SubagentStatus(status) = app.entries.last().expect("status entry")
+        else {
+            panic!("expected subagent status entry");
+        };
+        assert_eq!(status.state, SubagentDisplayState::Cancelled);
+        assert_eq!(status.status_text, "cancelled");
     }
 
     #[test]
@@ -1194,11 +1371,7 @@ mod tests {
             text: "old".into(),
             style: MessageStyle::Plain,
         }));
-        app.pending_reply = Some(PendingReply {
-            id: 8,
-            reasoning_entry_index: None,
-            text_entry_index: None,
-        });
+        app.pending_reply = Some(PendingReply::new(8, PendingReplyKind::Normal));
         app.composer.insert_str("/clear");
         app.sync_command_selection();
 
@@ -1323,11 +1496,7 @@ mod tests {
     fn stale_stream_events_are_ignored_after_new_session() {
         let mut app = new_app(true);
         app.replace_session_history(vec![RigMessage::assistant("previous")]);
-        app.pending_reply = Some(PendingReply {
-            id: 11,
-            reasoning_entry_index: None,
-            text_entry_index: None,
-        });
+        app.pending_reply = Some(PendingReply::new(11, PendingReplyKind::Normal));
         app.entries.push(TranscriptEntry::Message(ChatMessage {
             speaker: Speaker::User,
             text: "hello".into(),
@@ -1349,11 +1518,7 @@ mod tests {
     #[test]
     fn finished_stream_replaces_canonical_history() {
         let mut app = new_app(true);
-        app.pending_reply = Some(PendingReply {
-            id: 2,
-            reasoning_entry_index: None,
-            text_entry_index: None,
-        });
+        app.pending_reply = Some(PendingReply::new(2, PendingReplyKind::Normal));
         app.replace_session_history(vec![RigMessage::assistant("old")]);
 
         app.apply(Action::StreamEvent {
@@ -1374,13 +1539,23 @@ mod tests {
     }
 
     #[test]
+    fn finished_planning_stream_clears_plan_active_state() {
+        let mut app = registry_app(true);
+        app.pending_reply = Some(PendingReply::new(2, PendingReplyKind::Planning));
+
+        app.apply(Action::StreamEvent {
+            reply_id: 2,
+            event: StreamEvent::Finished { history: None },
+        });
+
+        assert!(app.pending_reply.is_none());
+        assert!(!app.plan_active());
+    }
+
+    #[test]
     fn failed_stream_keeps_previous_canonical_history() {
         let mut app = new_app(true);
-        app.pending_reply = Some(PendingReply {
-            id: 2,
-            reasoning_entry_index: None,
-            text_entry_index: None,
-        });
+        app.pending_reply = Some(PendingReply::new(2, PendingReplyKind::Normal));
         app.replace_session_history(vec![RigMessage::assistant("stable")]);
 
         app.apply(Action::StreamEvent {

@@ -146,6 +146,7 @@ pub fn run_with_options(
                 event::read()?,
                 app.has_pending_write_approval(),
                 app.selection_picker_visible(),
+                app.plan_review_selection_active(),
             )
             && let Some(effect) = app.apply(action)
         {
@@ -284,6 +285,8 @@ impl EffectRunner<'_> {
                 Ok(())
             }
             Effect::RotateSession => {
+                self.runtime
+                    .block_on(self.subagents.cancel_all_running(false));
                 self.stats.rotate_session()?;
                 self.llm.reset_write_approvals();
                 Ok(())
@@ -389,6 +392,8 @@ impl EffectRunner<'_> {
             }
             Effect::CancelPendingReply => {
                 self.cancel_active_reply();
+                self.runtime
+                    .block_on(self.subagents.cancel_all_running(true));
                 Ok(())
             }
         }
@@ -568,7 +573,9 @@ async fn collect_planning_batch_results(
                             failed.push(job.model_name);
                         }
                     }
-                    SubagentStatus::Failed => failed.push(job.model_name),
+                    SubagentStatus::Failed | SubagentStatus::Cancelled => {
+                        failed.push(job.model_name)
+                    }
                 },
                 Err(_) => failed.push(job.model_name),
             }

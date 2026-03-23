@@ -14,9 +14,11 @@ use super::{
 
 pub fn render(frame: &mut Frame, app: &mut App) {
     let screen = frame.area();
-    let accent = accent_color(app.mode());
+    let accent = accent_color(app.mode(), app.plan_active());
     let input_height = if let Some(pending) = app.pending_write_approval() {
         pending_write_approval_height(pending, screen.width)
+    } else if app.plan_review_selection_active() {
+        pending_plan_review_height(screen.width)
     } else {
         app.composer_height().max(3)
     };
@@ -47,6 +49,11 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 fn render_input(frame: &mut Frame, app: &mut App, area: Rect, accent: Color) {
     if let Some(pending) = app.pending_write_approval() {
         render_write_approval_prompt(frame, pending, area, accent);
+        return;
+    }
+
+    if app.plan_review_selection_active() {
+        render_plan_review_prompt(frame, area, accent);
         return;
     }
 
@@ -115,6 +122,38 @@ fn render_write_approval_prompt(
             .borders(Borders::ALL)
             .padding(Padding::horizontal(1))
             .border_style(Style::default().fg(Color::Yellow)),
+    );
+    frame.render_widget(prompt, area);
+}
+
+fn render_plan_review_prompt(frame: &mut Frame, area: Rect, accent: Color) {
+    let lines = vec![
+        Line::from(Span::styled(
+            "A proposed plan is ready.",
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(vec![
+            Span::styled(
+                "[1]",
+                Style::default().fg(accent).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" Accept this plan and begin implementation"),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "[2]",
+                Style::default().fg(accent).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" Suggest changes to the plan"),
+        ]),
+    ];
+
+    let prompt = Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+        Block::default()
+            .title(" Plan Ready ")
+            .borders(Borders::ALL)
+            .padding(Padding::horizontal(1))
+            .border_style(Style::default().fg(accent)),
     );
     frame.render_widget(prompt, area);
 }
@@ -289,7 +328,7 @@ fn model_picker_tab_line(active_tab: ModelPickerTab, accent: Color) -> Line<'sta
 }
 
 fn render_mode(frame: &mut Frame, app: &App, area: Rect, accent: Color) {
-    let mode_label = mode_status_label(app.mode(), app.approval_mode());
+    let mode_label = mode_status_label(app.mode(), app.approval_mode(), app.plan_active());
     let session_stats = app.session_stats();
     let context_percent = app.next_request_context_percent();
 
@@ -340,7 +379,12 @@ fn render_mode(frame: &mut Frame, app: &App, area: Rect, accent: Color) {
 fn mode_status_label(
     mode: crate::app::AccessMode,
     approval_mode: crate::app::ApprovalMode,
+    plan_active: bool,
 ) -> &'static str {
+    if plan_active {
+        return "Plan";
+    }
+
     match (mode, approval_mode) {
         (crate::app::AccessMode::ReadWrite, crate::app::ApprovalMode::Disabled) => "Write (!)",
         _ => mode.label(),
@@ -359,6 +403,19 @@ fn pending_write_approval_height(
         .unwrap_or(0);
     let summary_lines = wrap_text(&pending.summary, content_width.max(1)).len();
     (source_lines + summary_lines + 3 + 2) as u16
+}
+
+fn pending_plan_review_height(panel_width: u16) -> u16 {
+    let content_width = panel_width.saturating_sub(4) as usize;
+    let title_lines = wrap_text("A proposed plan is ready.", content_width.max(1)).len();
+    let option_one_lines = wrap_text(
+        "[1] Accept this plan and begin implementation",
+        content_width.max(1),
+    )
+    .len();
+    let option_two_lines = wrap_text("[2] Suggest changes to the plan", content_width.max(1)).len();
+
+    (title_lines + option_one_lines + option_two_lines + 2) as u16
 }
 
 fn command_palette_line(
@@ -477,7 +534,7 @@ mod tests {
     };
 
     use crate::{
-        app::{Action, MessageStyle},
+        app::{Action, Effect, MessageStyle},
         config::ReasoningEffort,
         stats::StatsTotals,
         tools::{DiffKind, DiffPreviewLine, MutationPreview, mutation_preview},
@@ -641,7 +698,7 @@ mod tests {
         assert!(
             banner_foregrounds(terminal.backend().buffer())
                 .iter()
-                .any(|color| *color == accent_color(app.mode())),
+                .any(|color| *color == accent_color(app.mode(), app.plan_active())),
             "expected startup banner to retain the base accent color"
         );
 
@@ -732,6 +789,7 @@ mod tests {
             mode_status_label(
                 crate::app::AccessMode::ReadWrite,
                 crate::app::ApprovalMode::Manual,
+                false,
             ),
             "Write"
         );
@@ -739,9 +797,109 @@ mod tests {
             mode_status_label(
                 crate::app::AccessMode::ReadWrite,
                 crate::app::ApprovalMode::Disabled,
+                false,
             ),
             "Write (!)"
         );
+    }
+
+    #[test]
+    fn mode_status_label_prefers_plan_state() {
+        assert_eq!(
+            mode_status_label(
+                crate::app::AccessMode::ReadOnly,
+                crate::app::ApprovalMode::Manual,
+                true,
+            ),
+            "Plan"
+        );
+        assert_eq!(
+            mode_status_label(
+                crate::app::AccessMode::ReadWrite,
+                crate::app::ApprovalMode::Disabled,
+                true,
+            ),
+            "Plan"
+        );
+    }
+
+    #[test]
+    fn render_shows_plan_footer_and_accent_during_planning_draft() {
+        let backend = TestBackend::new(120, 12);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut app = App::new(true, false, "gpt-5.4-mini", ReasoningEffort::Medium);
+        app.enter_planning_draft_mode();
+
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render succeeds");
+
+        let rendered = buffer_string(terminal.backend());
+        assert!(rendered.contains("Plan"));
+        assert!(word_has_foreground(
+            terminal.backend().buffer(),
+            "Plan",
+            accent_color(app.mode(), true),
+        ));
+    }
+
+    #[test]
+    fn render_shows_plan_footer_while_planning_run_is_pending() {
+        let backend = TestBackend::new(120, 12);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut app = App::new(true, false, "gpt-5.4-mini", ReasoningEffort::Medium);
+        app.enter_planning_draft_mode();
+        app.composer_mut().insert_str("Make a roadmap");
+        let effect = app.apply(Action::SubmitMessage);
+        assert!(matches!(effect, Some(Effect::RunPlanningWorkflow { .. })));
+
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render succeeds");
+
+        let rendered = buffer_string(terminal.backend());
+        assert!(rendered.contains("Plan"));
+        assert!(!app.planning_draft_mode());
+        assert!(app.plan_active());
+        assert!(word_has_foreground(
+            terminal.backend().buffer(),
+            "Plan",
+            accent_color(app.mode(), true),
+        ));
+    }
+
+    #[test]
+    fn render_replaces_input_with_plan_review_prompt() {
+        let backend = TestBackend::new(120, 12);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut app = App::new(true, false, "gpt-5.4-mini", ReasoningEffort::Medium);
+        app.begin_plan_review();
+
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render succeeds");
+
+        let rendered = buffer_string(terminal.backend());
+        assert!(rendered.contains("Plan Ready"));
+        assert!(rendered.contains("Accept this plan and begin implementation"));
+        assert!(rendered.contains("Suggest changes to the plan"));
+    }
+
+    #[test]
+    fn render_restores_composer_in_plan_feedback_mode() {
+        let backend = TestBackend::new(120, 12);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut app = App::new(true, false, "gpt-5.4-mini", ReasoningEffort::Medium);
+        app.begin_plan_review_feedback();
+        app.composer_mut().insert_str("revise this");
+
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render succeeds");
+
+        let rendered = buffer_string(terminal.backend());
+        assert!(rendered.contains("revise this"));
+        assert!(!rendered.contains("Plan Ready"));
     }
 
     #[test]
@@ -1330,7 +1488,7 @@ mod tests {
             .nth(row as usize)
             .expect("selected row");
         for cell in selected_row.iter().skip(column as usize).take(5) {
-            assert_eq!(cell.bg, accent_color(app.mode()));
+            assert_eq!(cell.bg, accent_color(app.mode(), app.plan_active()));
         }
     }
 

@@ -10,7 +10,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use regex::Regex;
 use serde::Serialize;
 use tokio::{
-    sync::{mpsc, watch},
+    sync::{mpsc, oneshot, watch},
+    task::JoinHandle,
     time::{Instant, sleep_until},
 };
 
@@ -45,6 +46,7 @@ struct State {
     max_concurrent: usize,
     generation: u64,
     records: HashMap<String, SubagentRecord>,
+    tasks: HashMap<String, JoinHandle<()>>,
 }
 
 #[derive(Clone, Debug)]
@@ -67,6 +69,7 @@ pub enum SubagentStatus {
     Running,
     Completed,
     Failed,
+    Cancelled,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -93,6 +96,9 @@ pub enum SubagentUiEvent {
         id: String,
         error: String,
         log_path: Option<String>,
+    },
+    Cancelled {
+        id: String,
     },
     WriteApprovalRequested {
         id: String,
@@ -131,6 +137,7 @@ pub struct SubagentSnapshot {
 pub struct WaitResult {
     pub completed_id: Option<String>,
     pub failed_id: Option<String>,
+    pub cancelled_id: Option<String>,
     pub inactive_id: Option<String>,
     pub timed_out_on_inactivity: bool,
     pub subagents: Vec<SubagentSnapshot>,
@@ -169,6 +176,7 @@ impl SubagentManager {
                     max_concurrent,
                     generation: 0,
                     records: HashMap::new(),
+                    tasks: HashMap::new(),
                 }),
                 notify_tx,
                 ui_tx,
@@ -195,28 +203,79 @@ impl SubagentManager {
         let manager = self.clone();
         let spawned_id = id.clone();
         let request_for_failure = request.clone();
-        tokio::spawn(async move {
-            let join = tokio::spawn({
-                let manager = manager.clone();
-                let id = spawned_id.clone();
-                async move { manager.run_spawned_subagent(id, request).await }
-            });
+        let (start_tx, start_rx) = oneshot::channel();
+        let handle = tokio::spawn(async move {
+            if start_rx.await.is_err() {
+                return;
+            }
+            let result = manager
+                .run_spawned_subagent(spawned_id.clone(), request)
+                .await;
 
-            match join.await {
-                Ok(Ok(output)) => manager.mark_completed(&spawned_id, output),
-                Ok(Err(error)) => manager.fail_subagent(&spawned_id, &request_for_failure, error),
-                Err(error) => manager.fail_subagent(
-                    &spawned_id,
-                    &request_for_failure,
-                    SubagentExecutionFailure {
-                        raw_error: format!("Subagent task died: {error}"),
-                        failing_request: None,
-                    },
-                ),
+            match result {
+                Ok(output) => manager.mark_completed(&spawned_id, output),
+                Err(error) => manager.fail_subagent(&spawned_id, &request_for_failure, error),
             }
         });
+        self.insert_task_handle(&id, handle);
+        let _ = start_tx.send(());
 
         self.inspect(&id)
+    }
+
+    pub async fn cancel_all_running(&self, emit_ui_events: bool) -> Vec<String> {
+        let (cancelled_ids, tasks) = {
+            let mut state = self.inner.state.lock().expect("subagent state lock");
+            let cancelled_ids = state
+                .records
+                .values()
+                .filter(|record| record.status == SubagentStatus::Running)
+                .map(|record| record.id.clone())
+                .collect::<Vec<_>>();
+            let mut cancelled_ids = cancelled_ids;
+            cancelled_ids.sort();
+
+            if cancelled_ids.is_empty() {
+                return Vec::new();
+            }
+
+            for id in &cancelled_ids {
+                if let Some(record) = state.records.get_mut(id) {
+                    record.status = SubagentStatus::Cancelled;
+                    record.output = None;
+                    record.error = None;
+                    record.failure_log_path = None;
+                    record.last_activity_at = Instant::now();
+                }
+            }
+
+            let tasks = cancelled_ids
+                .iter()
+                .filter_map(|id| state.tasks.remove(id).map(|handle| (id.clone(), handle)))
+                .collect::<Vec<_>>();
+
+            self.bump_generation(&mut state);
+            (cancelled_ids, tasks)
+        };
+
+        if emit_ui_events {
+            for id in &cancelled_ids {
+                let _ = self
+                    .inner
+                    .ui_tx
+                    .send(SubagentUiEvent::Cancelled { id: id.clone() });
+            }
+        }
+
+        for (_, handle) in &tasks {
+            handle.abort();
+        }
+
+        for (_, handle) in tasks {
+            let _ = handle.await;
+        }
+
+        cancelled_ids
     }
 
     pub fn inspect(&self, id: &str) -> Result<SubagentSnapshot> {
@@ -331,18 +390,21 @@ impl SubagentManager {
                 tool_name,
                 arguments,
             } => {
-                self.record_tool_activity(id, tool_name.clone());
-                let _ = self
-                    .inner
-                    .ui_tx
-                    .send(SubagentUiEvent::WriteApprovalRequested {
-                        id: id.to_string(),
-                        request_id,
-                        tool_name,
-                        arguments,
-                    });
+                if self.record_tool_activity(id, tool_name.clone()) {
+                    let _ = self
+                        .inner
+                        .ui_tx
+                        .send(SubagentUiEvent::WriteApprovalRequested {
+                            id: id.to_string(),
+                            request_id,
+                            tool_name,
+                            arguments,
+                        });
+                }
             }
-            StreamEvent::Failed(_) => self.mark_activity(id),
+            StreamEvent::Failed(_) => {
+                self.mark_activity(id);
+            }
         }
     }
 
@@ -382,25 +444,47 @@ impl SubagentManager {
         Ok(id)
     }
 
-    fn mark_activity(&self, id: &str) {
+    fn insert_task_handle(&self, id: &str, handle: JoinHandle<()>) {
         let mut state = self.inner.state.lock().expect("subagent state lock");
-        if let Some(record) = state.records.get_mut(id) {
-            record.last_activity_at = Instant::now();
-            self.bump_generation(&mut state);
+        if state
+            .records
+            .get(id)
+            .is_some_and(|record| record.status == SubagentStatus::Running)
+        {
+            state.tasks.insert(id.to_string(), handle);
         }
     }
 
-    fn record_tool_activity(&self, id: &str, tool_name: String) {
+    fn mark_activity(&self, id: &str) -> bool {
         let mut state = self.inner.state.lock().expect("subagent state lock");
-        if let Some(record) = state.records.get_mut(id) {
+        if let Some(record) = state.records.get_mut(id)
+            && record.status == SubagentStatus::Running
+        {
+            record.last_activity_at = Instant::now();
+            self.bump_generation(&mut state);
+            return true;
+        }
+
+        false
+    }
+
+    fn record_tool_activity(&self, id: &str, tool_name: String) -> bool {
+        let mut state = self.inner.state.lock().expect("subagent state lock");
+        if let Some(record) = state.records.get_mut(id)
+            && record.status == SubagentStatus::Running
+        {
             record.last_activity_at = Instant::now();
             record.latest_tool_name = Some(tool_name.clone());
             self.bump_generation(&mut state);
+            drop(state);
+            let _ = self.inner.ui_tx.send(SubagentUiEvent::Updated {
+                id: id.to_string(),
+                latest_tool_name: Some(tool_name),
+            });
+            return true;
         }
-        let _ = self.inner.ui_tx.send(SubagentUiEvent::Updated {
-            id: id.to_string(),
-            latest_tool_name: Some(tool_name),
-        });
+
+        false
     }
 
     fn mark_completed(&self, id: &str, output: String) {
@@ -412,7 +496,9 @@ impl SubagentManager {
             record.status = SubagentStatus::Completed;
             record.output = Some(output);
             record.error = None;
+            record.failure_log_path = None;
             record.last_activity_at = Instant::now();
+            state.tasks.remove(id);
             self.bump_generation(&mut state);
             let _ = self
                 .inner
@@ -421,6 +507,7 @@ impl SubagentManager {
         }
     }
 
+    #[cfg(test)]
     fn mark_failed(&self, id: &str, error: String, failure_log_path: Option<String>) {
         let mut state = self.inner.state.lock().expect("subagent state lock");
         if let Some(record) = state.records.get_mut(id) {
@@ -428,9 +515,11 @@ impl SubagentManager {
                 return;
             }
             record.status = SubagentStatus::Failed;
+            record.output = None;
             record.error = Some(error.clone());
             record.failure_log_path = failure_log_path.clone();
             record.last_activity_at = Instant::now();
+            state.tasks.remove(id);
             self.bump_generation(&mut state);
             let _ = self.inner.ui_tx.send(SubagentUiEvent::Failed {
                 id: id.to_string(),
@@ -447,6 +536,24 @@ impl SubagentManager {
         failure: SubagentExecutionFailure,
     ) {
         let normalized_error = normalize_subagent_failure(&failure.raw_error);
+        {
+            let mut state = self.inner.state.lock().expect("subagent state lock");
+            let Some(record) = state.records.get_mut(id) else {
+                return;
+            };
+            if record.status != SubagentStatus::Running {
+                return;
+            }
+
+            record.status = SubagentStatus::Failed;
+            record.output = None;
+            record.error = Some(normalized_error.clone());
+            record.failure_log_path = None;
+            record.last_activity_at = Instant::now();
+            state.tasks.remove(id);
+            self.bump_generation(&mut state);
+        }
+
         let failure_log_path = persist_subagent_failure_log(
             default_subagent_failure_log_dir().as_deref(),
             &SubagentFailureLog {
@@ -468,7 +575,19 @@ impl SubagentManager {
         .flatten()
         .map(|path| path.display().to_string());
 
-        self.mark_failed(id, normalized_error, failure_log_path);
+        {
+            let mut state = self.inner.state.lock().expect("subagent state lock");
+            if let Some(record) = state.records.get_mut(id)
+                && record.status == SubagentStatus::Failed
+            {
+                record.failure_log_path = failure_log_path.clone();
+            }
+        }
+        let _ = self.inner.ui_tx.send(SubagentUiEvent::Failed {
+            id: id.to_string(),
+            error: normalized_error,
+            log_path: failure_log_path,
+        });
     }
 
     fn wait_state_snapshot(
@@ -481,6 +600,7 @@ impl SubagentManager {
         let now = Instant::now();
         let mut completed_id = None;
         let mut failed_id = None;
+        let mut cancelled_id = None;
         let mut inactive_id = None;
         let mut deadline = None;
 
@@ -496,6 +616,9 @@ impl SubagentManager {
                 }
                 SubagentStatus::Failed if failed_id.is_none() => {
                     failed_id = Some(record.id.clone());
+                }
+                SubagentStatus::Cancelled if cancelled_id.is_none() => {
+                    cancelled_id = Some(record.id.clone());
                 }
                 SubagentStatus::Running => {
                     let record_deadline = record.last_activity_at + inactivity_timeout;
@@ -516,6 +639,7 @@ impl SubagentManager {
             subagents: snapshots,
             completed_id,
             failed_id,
+            cancelled_id,
             inactive_id,
             deadline,
         })
@@ -557,6 +681,11 @@ impl SubagentManager {
     }
 
     #[cfg(test)]
+    pub(crate) async fn cancel_all_running_for_test(&self) -> Vec<String> {
+        self.cancel_all_running(true).await
+    }
+
+    #[cfg(test)]
     pub(crate) fn mark_activity_for_test(&self, id: &str) {
         self.mark_activity(id);
     }
@@ -566,6 +695,7 @@ struct WaitStateSnapshot {
     subagents: Vec<SubagentSnapshot>,
     completed_id: Option<String>,
     failed_id: Option<String>,
+    cancelled_id: Option<String>,
     inactive_id: Option<String>,
     deadline: Option<Instant>,
 }
@@ -649,13 +779,14 @@ fn unix_timestamp_ms() -> u64 {
 
 impl WaitStateSnapshot {
     fn is_terminal(&self) -> bool {
-        self.completed_id.is_some() || self.failed_id.is_some()
+        self.completed_id.is_some() || self.failed_id.is_some() || self.cancelled_id.is_some()
     }
 
     fn into_result(self) -> WaitResult {
         WaitResult {
             completed_id: self.completed_id,
             failed_id: self.failed_id,
+            cancelled_id: self.cancelled_id,
             inactive_id: None,
             timed_out_on_inactivity: false,
             subagents: self.subagents,
@@ -666,6 +797,7 @@ impl WaitStateSnapshot {
         WaitResult {
             completed_id: self.completed_id,
             failed_id: self.failed_id,
+            cancelled_id: self.cancelled_id,
             inactive_id: Some(inactive_id),
             timed_out_on_inactivity: true,
             subagents: self.subagents,
@@ -772,6 +904,21 @@ mod tests {
         assert_eq!(result.failed_id.as_deref(), Some("subagent-1"));
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn wait_returns_cancelled_subagent_immediately() {
+        let (manager, _rx) = manager(4);
+        manager.register_running_for_test("subagent-1", Duration::from_secs(0));
+        manager.cancel_all_running_for_test().await;
+
+        let result = manager
+            .wait(&["subagent-1".into()], Some(Duration::from_secs(30)))
+            .await
+            .expect("wait succeeds");
+
+        assert_eq!(result.cancelled_id.as_deref(), Some("subagent-1"));
+        assert!(!result.timed_out_on_inactivity);
+    }
+
     #[test]
     fn prompt_token_estimate_uses_tokenizer() {
         assert_eq!(
@@ -807,6 +954,69 @@ mod tests {
                 .latest_tool_name
                 .as_deref(),
             Some("Grep")
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelling_running_subagents_marks_them_cancelled_and_emits_ui_events() {
+        let (manager, mut rx) = manager(4);
+        manager.register_running_for_test("subagent-1", Duration::from_secs(0));
+        manager.register_running_for_test("subagent-2", Duration::from_secs(0));
+
+        let cancelled = manager.cancel_all_running_for_test().await;
+
+        assert_eq!(
+            cancelled,
+            vec!["subagent-1".to_string(), "subagent-2".to_string()]
+        );
+        assert_eq!(
+            manager
+                .inspect("subagent-1")
+                .expect("inspect succeeds")
+                .status,
+            SubagentStatus::Cancelled
+        );
+        assert_eq!(
+            rx.try_recv().expect("first event"),
+            SubagentUiEvent::Cancelled {
+                id: "subagent-1".into(),
+            }
+        );
+        assert_eq!(
+            rx.try_recv().expect("second event"),
+            SubagentUiEvent::Cancelled {
+                id: "subagent-2".into(),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_subagents_ignore_late_tool_activity() {
+        let (manager, mut rx) = manager(4);
+        manager.register_running_for_test("subagent-1", Duration::from_secs(0));
+        manager.cancel_all_running_for_test().await;
+        assert_eq!(
+            rx.try_recv().expect("cancelled event"),
+            SubagentUiEvent::Cancelled {
+                id: "subagent-1".into(),
+            }
+        );
+
+        manager.handle_stream_event(
+            "subagent-1",
+            StreamEvent::ToolCall {
+                name: "Grep".into(),
+                arguments: "{}".into(),
+            },
+        );
+
+        assert!(rx.try_recv().is_err());
+        assert!(
+            manager
+                .inspect("subagent-1")
+                .expect("inspect succeeds")
+                .latest_tool_name
+                .is_none()
         );
     }
 

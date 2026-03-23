@@ -57,6 +57,7 @@ fn status_color(state: SubagentDisplayState) -> Color {
         SubagentDisplayState::Running => Color::Cyan,
         SubagentDisplayState::Completed => Color::Green,
         SubagentDisplayState::Failed => Color::Red,
+        SubagentDisplayState::Cancelled => Color::Yellow,
     }
 }
 

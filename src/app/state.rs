@@ -264,6 +264,7 @@ pub enum SubagentDisplayState {
     Running,
     Completed,
     Failed,
+    Cancelled,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -287,8 +288,37 @@ pub enum TranscriptEntry {
 #[derive(Debug)]
 pub(super) struct PendingReply {
     pub(super) id: u64,
+    pub(super) kind: PendingReplyKind,
     pub(super) reasoning_entry_index: Option<usize>,
     pub(super) text_entry_index: Option<usize>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum PendingReplyKind {
+    Normal,
+    Planning,
+}
+
+impl PendingReply {
+    pub(super) fn new(id: u64, kind: PendingReplyKind) -> Self {
+        Self {
+            id,
+            kind,
+            reasoning_entry_index: None,
+            text_entry_index: None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum PendingPlanReviewMode {
+    Selection,
+    Feedback,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct PendingPlanReview {
+    pub(super) mode: PendingPlanReviewMode,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -351,6 +381,7 @@ pub struct App {
     pub(super) selected_command: SlashCommand,
     pub(super) picker: Option<SelectionPicker>,
     pub(super) planning_draft_mode: bool,
+    pub(super) pending_plan_review: Option<PendingPlanReview>,
     pub(super) history_render_cache: Option<HistoryRenderCache>,
     pub(super) history: HistoryViewState,
     command_history: CommandRecallState,
@@ -413,6 +444,7 @@ impl App {
             selected_command: SlashCommand::NewSession,
             picker: None,
             planning_draft_mode: false,
+            pending_plan_review: None,
             history_render_cache: None,
             history: HistoryViewState::default(),
             command_history: CommandRecallState::default(),
@@ -437,6 +469,18 @@ impl App {
 
     pub fn has_pending_write_approval(&self) -> bool {
         !self.pending_write_approvals.is_empty()
+    }
+
+    pub fn plan_review_selection_active(&self) -> bool {
+        self.pending_plan_review
+            .as_ref()
+            .is_some_and(|review| review.mode == PendingPlanReviewMode::Selection)
+    }
+
+    pub fn plan_review_feedback_active(&self) -> bool {
+        self.pending_plan_review
+            .as_ref()
+            .is_some_and(|review| review.mode == PendingPlanReviewMode::Feedback)
     }
 
     pub fn should_quit(&self) -> bool {
@@ -526,6 +570,14 @@ impl App {
 
     pub fn planning_draft_mode(&self) -> bool {
         self.planning_draft_mode
+    }
+
+    pub fn plan_active(&self) -> bool {
+        self.planning_draft_mode
+            || self
+                .pending_reply
+                .as_ref()
+                .is_some_and(|pending| pending.kind == PendingReplyKind::Planning)
     }
 
     pub fn current_model_info(&self) -> Option<&'static model_registry::ModelInfo> {
@@ -674,6 +726,7 @@ impl App {
         self.estimated_session_history_tokens = 0;
         self.pending_reply = None;
         self.pending_write_approvals.clear();
+        self.pending_plan_review = None;
         self.approval_mode = self.initial_approval_mode;
         self.resume_history_follow();
         self.history.reset();
@@ -713,6 +766,24 @@ impl App {
         self.pending_reply = None;
         self.pending_write_approvals.clear();
         self.push_error_message("Request cancelled.");
+    }
+
+    pub(crate) fn begin_plan_review(&mut self) {
+        self.pending_plan_review = Some(PendingPlanReview {
+            mode: PendingPlanReviewMode::Selection,
+        });
+        self.clear_composer();
+    }
+
+    pub(crate) fn begin_plan_review_feedback(&mut self) {
+        self.pending_plan_review = Some(PendingPlanReview {
+            mode: PendingPlanReviewMode::Feedback,
+        });
+        self.clear_composer();
+    }
+
+    pub(crate) fn clear_plan_review(&mut self) {
+        self.pending_plan_review = None;
     }
 
     pub(super) fn begin_write_approval(
