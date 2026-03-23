@@ -14,6 +14,7 @@ use super::{
 
 pub fn render(frame: &mut Frame, app: &mut App) {
     let screen = frame.area();
+    app.set_composer_wrap_width(composer_content_width(screen.width));
     let accent = accent_color(app.mode(), app.plan_active());
     let input_height = if let Some(pending) = app.pending_write_approval() {
         pending_write_approval_height(pending, screen.width)
@@ -61,13 +62,153 @@ fn render_input(frame: &mut Frame, app: &mut App, area: Rect, accent: Color) {
         .borders(Borders::ALL)
         .padding(Padding::horizontal(1))
         .border_style(Style::default().fg(accent));
-    app.composer_mut().set_block(block);
-    app.composer_mut().set_cursor_line_style(Style::default());
-    app.composer_mut()
-        .set_cursor_style(Style::default().bg(accent).fg(Color::Black));
-    app.composer_mut()
-        .set_placeholder_style(Style::default().fg(Color::DarkGray));
-    frame.render_widget(app.composer(), area);
+    app.set_composer_wrap_width(composer_content_width(area.width));
+    let paragraph = Paragraph::new(render_composer_lines(app, accent)).block(block);
+    frame.render_widget(paragraph, area);
+}
+
+fn render_composer_lines(app: &mut App, accent: Color) -> Vec<Line<'static>> {
+    let show_placeholder = {
+        let composer = app.composer();
+        composer.lines() == [String::new()] && !composer.placeholder_text().is_empty()
+    };
+    if show_placeholder {
+        let placeholder = app.composer().placeholder_text().to_owned();
+        let placeholder_style = Style::default().fg(Color::DarkGray);
+        let cursor_style = Style::default().bg(accent).fg(Color::Black);
+        let content_width = app.composer_wrap_width();
+        let placeholder_rows = if content_width <= 1 {
+            vec![String::new()]
+        } else {
+            wrap_text(&placeholder, content_width.saturating_sub(1))
+        };
+        let mut lines = Vec::new();
+        for (index, row) in placeholder_rows.into_iter().enumerate() {
+            if index == 0 {
+                let mut spans = vec![Span::styled(" ", cursor_style)];
+                if !row.is_empty() {
+                    spans.push(Span::styled(row, placeholder_style));
+                }
+                lines.push(Line::from(spans));
+            } else {
+                lines.push(Line::from(Span::styled(row, placeholder_style)));
+            }
+        }
+        if lines.is_empty() {
+            lines.push(Line::from(Span::styled(" ", cursor_style)));
+        }
+        return lines;
+    }
+
+    let cursor_position = app.composer().cursor();
+    let base_style = app.composer().style();
+    let (rows, cursor) = {
+        let layout = app.composer_layout();
+        (layout.rows().to_vec(), layout.cursor_state(cursor_position))
+    };
+    let cursor_style = Style::default().bg(accent).fg(Color::Black);
+    let mut lines = Vec::new();
+    for (index, row) in rows.iter().enumerate() {
+        let cursor_col = cursor
+            .as_ref()
+            .filter(|state| state.row_index == index)
+            .map(|state| state.visual_col);
+        lines.push(render_composer_row(
+            &app.composer().lines()[row.line_index],
+            row.start_col,
+            row.end_col,
+            cursor_col,
+            base_style,
+            cursor_style,
+        ));
+    }
+
+    if lines.is_empty() {
+        vec![Line::default()]
+    } else {
+        lines
+    }
+}
+
+fn render_composer_row(
+    line: &str,
+    start_col: usize,
+    end_col: usize,
+    cursor_col: Option<usize>,
+    base_style: Style,
+    cursor_style: Style,
+) -> Line<'static> {
+    let row_len = end_col.saturating_sub(start_col);
+    if row_len == 0 {
+        return match cursor_col {
+            Some(_) => Line::from(Span::styled(" ", cursor_style)),
+            None => Line::default(),
+        };
+    }
+
+    let Some(cursor_col) = cursor_col else {
+        return Line::from(Span::styled(
+            collect_line_range(line, start_col, end_col),
+            base_style,
+        ));
+    };
+
+    let mut before = String::new();
+    let mut after = String::new();
+    let mut current = None;
+
+    for (index, ch) in line.chars().enumerate() {
+        if index < start_col {
+            continue;
+        }
+        if index >= end_col {
+            break;
+        }
+
+        let visual_index = index - start_col;
+        if visual_index == cursor_col && current.is_none() {
+            current = Some(ch);
+        } else if current.is_none() {
+            before.push(ch);
+        } else {
+            after.push(ch);
+        }
+    }
+
+    if current.is_none() && cursor_col >= row_len {
+        let text = collect_line_range(line, start_col, end_col);
+        let mut spans = Vec::new();
+        if !text.is_empty() {
+            spans.push(Span::styled(text, base_style));
+        }
+        spans.push(Span::styled(" ", cursor_style));
+        return Line::from(spans);
+    }
+
+    let mut spans = Vec::new();
+    if !before.is_empty() {
+        spans.push(Span::styled(before, base_style));
+    }
+    if let Some(current) = current {
+        spans.push(Span::styled(current.to_string(), cursor_style));
+    } else {
+        spans.push(Span::styled(" ", cursor_style));
+    }
+    if !after.is_empty() {
+        spans.push(Span::styled(after, base_style));
+    }
+    Line::from(spans)
+}
+
+fn collect_line_range(line: &str, start_col: usize, end_col: usize) -> String {
+    line.chars()
+        .skip(start_col)
+        .take(end_col.saturating_sub(start_col))
+        .collect()
+}
+
+fn composer_content_width(outer_width: u16) -> usize {
+    outer_width.saturating_sub(4).max(1) as usize
 }
 
 fn render_write_approval_prompt(
@@ -1775,6 +1916,30 @@ mod tests {
         assert!(
             !word_has_modifier(buffer, "draft", Modifier::UNDERLINED),
             "expected input text not to render with underline"
+        );
+    }
+
+    #[test]
+    fn render_wraps_composer_text_instead_of_horizontally_scrolling() {
+        let backend = TestBackend::new(16, 10);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut app = App::new(true, false, "gpt-5-mini", ReasoningEffort::Medium);
+        app.composer_mut().insert_str("alpha beta gamma");
+
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render succeeds");
+
+        let rendered_lines = buffer_lines(terminal.backend());
+        assert!(
+            rendered_lines
+                .iter()
+                .any(|line| line.contains("alpha beta")),
+            "expected first wrapped row in composer: {rendered_lines:?}"
+        );
+        assert!(
+            rendered_lines.iter().any(|line| line.contains("gamma")),
+            "expected later wrapped row in composer: {rendered_lines:?}"
         );
     }
 

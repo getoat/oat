@@ -2,6 +2,7 @@ pub mod agent;
 pub mod app;
 mod command_history;
 pub mod completion_request;
+mod composer;
 pub mod config;
 pub mod input;
 pub mod llm;

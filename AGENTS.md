@@ -6,6 +6,7 @@ This file applies to everything under `/root/oat`.
 
 - Keep `Cargo.lock` committed for this application crate.
 - Prefer focused, local changes over broad refactors unless the task requires it.
+- TUI performance matters. After adding or changing TUI features, do a performance pass and remove any obvious hotspots before finishing.
 - Before finishing Rust changes, run `cargo fmt --check` and `cargo test`.
 
 ## Testing

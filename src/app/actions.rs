@@ -701,6 +701,7 @@ fn accepted_plan_prompt() -> &'static str {
 #[cfg(test)]
 mod tests {
     use ratatui::layout::Rect;
+    use ratatui_textarea::CursorMove;
 
     use super::*;
     use crate::app::{ChatMessage, Speaker};
@@ -857,8 +858,11 @@ mod tests {
         app.restore_command_history(vec!["first".into(), "second".into()], 20);
 
         app.apply(Action::SelectPreviousCommand);
-
         assert_eq!(app.composer.lines(), ["second"]);
+        app.apply(Action::SelectPreviousCommand);
+        assert_eq!(app.composer.lines(), ["second"]);
+        assert_eq!(app.composer.cursor(), (0, 0));
+
         app.apply(Action::SelectPreviousCommand);
         assert_eq!(app.composer.lines(), ["first"]);
     }
@@ -868,6 +872,10 @@ mod tests {
         let mut app = new_app(true);
         app.restore_command_history(vec!["first".into(), "second".into()], 20);
         app.composer.insert_str("draft");
+
+        app.apply(Action::SelectPreviousCommand);
+        assert_eq!(app.composer.lines(), ["draft"]);
+        assert_eq!(app.composer.cursor(), (0, 0));
 
         app.apply(Action::SelectPreviousCommand);
         assert_eq!(app.composer.lines(), ["second"]);
@@ -888,6 +896,50 @@ mod tests {
 
         assert_eq!(app.composer.lines(), ["line one", "line two"]);
         assert_eq!(app.composer.cursor().0, 0);
+    }
+
+    #[test]
+    fn up_arrow_on_first_visual_row_moves_to_visual_start_before_history() {
+        let mut app = new_app(true);
+        app.set_composer_wrap_width(6);
+        app.restore_command_history(vec!["previous".into()], 20);
+        app.composer.insert_str("alpha beta");
+        app.composer_mut().move_cursor(CursorMove::Jump(0, 3));
+
+        app.apply(Action::SelectPreviousCommand);
+
+        assert_eq!(app.composer.lines(), ["alpha beta"]);
+        assert_eq!(app.composer.cursor(), (0, 0));
+    }
+
+    #[test]
+    fn down_arrow_on_last_visual_row_moves_to_visual_end_before_history() {
+        let mut app = new_app(true);
+        app.set_composer_wrap_width(6);
+        app.restore_command_history(vec!["previous".into()], 20);
+        app.composer.insert_str("alpha beta");
+        app.composer_mut().move_cursor(CursorMove::Jump(0, 7));
+
+        app.apply(Action::SelectNextCommand);
+
+        assert_eq!(app.composer.lines(), ["alpha beta"]);
+        assert_eq!(app.composer.cursor(), (0, 10));
+    }
+
+    #[test]
+    fn up_and_down_navigate_wrapped_visual_rows() {
+        let mut app = new_app(true);
+        app.set_composer_wrap_width(6);
+        app.composer.insert_str("alpha beta gamma");
+
+        app.apply(Action::SelectPreviousCommand);
+        assert_eq!(app.composer.cursor(), (0, 10));
+
+        app.apply(Action::SelectPreviousCommand);
+        assert_eq!(app.composer.cursor(), (0, 5));
+
+        app.apply(Action::SelectNextCommand);
+        assert_eq!(app.composer.cursor(), (0, 10));
     }
 
     #[test]

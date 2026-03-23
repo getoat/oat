@@ -8,6 +8,7 @@ use std::{
 
 use crate::{
     completion_request::estimated_history_context_tokens,
+    composer::{ComposerLayout, slice_line},
     config::ReasoningEffort,
     model_registry,
     planning::{PlanningAgentConfig, default_planning_reasoning},
@@ -24,6 +25,7 @@ const COMMANDS: [SlashCommand; 6] = [
     SlashCommand::Quit,
 ];
 const DEFAULT_COMMAND_HISTORY_LIMIT: usize = 20;
+const DEFAULT_COMPOSER_WRAP_WIDTH: usize = 80;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SlashCommand {
     NewSession,
@@ -386,6 +388,9 @@ pub struct App {
     pub(super) history_render_cache: Option<HistoryRenderCache>,
     pub(super) history: HistoryViewState,
     command_history: CommandRecallState,
+    composer_wrap_width: usize,
+    composer_visual_column: Option<usize>,
+    composer_layout_cache: Option<ComposerLayout>,
 }
 
 impl App {
@@ -449,6 +454,9 @@ impl App {
             history_render_cache: None,
             history: HistoryViewState::default(),
             command_history: CommandRecallState::default(),
+            composer_wrap_width: DEFAULT_COMPOSER_WRAP_WIDTH,
+            composer_visual_column: None,
+            composer_layout_cache: None,
         }
     }
 
@@ -493,6 +501,8 @@ impl App {
     }
 
     pub fn composer_mut(&mut self) -> &mut TextArea<'static> {
+        self.invalidate_composer_layout();
+        self.composer_visual_column = None;
         &mut self.composer
     }
 
@@ -528,8 +538,8 @@ impl App {
         })
     }
 
-    pub fn composer_height(&self) -> u16 {
-        self.composer.lines().len().max(1) as u16 + 2
+    pub fn composer_height(&mut self) -> u16 {
+        (self.composer_layout().height() as u16).saturating_add(2)
     }
 
     pub fn overlay_height(&self) -> u16 {
@@ -701,10 +711,42 @@ impl App {
         let mut composer = new_composer_with_text(text);
         composer.move_cursor(CursorMove::End);
         self.composer = composer;
+        self.invalidate_composer_layout();
+        self.composer_visual_column = None;
         if reset_command_history {
             self.command_history.reset_navigation();
         }
         self.sync_command_selection();
+    }
+
+    pub(crate) fn set_composer_wrap_width(&mut self, width: usize) {
+        let width = width.max(1);
+        if self.composer_wrap_width != width {
+            self.composer_wrap_width = width;
+            self.invalidate_composer_layout();
+            self.composer_visual_column = None;
+        }
+    }
+
+    pub(crate) fn composer_layout(&mut self) -> &ComposerLayout {
+        if self.composer_layout_cache.is_none() {
+            self.composer_layout_cache = Some(ComposerLayout::new(
+                self.composer.lines(),
+                self.composer_wrap_width,
+            ));
+        }
+
+        self.composer_layout_cache
+            .as_ref()
+            .expect("composer layout cache should be populated")
+    }
+
+    pub(crate) fn composer_wrap_width(&self) -> usize {
+        self.composer_wrap_width
+    }
+
+    fn invalidate_composer_layout(&mut self) {
+        self.composer_layout_cache = None;
     }
 
     pub(crate) fn restore_command_history(&mut self, entries: Vec<String>, limit: usize) {
@@ -1188,11 +1230,69 @@ impl App {
     }
 
     pub(super) fn move_composer_cursor_up(&mut self) {
-        self.composer.move_cursor(CursorMove::Up);
+        let current_cursor = self.composer.cursor();
+        let target = {
+            let Some(cursor) = self.composer_layout().cursor_state(current_cursor) else {
+                return;
+            };
+
+            if cursor.row_index == 0 {
+                if cursor.visual_col > 0 {
+                    Some((cursor.row.line_index, cursor.row.start_col, None))
+                } else {
+                    None
+                }
+            } else {
+                let desired_col = self.composer_visual_column.unwrap_or(cursor.visual_col);
+                self.composer_layout()
+                    .target_cursor_for_row(cursor.row_index - 1, desired_col)
+                    .map(|(row, col)| (row, col, Some(desired_col)))
+            }
+        };
+
+        match target {
+            Some((row, col, desired_col)) => {
+                self.composer
+                    .move_cursor(CursorMove::Jump(row as u16, col as u16));
+                self.composer_visual_column = desired_col;
+            }
+            None => {
+                self.composer_visual_column = None;
+            }
+        }
     }
 
     pub(super) fn move_composer_cursor_down(&mut self) {
-        self.composer.move_cursor(CursorMove::Down);
+        let current_cursor = self.composer.cursor();
+        let target = {
+            let Some(cursor) = self.composer_layout().cursor_state(current_cursor) else {
+                return;
+            };
+
+            if cursor.row_index + 1 >= cursor.total_rows {
+                if current_cursor.1 < cursor.row.end_col {
+                    Some((cursor.row.line_index, cursor.row.end_col, None))
+                } else {
+                    None
+                }
+            } else {
+                let desired_col = self.composer_visual_column.unwrap_or(cursor.visual_col);
+                self.composer_layout()
+                    .target_cursor_for_row(cursor.row_index + 1, desired_col)
+                    .map(|(row, col)| (row, col, Some(desired_col)))
+            }
+        };
+
+        match target {
+            Some((row, col, desired_col)) => {
+                self.composer
+                    .move_cursor(CursorMove::Jump(row as u16, col as u16));
+                self.composer_visual_column = desired_col;
+            }
+            None => {
+                self.composer_visual_column = None;
+            }
+        }
     }
 
     pub(super) fn clear_composer(&mut self) {
@@ -1222,18 +1322,24 @@ impl App {
 
     pub(super) fn insert_composer_newline(&mut self) {
         self.command_history.reset_navigation();
+        self.invalidate_composer_layout();
+        self.composer_visual_column = None;
         self.composer.insert_newline();
         self.sync_command_selection();
     }
 
     pub(super) fn apply_composer_input(&mut self, input: Input) {
         self.command_history.reset_navigation();
+        self.invalidate_composer_layout();
+        self.composer_visual_column = None;
         self.composer.input(input);
         self.sync_command_selection();
     }
 
     pub(super) fn paste_into_composer(&mut self, text: &str) {
         self.command_history.reset_navigation();
+        self.invalidate_composer_layout();
+        self.composer_visual_column = None;
         self.composer
             .insert_str(normalize_pasted_line_endings(text));
         self.sync_command_selection();
@@ -1243,13 +1349,20 @@ impl App {
         self.command_history.record(text);
     }
 
-    pub(super) fn should_recall_previous_input(&self) -> bool {
-        self.composer.cursor().0 == 0
+    pub(super) fn should_recall_previous_input(&mut self) -> bool {
+        let current_cursor = self.composer.cursor();
+        self.composer_layout()
+            .cursor_state(current_cursor)
+            .is_some_and(|cursor| cursor.row_index == 0 && cursor.visual_col == 0)
     }
 
-    pub(super) fn should_recall_next_input(&self) -> bool {
-        let current_row = self.composer.cursor().0;
-        current_row + 1 >= self.composer.lines().len()
+    pub(super) fn should_recall_next_input(&mut self) -> bool {
+        let current_cursor = self.composer.cursor();
+        self.composer_layout()
+            .cursor_state(current_cursor)
+            .is_some_and(|cursor| {
+                cursor.row_index + 1 >= cursor.total_rows && current_cursor.1 == cursor.row.end_col
+            })
     }
 
     pub(super) fn recall_previous_input(&mut self) -> bool {
@@ -1774,13 +1887,6 @@ fn new_composer_with_text(text: &str) -> TextArea<'static> {
     composer
 }
 
-fn slice_line(line: &str, start: usize, end: usize) -> String {
-    line.chars()
-        .skip(start)
-        .take(end.saturating_sub(start))
-        .collect()
-}
-
 fn normalize_pasted_line_endings(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\r', "\n")
 }
@@ -1829,12 +1935,21 @@ mod tests {
     #[test]
     fn composer_height_grows_with_multiple_lines() {
         let mut app = App::new(true, false, "gpt-5-mini", ReasoningEffort::Medium);
-        app.composer.insert_str("one");
+        app.composer_mut().insert_str("one");
         assert_eq!(app.composer_height(), 3);
 
-        app.composer.insert_newline();
-        app.composer.insert_str("two");
+        app.composer_mut().insert_newline();
+        app.composer_mut().insert_str("two");
         assert_eq!(app.composer_height(), 4);
+    }
+
+    #[test]
+    fn composer_height_counts_wrapped_visual_rows() {
+        let mut app = App::new(true, false, "gpt-5-mini", ReasoningEffort::Medium);
+        app.set_composer_wrap_width(6);
+        app.composer.insert_str("alpha beta gamma");
+
+        assert_eq!(app.composer_height(), 5);
     }
 
     #[test]
@@ -2079,6 +2194,9 @@ mod tests {
 
         app.apply(crate::app::actions::Action::SelectPreviousCommand);
         assert_eq!(app.composer.lines(), ["beta"]);
+        app.apply(crate::app::actions::Action::SelectPreviousCommand);
+        assert_eq!(app.composer.lines(), ["beta"]);
+        assert_eq!(app.composer.cursor(), (0, 0));
         app.apply(crate::app::actions::Action::SelectPreviousCommand);
         assert_eq!(app.composer.lines(), ["alpha"]);
     }
