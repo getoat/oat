@@ -334,6 +334,7 @@ impl SubagentManager {
             &request.config,
             context,
             request.approvals.clone(),
+            None,
             Some(self.clone()),
         )
         .map_err(|error| SubagentExecutionFailure {
@@ -379,6 +380,7 @@ impl SubagentManager {
             StreamEvent::TextDelta(_)
             | StreamEvent::ReasoningDelta(_)
             | StreamEvent::ToolResult { .. }
+            | StreamEvent::AskUserRequested { .. }
             | StreamEvent::Finished { .. } => {
                 self.mark_activity(id);
             }

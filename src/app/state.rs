@@ -7,6 +7,10 @@ use std::{
 };
 
 use crate::{
+    ask_user::{
+        AskUserAnswer, AskUserAnsweredQuestion, AskUserQuestion, AskUserRequest, AskUserResponse,
+        AskUserSelectedAnswer, SOMETHING_ELSE_ID, SOMETHING_ELSE_LABEL,
+    },
     completion_request::estimated_history_context_tokens,
     composer::{ComposerLayout, slice_line},
     config::ReasoningEffort,
@@ -324,6 +328,32 @@ pub(super) struct PendingPlanReview {
     pub(super) selected_index: usize,
 }
 
+#[derive(Debug)]
+pub struct PendingAskUser {
+    pub(crate) request_id: String,
+    pub(crate) title: String,
+    pub(crate) active_tab: usize,
+    pub(crate) detail_editing: bool,
+    pub(crate) questions: Vec<PendingAskUserQuestion>,
+}
+
+#[derive(Debug)]
+pub(crate) struct PendingAskUserQuestion {
+    pub(crate) id: String,
+    pub(crate) prompt: String,
+    pub(crate) answers: Vec<PendingAskUserAnswer>,
+    pub(crate) selected_index: usize,
+    pub(crate) detail: TextArea<'static>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PendingAskUserAnswer {
+    pub(crate) id: String,
+    pub(crate) label: String,
+    pub(crate) is_recommended: bool,
+    pub(crate) is_something_else: bool,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct HistorySelectionPoint {
     row: usize,
@@ -385,6 +415,7 @@ pub struct App {
     pub(super) picker: Option<SelectionPicker>,
     pub(super) planning_draft_mode: bool,
     pub(super) pending_plan_review: Option<PendingPlanReview>,
+    pub(super) pending_ask_user: Option<PendingAskUser>,
     pub(super) history_render_cache: Option<HistoryRenderCache>,
     pub(super) history: HistoryViewState,
     command_history: CommandRecallState,
@@ -451,6 +482,7 @@ impl App {
             picker: None,
             planning_draft_mode: false,
             pending_plan_review: None,
+            pending_ask_user: None,
             history_render_cache: None,
             history: HistoryViewState::default(),
             command_history: CommandRecallState::default(),
@@ -478,6 +510,26 @@ impl App {
 
     pub fn has_pending_write_approval(&self) -> bool {
         !self.pending_write_approvals.is_empty()
+    }
+
+    pub fn pending_ask_user(&self) -> Option<&PendingAskUser> {
+        self.pending_ask_user.as_ref()
+    }
+
+    pub fn has_pending_ask_user(&self) -> bool {
+        self.pending_ask_user.is_some()
+    }
+
+    pub fn ask_user_review_active(&self) -> bool {
+        self.pending_ask_user
+            .as_ref()
+            .is_some_and(|pending| pending.active_tab == pending.questions.len())
+    }
+
+    pub fn ask_user_detail_editing(&self) -> bool {
+        self.pending_ask_user
+            .as_ref()
+            .is_some_and(|pending| pending.detail_editing)
     }
 
     pub fn plan_review_selection_active(&self) -> bool {
@@ -771,6 +823,7 @@ impl App {
         self.pending_reply = None;
         self.pending_write_approvals.clear();
         self.pending_plan_review = None;
+        self.pending_ask_user = None;
         self.approval_mode = self.initial_approval_mode;
         self.resume_history_follow();
         self.history.reset();
@@ -809,7 +862,16 @@ impl App {
     pub(crate) fn cancel_pending_reply(&mut self) {
         self.pending_reply = None;
         self.pending_write_approvals.clear();
+        self.pending_ask_user = None;
         self.push_error_message("Request cancelled.");
+    }
+
+    pub(crate) fn begin_ask_user(&mut self, request_id: String, request: AskUserRequest) {
+        self.pending_ask_user = Some(PendingAskUser::new(request_id, request));
+    }
+
+    pub(crate) fn clear_pending_ask_user(&mut self) {
+        self.pending_ask_user = None;
     }
 
     pub(crate) fn begin_plan_review(&mut self) {
@@ -1229,6 +1291,91 @@ impl App {
         }
     }
 
+    pub(super) fn move_ask_user_tab_left(&mut self) {
+        self.move_ask_user_tab(-1);
+    }
+
+    pub(super) fn move_ask_user_tab_right(&mut self) {
+        self.move_ask_user_tab(1);
+    }
+
+    pub(super) fn move_ask_user_answer_up(&mut self) {
+        self.move_ask_user_answer(-1);
+    }
+
+    pub(super) fn move_ask_user_answer_down(&mut self) {
+        self.move_ask_user_answer(1);
+    }
+
+    pub(super) fn toggle_ask_user_detail_editing(&mut self) {
+        let Some(pending) = self.pending_ask_user.as_mut() else {
+            return;
+        };
+        if pending.active_tab >= pending.questions.len() {
+            return;
+        }
+
+        pending.detail_editing = !pending.detail_editing;
+    }
+
+    pub(super) fn apply_ask_user_input(&mut self, input: Input) {
+        let Some(question) = self.active_ask_user_question_mut() else {
+            return;
+        };
+        question.detail.input(input);
+    }
+
+    pub(super) fn paste_into_ask_user_detail(&mut self, text: &str) {
+        let Some(question) = self.active_ask_user_question_mut() else {
+            return;
+        };
+        question
+            .detail
+            .insert_str(normalize_pasted_line_endings(text));
+    }
+
+    pub(super) fn submit_ask_user_response(&mut self) -> Option<(String, AskUserResponse, String)> {
+        let pending = self.pending_ask_user.as_ref()?;
+        if pending.active_tab != pending.questions.len() {
+            return None;
+        }
+        if !pending.is_complete() {
+            self.push_error_message("Complete all AskUser questions before submitting.");
+            return None;
+        }
+
+        let response = pending.response();
+        let request_id = pending.request_id.clone();
+        let summary = response.transcript_summary();
+        self.pending_ask_user = None;
+        self.push_user_message(summary.clone());
+        Some((request_id, response, summary))
+    }
+
+    pub(super) fn advance_ask_user(&mut self) -> Option<(String, AskUserResponse, String)> {
+        let Some(pending) = self.pending_ask_user.as_ref() else {
+            return None;
+        };
+        if pending.active_tab == pending.questions.len() {
+            return self.submit_ask_user_response();
+        }
+
+        let question = &pending.questions[pending.active_tab];
+        if !question.is_complete() {
+            self.push_error_message("`Something else` requires details before continuing.");
+            if let Some(pending) = self.pending_ask_user.as_mut() {
+                pending.detail_editing = true;
+            }
+            return None;
+        }
+
+        if let Some(pending) = self.pending_ask_user.as_mut() {
+            pending.detail_editing = false;
+            pending.active_tab += 1;
+        }
+        None
+    }
+
     pub(super) fn move_composer_cursor_up(&mut self) {
         let current_cursor = self.composer.cursor();
         let target = {
@@ -1516,6 +1663,47 @@ impl App {
             .collect()
     }
 
+    fn active_ask_user_question_mut(&mut self) -> Option<&mut PendingAskUserQuestion> {
+        let pending = self.pending_ask_user.as_mut()?;
+        if !pending.detail_editing || pending.active_tab >= pending.questions.len() {
+            return None;
+        }
+        pending.questions.get_mut(pending.active_tab)
+    }
+
+    fn move_ask_user_tab(&mut self, direction: isize) {
+        let Some(pending) = self.pending_ask_user.as_mut() else {
+            return;
+        };
+
+        let tab_count = pending.questions.len() + 1;
+        pending.active_tab =
+            (pending.active_tab as isize + direction).rem_euclid(tab_count as isize) as usize;
+        if pending.active_tab >= pending.questions.len() {
+            pending.detail_editing = false;
+        }
+    }
+
+    fn move_ask_user_answer(&mut self, direction: isize) {
+        let Some(pending) = self.pending_ask_user.as_mut() else {
+            return;
+        };
+        if pending.active_tab >= pending.questions.len() {
+            return;
+        }
+
+        let question = &mut pending.questions[pending.active_tab];
+        let len = question.answers.len();
+        if len == 0 {
+            return;
+        }
+        question.selected_index =
+            (question.selected_index as isize + direction).rem_euclid(len as isize) as usize;
+        if question.selected_answer().is_something_else {
+            pending.detail_editing = true;
+        }
+    }
+
     fn move_picker_tab(&mut self, direction: isize) {
         let Some(SelectionPicker::Model { active_tab, .. }) = self.picker.as_mut() else {
             return;
@@ -1761,6 +1949,109 @@ impl HistoryViewState {
     }
 }
 
+impl PendingAskUser {
+    fn new(request_id: String, request: AskUserRequest) -> Self {
+        let title = request
+            .title
+            .as_deref()
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .unwrap_or("Ask User")
+            .to_string();
+        let questions = request
+            .questions
+            .into_iter()
+            .map(PendingAskUserQuestion::from_request)
+            .collect();
+        Self {
+            request_id,
+            title,
+            active_tab: 0,
+            detail_editing: false,
+            questions,
+        }
+    }
+
+    fn is_complete(&self) -> bool {
+        self.questions
+            .iter()
+            .all(PendingAskUserQuestion::is_complete)
+    }
+
+    fn response(&self) -> AskUserResponse {
+        AskUserResponse {
+            questions: self
+                .questions
+                .iter()
+                .map(PendingAskUserQuestion::response)
+                .collect(),
+        }
+    }
+}
+
+impl PendingAskUserQuestion {
+    fn from_request(question: AskUserQuestion) -> Self {
+        let mut answers = question
+            .answers
+            .into_iter()
+            .enumerate()
+            .map(|(index, answer)| PendingAskUserAnswer::from_request(answer, index == 0))
+            .collect::<Vec<_>>();
+        answers.push(PendingAskUserAnswer {
+            id: SOMETHING_ELSE_ID.into(),
+            label: SOMETHING_ELSE_LABEL.into(),
+            is_recommended: false,
+            is_something_else: true,
+        });
+
+        Self {
+            id: question.id,
+            prompt: question.prompt,
+            answers,
+            selected_index: 0,
+            detail: new_text_area_with_text("", ""),
+        }
+    }
+
+    fn selected_answer(&self) -> &PendingAskUserAnswer {
+        &self.answers[self.selected_index]
+    }
+
+    fn detail_text(&self) -> String {
+        self.detail.lines().join("\n").trim().to_string()
+    }
+
+    fn is_complete(&self) -> bool {
+        !self.selected_answer().is_something_else || !self.detail_text().is_empty()
+    }
+
+    fn response(&self) -> AskUserAnsweredQuestion {
+        let selected = self.selected_answer();
+        AskUserAnsweredQuestion {
+            id: self.id.clone(),
+            prompt: self.prompt.clone(),
+            selected_answer: AskUserSelectedAnswer {
+                id: selected.id.clone(),
+                label: selected.label.clone(),
+                is_recommended: selected.is_recommended,
+                is_something_else: selected.is_something_else,
+            },
+            details: self.detail_text(),
+        }
+    }
+}
+
+impl PendingAskUserAnswer {
+    fn from_request(answer: AskUserAnswer, is_recommended: bool) -> Self {
+        Self {
+            id: answer.id,
+            label: answer.label,
+            is_recommended,
+            is_something_else: false,
+        }
+    }
+}
+
 impl Default for CommandRecallState {
     fn default() -> Self {
         Self {
@@ -1878,12 +2169,16 @@ fn split_command_query(query: &str) -> (&str, &str) {
 }
 
 fn new_composer_with_text(text: &str) -> TextArea<'static> {
+    new_text_area_with_text(text, "Send a message...")
+}
+
+fn new_text_area_with_text(text: &str, placeholder: &str) -> TextArea<'static> {
     let mut composer = if text.is_empty() {
         TextArea::default()
     } else {
         TextArea::from(text.lines())
     };
-    composer.set_placeholder_text("Send a message...");
+    composer.set_placeholder_text(placeholder);
     composer
 }
 
@@ -1901,7 +2196,38 @@ fn welcome_message(model_name: &str, mode: AccessMode) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ask_user::{AskUserAnswer, AskUserQuestion, AskUserRequest};
     use ratatui::{style::Color, text::Line};
+
+    fn sample_ask_user_request() -> AskUserRequest {
+        AskUserRequest {
+            title: Some("Clarify implementation".into()),
+            questions: vec![
+                AskUserQuestion {
+                    id: "scope".into(),
+                    prompt: "Which scope?".into(),
+                    answers: vec![
+                        AskUserAnswer {
+                            id: "narrow".into(),
+                            label: "Narrow".into(),
+                        },
+                        AskUserAnswer {
+                            id: "broad".into(),
+                            label: "Broad".into(),
+                        },
+                    ],
+                },
+                AskUserQuestion {
+                    id: "rollout".into(),
+                    prompt: "Which rollout?".into(),
+                    answers: vec![AskUserAnswer {
+                        id: "single".into(),
+                        label: "Single step".into(),
+                    }],
+                },
+            ],
+        }
+    }
 
     #[test]
     fn access_mode_toggle_updates_mode_and_label() {
@@ -2182,6 +2508,91 @@ mod tests {
         assert_eq!(app.tick_count(), 0);
         assert_eq!(app.entries().len(), 1);
         assert!(app.shows_startup_banner());
+    }
+
+    #[test]
+    fn begin_ask_user_defaults_to_first_answer_and_adds_something_else() {
+        let mut app = App::new(true, false, "gpt-5-mini", ReasoningEffort::Medium);
+
+        app.begin_ask_user("call-1".into(), sample_ask_user_request());
+
+        let pending = app.pending_ask_user().expect("pending ask user");
+        assert_eq!(pending.request_id, "call-1");
+        assert_eq!(pending.title, "Clarify implementation");
+        assert_eq!(pending.active_tab, 0);
+        assert_eq!(pending.questions[0].selected_index, 0);
+        assert_eq!(pending.questions[0].answers.len(), 3);
+        assert_eq!(
+            pending.questions[0]
+                .answers
+                .last()
+                .map(|answer| answer.label.as_str()),
+            Some("Something else")
+        );
+        assert!(pending.questions[0].answers[0].is_recommended);
+    }
+
+    #[test]
+    fn ask_user_something_else_requires_details() {
+        let mut app = App::new(true, false, "gpt-5-mini", ReasoningEffort::Medium);
+        app.begin_ask_user("call-1".into(), sample_ask_user_request());
+
+        app.move_ask_user_answer_down();
+        app.move_ask_user_answer_down();
+
+        let pending = app.pending_ask_user.as_ref().expect("pending ask user");
+        let question = &pending.questions[0];
+        assert!(question.selected_answer().is_something_else);
+        assert!(pending.detail_editing);
+        assert!(!question.is_complete());
+    }
+
+    #[test]
+    fn ask_user_submit_returns_structured_response_and_summary_message() {
+        let mut app = App::new(true, false, "gpt-5-mini", ReasoningEffort::Medium);
+        app.begin_ask_user("call-1".into(), sample_ask_user_request());
+
+        app.move_ask_user_answer_down();
+        app.move_ask_user_answer_down();
+        app.paste_into_ask_user_detail("parser only");
+        app.move_ask_user_tab_right();
+        app.move_ask_user_tab_right();
+
+        let (request_id, response, summary) = app
+            .submit_ask_user_response()
+            .expect("ask user response should submit");
+
+        assert_eq!(request_id, "call-1");
+        assert_eq!(response.questions.len(), 2);
+        assert_eq!(
+            response.questions[0].selected_answer.label,
+            "Something else"
+        );
+        assert_eq!(response.questions[0].details, "parser only");
+        assert!(summary.contains("Questions answered"));
+        let TranscriptEntry::Message(message) = app.entries.last().expect("summary entry") else {
+            panic!("expected summary message");
+        };
+        assert_eq!(message.speaker, Speaker::User);
+        assert!(message.text.contains("Which scope?: Something else"));
+        assert!(!app.has_pending_ask_user());
+    }
+
+    #[test]
+    fn advance_ask_user_moves_through_questions_before_review() {
+        let mut app = App::new(true, false, "gpt-5-mini", ReasoningEffort::Medium);
+        app.begin_ask_user("call-1".into(), sample_ask_user_request());
+
+        assert!(app.advance_ask_user().is_none());
+        assert_eq!(
+            app.pending_ask_user().map(|pending| pending.active_tab),
+            Some(1)
+        );
+        assert!(app.advance_ask_user().is_none());
+        assert_eq!(
+            app.pending_ask_user().map(|pending| pending.active_tab),
+            Some(2)
+        );
     }
 
     #[test]

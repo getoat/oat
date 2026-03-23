@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod app;
+pub mod ask_user;
 mod command_history;
 pub mod completion_request;
 mod composer;
@@ -39,7 +40,7 @@ use crate::{
     agent::AgentContext,
     command_history::CommandHistoryStore,
     config::AppConfig,
-    llm::{LlmService, StreamEvent, WriteApprovalController},
+    llm::{AskUserController, LlmService, StreamEvent, WriteApprovalController},
     planning::{
         PlanningJob, planner_prompt, planning_jobs, sanitize_planning_agents, synthesis_prompt,
     },
@@ -111,6 +112,7 @@ pub fn run_with_options(
             &config,
             AgentContext::main(app.mode()),
             llm::WriteApprovalController::new(startup.approval_mode),
+            Some(AskUserController::default()),
             Some(subagents.clone()),
         )?
     };
@@ -146,6 +148,7 @@ pub fn run_with_options(
             && let Some(action) = input::map_event_with_state(
                 event::read()?,
                 app.has_pending_write_approval(),
+                app.has_pending_ask_user(),
                 app.selection_picker_visible(),
                 app.plan_review_selection_active(),
             )
@@ -195,6 +198,7 @@ pub fn run_headless(
             AgentContext::main(startup.access_mode),
             llm::WriteApprovalController::new(startup.approval_mode),
             None,
+            None,
         )?
     };
     let (stream_tx, mut stream_rx) = mpsc::unbounded_channel();
@@ -224,6 +228,7 @@ pub fn run_headless(
                 llm::StreamEvent::ReasoningDelta(_)
                 | llm::StreamEvent::ToolCall { .. }
                 | llm::StreamEvent::ToolResult { .. }
+                | llm::StreamEvent::AskUserRequested { .. }
                 | llm::StreamEvent::WriteApprovalRequested { .. } => {}
             }
         }
@@ -377,6 +382,16 @@ impl EffectRunner<'_> {
                 }
                 Ok(())
             }
+            Effect::ResolveAskUser {
+                request_id,
+                response,
+            } => {
+                if !self.llm.resolve_ask_user(&request_id, response) {
+                    self.app
+                        .push_error_message("AskUser request is no longer active.");
+                }
+                Ok(())
+            }
             Effect::CopyToClipboard { text } => {
                 write!(
                     self.terminal.backend_mut(),
@@ -410,6 +425,7 @@ impl EffectRunner<'_> {
             config,
             AgentContext::main(access_mode),
             self.llm.approvals(),
+            self.llm.ask_user_controller(),
             Some(self.subagents.clone()),
         )
     }
@@ -418,6 +434,7 @@ impl EffectRunner<'_> {
         if let Some((_, task)) = self.active_reply_task.take() {
             task.abort();
         }
+        self.llm.cancel_pending_interactions();
     }
 }
 
@@ -477,6 +494,7 @@ async fn run_planning_workflow(
         &config,
         AgentContext::main(app::AccessMode::ReadOnly),
         WriteApprovalController::new(ApprovalMode::Manual),
+        None,
         None,
     ) {
         Ok(service) => service,

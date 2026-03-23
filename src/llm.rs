@@ -15,6 +15,7 @@ use rig::{
     },
     providers::openai,
     streaming::{StreamedAssistantContent, StreamedUserContent, StreamingChat},
+    tool::Tool,
 };
 use serde_json::json;
 use tokio::sync::{mpsc::UnboundedSender, oneshot};
@@ -22,11 +23,14 @@ use tokio::sync::{mpsc::UnboundedSender, oneshot};
 use crate::{
     agent::{AgentContext, AgentRole},
     app::{AccessMode, ApprovalMode, WriteApprovalDecision},
+    ask_user::{AskUserRequest, AskUserResponse, validate_request},
     completion_request::CompletionRequestSnapshot,
     config::AppConfig,
     stats::StatsHook,
     subagents::SubagentManager,
-    tools::{ToolContext, is_mutation_tool, tool_names_for_context, tools_for_context},
+    tools::{
+        AskUserTool, ToolContext, is_mutation_tool, tool_names_for_context, tools_for_context,
+    },
 };
 
 const MAX_TOOL_STEPS_PER_TURN: usize = 64;
@@ -42,6 +46,10 @@ pub enum StreamEvent {
     ToolResult {
         name: String,
         output: String,
+    },
+    AskUserRequested {
+        request_id: String,
+        request: AskUserRequest,
     },
     WriteApprovalRequested {
         request_id: String,
@@ -69,10 +77,26 @@ struct WriteApprovalState {
 }
 
 #[derive(Clone)]
+pub struct AskUserController {
+    inner: Arc<Mutex<AskUserState>>,
+}
+
+struct AskUserState {
+    pending: HashMap<String, oneshot::Sender<AskUserResponse>>,
+}
+
+#[derive(Clone)]
 struct WriteApprovalHook {
     reply_id: u64,
     emit: EventCallback,
     approvals: WriteApprovalController,
+}
+
+#[derive(Clone)]
+struct AskUserHook {
+    reply_id: u64,
+    emit: EventCallback,
+    controller: Option<AskUserController>,
 }
 
 #[derive(Clone, Default)]
@@ -90,6 +114,7 @@ struct CombinedHook<H1, H2> {
 pub struct LlmService {
     agent: LlmAgent,
     approvals: WriteApprovalController,
+    ask_user: Option<AskUserController>,
     #[cfg_attr(not(test), allow(dead_code))]
     tool_names: Vec<String>,
     #[cfg_attr(not(test), allow(dead_code))]
@@ -111,6 +136,7 @@ impl LlmService {
         config: &AppConfig,
         context: AgentContext,
         approvals: WriteApprovalController,
+        ask_user: Option<AskUserController>,
         subagents: Option<SubagentManager>,
     ) -> Result<Self> {
         let workspace_root = env::current_dir().context("failed to determine workspace root")?;
@@ -127,6 +153,7 @@ impl LlmService {
             config: config.clone(),
             approval_mode: approvals.mode(),
             approvals: approvals.clone(),
+            ask_user_available: ask_user.is_some(),
             subagents,
         };
         let tool_names = tool_names_for_context(&tool_context);
@@ -145,6 +172,7 @@ impl LlmService {
         Ok(Self {
             agent,
             approvals,
+            ask_user,
             tool_names,
             preamble,
         })
@@ -152,6 +180,10 @@ impl LlmService {
 
     pub fn approvals(&self) -> WriteApprovalController {
         self.approvals.clone()
+    }
+
+    pub fn ask_user_controller(&self) -> Option<AskUserController> {
+        self.ask_user.clone()
     }
 
     pub fn resolve_write_approval(
@@ -162,8 +194,21 @@ impl LlmService {
         self.approvals.resolve(request_id, decision)
     }
 
+    pub fn resolve_ask_user(&self, request_id: &str, response: AskUserResponse) -> bool {
+        self.ask_user
+            .as_ref()
+            .is_some_and(|controller| controller.resolve(request_id, response))
+    }
+
     pub fn reset_write_approvals(&self) {
         self.approvals.reset_session();
+    }
+
+    pub fn cancel_pending_interactions(&self) {
+        self.approvals.cancel_pending();
+        if let Some(controller) = &self.ask_user {
+            controller.cancel_pending();
+        }
     }
 
     pub async fn stream_prompt(
@@ -195,11 +240,19 @@ impl LlmService {
             emit: emit.clone(),
             approvals: self.approvals.clone(),
         };
+        let ask_user_hook = AskUserHook {
+            reply_id,
+            emit: emit.clone(),
+            controller: self.ask_user.clone(),
+        };
         let hook = CombinedHook {
             first: stats_hook,
             second: CombinedHook {
                 first: CompletionCaptureHook { capture },
-                second: write_approval_hook,
+                second: CombinedHook {
+                    first: write_approval_hook,
+                    second: ask_user_hook,
+                },
             },
         };
         let mut stream = self
@@ -234,18 +287,29 @@ impl LlmService {
                     let name = tool_call.function.name.clone();
                     let arguments = format_tool_arguments(&tool_call.function.arguments);
                     tool_calls.insert(internal_call_id, name.clone());
-                    Some(StreamEvent::ToolCall { name, arguments })
+                    if name == AskUserTool::NAME {
+                        None
+                    } else {
+                        Some(StreamEvent::ToolCall { name, arguments })
+                    }
                 }
                 Ok(MultiTurnStreamItem::StreamUserItem(StreamedUserContent::ToolResult {
                     tool_result,
                     internal_call_id,
-                })) => Some(StreamEvent::ToolResult {
-                    name: tool_calls
+                })) => {
+                    let name = tool_calls
                         .get(&internal_call_id)
                         .cloned()
-                        .unwrap_or_else(|| tool_result.id.clone()),
-                    output: format_tool_result(&tool_result),
-                }),
+                        .unwrap_or_else(|| tool_result.id.clone());
+                    if name == AskUserTool::NAME {
+                        None
+                    } else {
+                        Some(StreamEvent::ToolResult {
+                            name,
+                            output: format_tool_result(&tool_result),
+                        })
+                    }
+                }
                 Ok(MultiTurnStreamItem::FinalResponse(response)) => {
                     let history = response.history().map(ToOwned::to_owned);
                     let event = StreamEvent::Finished {
@@ -295,6 +359,12 @@ impl CompletionCapture {
 impl Default for WriteApprovalController {
     fn default() -> Self {
         Self::new(ApprovalMode::Manual)
+    }
+}
+
+impl Default for AskUserController {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -382,6 +452,89 @@ impl WriteApprovalController {
             let _ = sender.send(WriteApprovalDecision::Deny);
         }
     }
+
+    fn cancel_pending(&self) {
+        let mut state = self.inner.lock().expect("approval state lock");
+        state.pending.clear();
+    }
+}
+
+impl AskUserController {
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(AskUserState {
+                pending: HashMap::new(),
+            })),
+        }
+    }
+
+    async fn request_input(
+        &self,
+        reply_id: u64,
+        internal_call_id: &str,
+        args: &str,
+        emit: &EventCallback,
+    ) -> ToolCallHookAction {
+        let request = match serde_json::from_str::<AskUserRequest>(args) {
+            Ok(request) => request,
+            Err(error) => {
+                return ToolCallHookAction::skip(format!(
+                    "AskUser request was invalid JSON: {error}"
+                ));
+            }
+        };
+        if let Err(error) = validate_request(&request) {
+            return ToolCallHookAction::skip(format!("AskUser validation error: {error}"));
+        }
+
+        let rx = {
+            let mut state = self.inner.lock().expect("ask user state lock");
+            let (tx, rx) = oneshot::channel();
+            state.pending.insert(internal_call_id.to_string(), tx);
+            rx
+        };
+
+        if !(emit)(
+            reply_id,
+            StreamEvent::AskUserRequested {
+                request_id: internal_call_id.to_string(),
+                request: request.clone(),
+            },
+        ) {
+            let mut state = self.inner.lock().expect("ask user state lock");
+            state.pending.remove(internal_call_id);
+            return ToolCallHookAction::skip(
+                "AskUser was cancelled because the interactive UI is unavailable.",
+            );
+        }
+
+        match rx.await {
+            Ok(response) => {
+                ToolCallHookAction::skip(serde_json::to_string(&response).unwrap_or_else(|_| {
+                    "{\"questions\":[],\"error\":\"failed to serialize AskUser response\"}".into()
+                }))
+            }
+            Err(_) => ToolCallHookAction::skip("AskUser was cancelled before the user answered."),
+        }
+    }
+
+    fn resolve(&self, request_id: &str, response: AskUserResponse) -> bool {
+        let sender = {
+            let mut state = self.inner.lock().expect("ask user state lock");
+            state.pending.remove(request_id)
+        };
+
+        if let Some(sender) = sender {
+            sender.send(response).is_ok()
+        } else {
+            false
+        }
+    }
+
+    fn cancel_pending(&self) {
+        let mut state = self.inner.lock().expect("ask user state lock");
+        state.pending.clear();
+    }
 }
 
 impl PromptHook<openai::CompletionModel> for WriteApprovalHook {
@@ -398,6 +551,30 @@ impl PromptHook<openai::CompletionModel> for WriteApprovalHook {
 
         self.approvals
             .request_approval(self.reply_id, tool_name, internal_call_id, args, &self.emit)
+            .await
+    }
+}
+
+impl PromptHook<openai::CompletionModel> for AskUserHook {
+    async fn on_tool_call(
+        &self,
+        tool_name: &str,
+        _tool_call_id: Option<String>,
+        internal_call_id: &str,
+        args: &str,
+    ) -> ToolCallHookAction {
+        if tool_name != AskUserTool::NAME {
+            return ToolCallHookAction::Continue;
+        }
+
+        let Some(controller) = &self.controller else {
+            return ToolCallHookAction::skip(
+                "AskUser requires the interactive UI and is unavailable in this runtime.",
+            );
+        };
+
+        controller
+            .request_input(self.reply_id, internal_call_id, args, &self.emit)
             .await
     }
 }
@@ -709,10 +886,12 @@ mod tests {
             &sample_config(),
             AgentContext::main(AccessMode::ReadWrite),
             WriteApprovalController::default(),
+            Some(AskUserController::default()),
             None,
         )
         .expect("service builds");
 
+        assert!(service.tool_names.contains(&"AskUser".to_string()));
         assert!(service.tool_names.contains(&"ApplyPatches".to_string()));
         assert!(service.tool_names.contains(&"WriteFile".to_string()));
         assert!(service.tool_names.contains(&"DeletePath".to_string()));
@@ -755,10 +934,12 @@ mod tests {
             &sample_config(),
             AgentContext::main(AccessMode::ReadOnly),
             WriteApprovalController::default(),
+            Some(AskUserController::default()),
             None,
         )
         .expect("service builds");
 
+        assert!(service.tool_names.contains(&"AskUser".to_string()));
         assert!(!service.tool_names.contains(&"ApplyPatches".to_string()));
         assert!(!service.tool_names.contains(&"WriteFile".to_string()));
         assert!(!service.tool_names.contains(&"DeletePath".to_string()));
@@ -777,6 +958,7 @@ mod tests {
             &sample_config(),
             AgentContext::main(AccessMode::ReadWrite),
             WriteApprovalController::new(ApprovalMode::Manual),
+            Some(AskUserController::default()),
             None,
         )
         .expect("manual service builds")
@@ -785,6 +967,7 @@ mod tests {
             &sample_config(),
             AgentContext::main(AccessMode::ReadWrite),
             WriteApprovalController::new(ApprovalMode::Disabled),
+            Some(AskUserController::default()),
             None,
         )
         .expect("disabled service builds")

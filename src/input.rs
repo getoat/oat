@@ -8,12 +8,13 @@ use crate::app::Action;
 const MOUSE_SCROLL_LINES: usize = 3;
 
 pub fn map_event(event: Event) -> Option<Action> {
-    map_event_with_state(event, false, false, false)
+    map_event_with_state(event, false, false, false, false)
 }
 
 pub fn map_event_with_state(
     event: Event,
     awaiting_write_approval: bool,
+    awaiting_ask_user: bool,
     selection_picker_visible: bool,
     awaiting_plan_review: bool,
 ) -> Option<Action> {
@@ -21,6 +22,7 @@ pub fn map_event_with_state(
         Event::Key(key) if key.kind == KeyEventKind::Press => Some(map_key_event(
             key,
             awaiting_write_approval,
+            awaiting_ask_user,
             selection_picker_visible,
             awaiting_plan_review,
         )),
@@ -35,6 +37,7 @@ pub fn map_event_with_state(
 fn map_key_event(
     key: KeyEvent,
     awaiting_write_approval: bool,
+    awaiting_ask_user: bool,
     selection_picker_visible: bool,
     awaiting_plan_review: bool,
 ) -> Action {
@@ -52,6 +55,26 @@ fn map_key_event(
             (KeyCode::Home, _) => Action::ScrollHistoryToTop,
             (KeyCode::End, _) => Action::ScrollHistoryToBottom,
             _ => Action::Tick,
+        };
+    }
+
+    if awaiting_ask_user {
+        return match (key.code, key.modifiers) {
+            (KeyCode::Esc, _) => Action::CancelPendingReply,
+            (KeyCode::Char('c'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
+                Action::ClearComposerOrQuit
+            }
+            (KeyCode::Left, KeyModifiers::NONE) => Action::AskUserTabLeft,
+            (KeyCode::Right, KeyModifiers::NONE) => Action::AskUserTabRight,
+            (KeyCode::Tab, _) => Action::AskUserToggleDetailEditor,
+            (KeyCode::Up, KeyModifiers::NONE) => Action::SelectPreviousCommand,
+            (KeyCode::Down, KeyModifiers::NONE) => Action::SelectNextCommand,
+            (KeyCode::PageUp, _) => Action::ScrollHistoryPageUp,
+            (KeyCode::PageDown, _) => Action::ScrollHistoryPageDown,
+            (KeyCode::Home, _) => Action::ScrollHistoryToTop,
+            (KeyCode::End, _) => Action::ScrollHistoryToBottom,
+            (KeyCode::Enter, _) => Action::SubmitMessage,
+            _ => Action::Editor(Input::from(key)),
         };
     }
 
@@ -181,6 +204,7 @@ mod tests {
             map_event_with_state(
                 Event::Key(key(KeyCode::Left, KeyModifiers::NONE)),
                 false,
+                false,
                 true,
                 false
             ),
@@ -190,6 +214,7 @@ mod tests {
             map_event_with_state(
                 Event::Key(key(KeyCode::Right, KeyModifiers::NONE)),
                 false,
+                false,
                 true,
                 false
             ),
@@ -198,6 +223,7 @@ mod tests {
         assert_eq!(
             map_event_with_state(
                 Event::Key(key(KeyCode::Char(' '), KeyModifiers::NONE)),
+                false,
                 false,
                 true,
                 false
@@ -244,6 +270,7 @@ mod tests {
                 true,
                 false,
                 false,
+                false,
             ),
             Some(Action::ApproveWriteOnce)
         );
@@ -253,6 +280,7 @@ mod tests {
                 true,
                 false,
                 false,
+                false,
             ),
             Some(Action::ApproveWriteAllSession)
         );
@@ -260,6 +288,7 @@ mod tests {
             map_event_with_state(
                 Event::Key(key(KeyCode::Char('d'), KeyModifiers::NONE)),
                 true,
+                false,
                 false,
                 false,
             ),
@@ -275,11 +304,12 @@ mod tests {
                 true,
                 false,
                 false,
+                false,
             ),
             Some(Action::Tick)
         );
         assert_eq!(
-            map_event_with_state(Event::Paste("hello".into()), true, false, false),
+            map_event_with_state(Event::Paste("hello".into()), true, false, false, false),
             None
         );
     }
@@ -291,6 +321,7 @@ mod tests {
                 Event::Key(key(KeyCode::Char('1'), KeyModifiers::NONE)),
                 false,
                 false,
+                false,
                 true,
             ),
             Some(Action::AcceptPlanAndImplement)
@@ -298,6 +329,7 @@ mod tests {
         assert_eq!(
             map_event_with_state(
                 Event::Key(key(KeyCode::Char('2'), KeyModifiers::NONE)),
+                false,
                 false,
                 false,
                 true,
@@ -309,6 +341,7 @@ mod tests {
                 Event::Key(key(KeyCode::Up, KeyModifiers::NONE)),
                 false,
                 false,
+                false,
                 true,
             ),
             Some(Action::SelectPreviousCommand)
@@ -318,6 +351,7 @@ mod tests {
                 Event::Key(key(KeyCode::Down, KeyModifiers::NONE)),
                 false,
                 false,
+                false,
                 true,
             ),
             Some(Action::SelectNextCommand)
@@ -325,6 +359,7 @@ mod tests {
         assert_eq!(
             map_event_with_state(
                 Event::Key(key(KeyCode::Enter, KeyModifiers::NONE)),
+                false,
                 false,
                 false,
                 true,
@@ -340,13 +375,48 @@ mod tests {
                 Event::Key(key(KeyCode::Char('x'), KeyModifiers::NONE)),
                 false,
                 false,
+                false,
                 true,
             ),
             Some(Action::Tick)
         );
         assert_eq!(
-            map_event_with_state(Event::Paste("hello".into()), false, false, true),
+            map_event_with_state(Event::Paste("hello".into()), false, false, false, true),
             None
+        );
+    }
+
+    #[test]
+    fn ask_user_mode_remaps_tab_and_horizontal_arrows() {
+        assert_eq!(
+            map_event_with_state(
+                Event::Key(key(KeyCode::Left, KeyModifiers::NONE)),
+                false,
+                true,
+                false,
+                false,
+            ),
+            Some(Action::AskUserTabLeft)
+        );
+        assert_eq!(
+            map_event_with_state(
+                Event::Key(key(KeyCode::Right, KeyModifiers::NONE)),
+                false,
+                true,
+                false,
+                false,
+            ),
+            Some(Action::AskUserTabRight)
+        );
+        assert_eq!(
+            map_event_with_state(
+                Event::Key(key(KeyCode::Tab, KeyModifiers::NONE)),
+                false,
+                true,
+                false,
+                false,
+            ),
+            Some(Action::AskUserToggleDetailEditor)
         );
     }
 

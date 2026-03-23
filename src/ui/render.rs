@@ -6,7 +6,10 @@ use ratatui::{
     widgets::{Block, Borders, Padding, Paragraph, Wrap},
 };
 
-use crate::app::{App, ModelPickerTab, SelectionPicker, SlashCommand};
+use crate::{
+    app::{App, ModelPickerTab, PendingAskUser, SelectionPicker, SlashCommand},
+    composer::ComposerLayout,
+};
 
 use super::{
     history::render_history, markdown::loading_frame, theme::accent_color, wrap::wrap_text,
@@ -18,6 +21,8 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     let accent = accent_color(app.mode(), app.plan_active());
     let input_height = if let Some(pending) = app.pending_write_approval() {
         pending_write_approval_height(pending, screen.width)
+    } else if let Some(pending) = app.pending_ask_user() {
+        pending_ask_user_height(pending, screen.width)
     } else if app.plan_review_selection_active() {
         pending_plan_review_height(screen.width)
     } else {
@@ -50,6 +55,11 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 fn render_input(frame: &mut Frame, app: &mut App, area: Rect, accent: Color) {
     if let Some(pending) = app.pending_write_approval() {
         render_write_approval_prompt(frame, pending, area, accent);
+        return;
+    }
+
+    if let Some(pending) = app.pending_ask_user() {
+        render_ask_user_prompt(frame, pending, area, accent);
         return;
     }
 
@@ -209,6 +219,286 @@ fn collect_line_range(line: &str, start_col: usize, end_col: usize) -> String {
 
 fn composer_content_width(outer_width: u16) -> usize {
     outer_width.saturating_sub(4).max(1) as usize
+}
+
+fn render_ask_user_prompt(frame: &mut Frame, pending: &PendingAskUser, area: Rect, accent: Color) {
+    let content_width = composer_content_width(area.width);
+    let prompt = Paragraph::new(ask_user_panel_lines(pending, content_width, accent))
+        .wrap(Wrap { trim: false })
+        .block(
+            Block::default()
+                .title(format!(" {} ", pending.title))
+                .borders(Borders::ALL)
+                .padding(Padding::horizontal(1))
+                .border_style(Style::default().fg(accent)),
+        );
+    frame.render_widget(prompt, area);
+}
+
+fn ask_user_panel_lines(
+    pending: &PendingAskUser,
+    content_width: usize,
+    accent: Color,
+) -> Vec<Line<'static>> {
+    let mut lines = vec![ask_user_tab_line(pending, accent)];
+    if pending.active_tab < pending.questions.len() {
+        let question = &pending.questions[pending.active_tab];
+        lines.push(Line::default());
+        lines.extend(
+            wrap_text(&question.prompt, content_width.max(1))
+                .into_iter()
+                .enumerate()
+                .map(|(index, row)| {
+                    let style = if index == 0 {
+                        Style::default().fg(accent).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default()
+                    };
+                    Line::from(Span::styled(row, style))
+                }),
+        );
+        lines.push(Line::default());
+
+        for (index, answer) in question.answers.iter().enumerate() {
+            let is_selected = index == question.selected_index;
+            let marker_style = if is_selected {
+                Style::default().fg(accent).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            let answer_style = if is_selected {
+                Style::default().add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            let mut spans = vec![
+                Span::styled(if is_selected { "›" } else { " " }, marker_style),
+                Span::raw(" "),
+                Span::styled(answer.label.clone(), answer_style),
+            ];
+            if answer.is_recommended {
+                spans.push(Span::raw("  "));
+                spans.push(Span::styled(
+                    "Recommended",
+                    Style::default().fg(accent).add_modifier(Modifier::BOLD),
+                ));
+            }
+            lines.push(Line::from(spans));
+        }
+
+        let selected = &question.answers[question.selected_index];
+        lines.push(Line::default());
+
+        let detail_text = question.detail.lines().join("\n");
+        let show_detail =
+            pending.detail_editing || selected.is_something_else || !detail_text.trim().is_empty();
+        if !show_detail {
+            lines.push(Line::from(Span::styled(
+                if selected.is_something_else {
+                    "Tab to enter required details for `Something else`."
+                } else {
+                    "Tab to add optional details for the selected answer."
+                },
+                Style::default().fg(Color::DarkGray),
+            )));
+        } else {
+            lines.push(Line::default());
+            lines.push(Line::from(Span::styled(
+                if pending.detail_editing {
+                    "Details (editing)"
+                } else {
+                    "Details"
+                },
+                Style::default().fg(accent).add_modifier(Modifier::BOLD),
+            )));
+            lines.extend(render_detail_lines(
+                render_aux_textarea_lines(
+                    &question.detail,
+                    content_width.saturating_sub(2).max(1),
+                    accent,
+                    pending.detail_editing,
+                ),
+                pending.detail_editing,
+            ));
+        }
+        if selected.is_something_else && detail_text.trim().is_empty() {
+            lines.push(Line::from(Span::styled(
+                "`Something else` requires details.",
+                Style::default().fg(Color::Yellow),
+            )));
+        }
+    } else {
+        lines.push(Line::default());
+        lines.push(Line::from(Span::styled(
+            "Review your answers and press Enter to submit.",
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::default());
+
+        for question in &pending.questions {
+            let selected = &question.answers[question.selected_index];
+            let detail_text = question.detail.lines().join("\n").trim().to_string();
+            let complete = !selected.is_something_else || !detail_text.is_empty();
+            let marker = if complete { "✓" } else { "!" };
+            let marker_style = if complete {
+                Style::default().fg(accent).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            };
+            lines.push(Line::from(vec![
+                Span::styled(marker, marker_style),
+                Span::raw(" "),
+                Span::styled(
+                    question.prompt.clone(),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("  "),
+                Span::styled(
+                    selected.label.clone(),
+                    if complete {
+                        Style::default()
+                    } else {
+                        Style::default().fg(Color::Yellow)
+                    },
+                ),
+            ]));
+            if !detail_text.is_empty() {
+                lines.extend(
+                    wrap_text(&format!("details: {detail_text}"), content_width.max(1))
+                        .into_iter()
+                        .map(|row| Line::from(Span::styled(row, Style::default().fg(Color::Gray)))),
+                );
+            }
+        }
+    }
+
+    lines.push(Line::default());
+    lines.push(Line::from(Span::styled(
+        "Left/Right switch questions  Up/Down switch answers  Tab edits details  Enter submits from Review",
+        Style::default().fg(Color::DarkGray),
+    )));
+    lines
+}
+
+fn ask_user_tab_line(pending: &PendingAskUser, accent: Color) -> Line<'static> {
+    let mut spans = Vec::new();
+    for (index, question) in pending.questions.iter().enumerate() {
+        if !spans.is_empty() {
+            spans.push(Span::styled("  |  ", Style::default().fg(Color::DarkGray)));
+        }
+        let is_active = index == pending.active_tab;
+        spans.push(Span::styled(
+            question.id.clone(),
+            if is_active {
+                Style::default().fg(accent).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Gray)
+            },
+        ));
+    }
+    if !spans.is_empty() {
+        spans.push(Span::styled("  |  ", Style::default().fg(Color::DarkGray)));
+    }
+    let review_active = pending.active_tab == pending.questions.len();
+    spans.push(Span::styled(
+        "Review",
+        if review_active {
+            Style::default().fg(accent).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Gray)
+        },
+    ));
+    Line::from(spans)
+}
+
+fn render_detail_lines(lines: Vec<Line<'static>>, editing: bool) -> Vec<Line<'static>> {
+    lines
+        .into_iter()
+        .map(|line| {
+            let mut spans = vec![Span::styled(
+                if editing { "› " } else { "  " },
+                Style::default().fg(Color::DarkGray),
+            )];
+            spans.extend(line.spans);
+            Line::from(spans)
+        })
+        .collect()
+}
+
+fn render_aux_textarea_lines(
+    textarea: &ratatui_textarea::TextArea<'_>,
+    content_width: usize,
+    accent: Color,
+    show_cursor: bool,
+) -> Vec<Line<'static>> {
+    let show_placeholder =
+        textarea.lines() == [String::new()] && !textarea.placeholder_text().is_empty();
+    if show_placeholder {
+        let placeholder = textarea.placeholder_text().to_owned();
+        let placeholder_style = Style::default().fg(Color::DarkGray);
+        let cursor_style = Style::default().bg(accent).fg(Color::Black);
+        let placeholder_rows = if content_width <= 1 {
+            vec![String::new()]
+        } else {
+            wrap_text(&placeholder, content_width.saturating_sub(1))
+        };
+        let mut lines = Vec::new();
+        for (index, row) in placeholder_rows.into_iter().enumerate() {
+            if show_cursor && index == 0 {
+                let mut spans = vec![Span::styled(" ", cursor_style)];
+                if !row.is_empty() {
+                    spans.push(Span::styled(row, placeholder_style));
+                }
+                lines.push(Line::from(spans));
+            } else {
+                lines.push(Line::from(Span::styled(row, placeholder_style)));
+            }
+        }
+        if lines.is_empty() {
+            lines.push(Line::default());
+        }
+        return lines;
+    }
+
+    if textarea.lines() == [String::new()] {
+        return vec![Line::from(Span::styled(
+            " ",
+            if show_cursor {
+                Style::default().bg(accent).fg(Color::Black)
+            } else {
+                Style::default()
+            },
+        ))];
+    }
+
+    let layout = ComposerLayout::new(textarea.lines(), content_width.max(1));
+    let cursor = show_cursor
+        .then(|| layout.cursor_state(textarea.cursor()))
+        .flatten();
+    let base_style = Style::default();
+    let cursor_style = Style::default().bg(accent).fg(Color::Black);
+    let mut lines = Vec::new();
+    for (index, row) in layout.rows().iter().enumerate() {
+        let cursor_col = cursor
+            .as_ref()
+            .filter(|state| state.row_index == index)
+            .map(|state| state.visual_col);
+        lines.push(render_composer_row(
+            &textarea.lines()[row.line_index],
+            row.start_col,
+            row.end_col,
+            cursor_col,
+            base_style,
+            cursor_style,
+        ));
+    }
+    if lines.is_empty() {
+        vec![Line::default()]
+    } else {
+        lines
+    }
 }
 
 fn render_write_approval_prompt(
@@ -579,6 +869,40 @@ fn pending_write_approval_height(
     (source_lines + summary_lines + 3 + 2) as u16
 }
 
+fn pending_ask_user_height(pending: &PendingAskUser, panel_width: u16) -> u16 {
+    let content_width = panel_width.saturating_sub(4) as usize;
+    let mut lines = 1usize + 1 + 1;
+    if pending.active_tab < pending.questions.len() {
+        let question = &pending.questions[pending.active_tab];
+        lines += wrap_text(&question.prompt, content_width.max(1)).len();
+        lines += question.answers.len();
+        lines += 2;
+        let selected = &question.answers[question.selected_index];
+        let detail_text = question.detail.lines().join("\n");
+        if pending.detail_editing || selected.is_something_else || !detail_text.trim().is_empty() {
+            lines += 1;
+            lines += ComposerLayout::new(question.detail.lines(), content_width.max(1))
+                .rows()
+                .len()
+                .max(1);
+        }
+        if selected.is_something_else && detail_text.trim().is_empty() {
+            lines += 1;
+        }
+    } else {
+        lines += 1;
+        lines += pending.questions.len();
+        for question in &pending.questions {
+            let detail_text = question.detail.lines().join("\n").trim().to_string();
+            if !detail_text.is_empty() {
+                lines += wrap_text(&format!("details: {detail_text}"), content_width.max(1)).len();
+            }
+        }
+    }
+
+    lines as u16 + 2
+}
+
 fn pending_plan_review_height(panel_width: u16) -> u16 {
     let content_width = panel_width.saturating_sub(4) as usize;
     let title_lines = wrap_text("A proposed plan is ready.", content_width.max(1)).len();
@@ -709,6 +1033,7 @@ mod tests {
 
     use crate::{
         app::{Action, Effect, MessageStyle},
+        ask_user::{AskUserAnswer, AskUserQuestion, AskUserRequest},
         config::ReasoningEffort,
         stats::StatsTotals,
         tools::{DiffKind, DiffPreviewLine, MutationPreview, mutation_preview},
@@ -752,6 +1077,26 @@ mod tests {
     impl Drop for TempTree {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn ask_user_request() -> AskUserRequest {
+        AskUserRequest {
+            title: Some("Clarify implementation".into()),
+            questions: vec![AskUserQuestion {
+                id: "scope".into(),
+                prompt: "Which scope should this change cover?".into(),
+                answers: vec![
+                    AskUserAnswer {
+                        id: "narrow".into(),
+                        label: "Only the parser".into(),
+                    },
+                    AskUserAnswer {
+                        id: "broad".into(),
+                        label: "The full pipeline".into(),
+                    },
+                ],
+            }],
         }
     }
 
@@ -1058,6 +1403,44 @@ mod tests {
         assert!(rendered.contains("Accept this plan and begin implementation"));
         assert!(rendered.contains("Suggest changes to the plan"));
         assert!(rendered.contains("› [1]"));
+    }
+
+    #[test]
+    fn render_replaces_input_with_ask_user_panel() {
+        let backend = TestBackend::new(120, 14);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut app = App::new(true, false, "gpt-5.4-mini", ReasoningEffort::Medium);
+        app.begin_ask_user("call-1".into(), ask_user_request());
+
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render succeeds");
+
+        let rendered = buffer_string(terminal.backend());
+        assert!(rendered.contains("Clarify implementation"));
+        assert!(rendered.contains("Recommended"));
+        assert!(rendered.contains("Something else"));
+        assert!(rendered.contains("Review"));
+        assert!(rendered.contains("Tab to add optional details"));
+        assert!(rendered.contains("Which scope should this change cover?"));
+    }
+
+    #[test]
+    fn render_shows_typed_ask_user_detail_text() {
+        let backend = TestBackend::new(120, 16);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut app = App::new(true, false, "gpt-5.4-mini", ReasoningEffort::Medium);
+        app.begin_ask_user("call-1".into(), ask_user_request());
+        app.apply(Action::AskUserToggleDetailEditor);
+        app.apply(Action::Paste("typed details".into()));
+
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render succeeds");
+
+        let rendered = buffer_string(terminal.backend());
+        assert!(rendered.contains("typed details"));
+        assert!(rendered.contains("Details (editing)"));
     }
 
     #[test]

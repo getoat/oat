@@ -1,4 +1,5 @@
 mod apply_patches;
+mod ask_user;
 mod common;
 mod delete_path;
 mod grep;
@@ -25,6 +26,7 @@ use crate::{
 use output_limit::OutputLimitedTool;
 
 pub use apply_patches::{ApplyPatchesArgs, ApplyPatchesTool, TextPatch};
+pub use ask_user::AskUserTool;
 pub use delete_path::{DeletePathArgs, DeletePathTool};
 pub use grep::{GrepArgs, GrepTool};
 pub use list::{ListArgs, ListTool};
@@ -47,6 +49,7 @@ pub struct ToolContext {
     pub config: AppConfig,
     pub approval_mode: ApprovalMode,
     pub approvals: WriteApprovalController,
+    pub ask_user_available: bool,
     pub subagents: Option<SubagentManager>,
 }
 
@@ -75,9 +78,13 @@ enum ToolAccess {
 enum ToolRoleScope {
     Any,
     MainOnly,
+    MainWithManager,
 }
 
-const TOOL_DESCRIPTORS: [ToolDescriptor; 10] = [
+const TOOL_DESCRIPTORS: [ToolDescriptor; 11] = [
+    ToolDescriptor::read_only(AskUserTool::NAME, ToolRoleScope::MainOnly, |_context| {
+        Box::new(AskUserTool)
+    }),
     ToolDescriptor::read_only(ListTool::NAME, ToolRoleScope::Any, |context| {
         let search_policy = context.search_policy();
         Box::new(ListTool::new(context.root, search_policy))
@@ -103,7 +110,7 @@ const TOOL_DESCRIPTORS: [ToolDescriptor; 10] = [
     }),
     ToolDescriptor::read_only(
         SPAWN_SUBAGENT_TOOL_NAME,
-        ToolRoleScope::MainOnly,
+        ToolRoleScope::MainWithManager,
         |context| {
             Box::new(SpawnSubagentTool::new(
                 context
@@ -117,7 +124,7 @@ const TOOL_DESCRIPTORS: [ToolDescriptor; 10] = [
     ),
     ToolDescriptor::read_only(
         WAIT_SUBAGENT_TOOL_NAME,
-        ToolRoleScope::MainOnly,
+        ToolRoleScope::MainWithManager,
         |context| {
             Box::new(WaitSubagentTool::new(
                 context
@@ -128,7 +135,7 @@ const TOOL_DESCRIPTORS: [ToolDescriptor; 10] = [
     ),
     ToolDescriptor::read_only(
         INSPECT_SUBAGENT_TOOL_NAME,
-        ToolRoleScope::MainOnly,
+        ToolRoleScope::MainWithManager,
         |context| {
             Box::new(InspectSubagentTool::new(
                 context
@@ -167,11 +174,15 @@ impl ToolDescriptor {
     }
 
     fn is_enabled(self, context: &ToolContext) -> bool {
+        if self.name == AskUserTool::NAME && !context.ask_user_available {
+            return false;
+        }
         let access_enabled = self.access_mode == ToolAccess::ReadOnly
             || context.agent.access_mode == AccessMode::ReadWrite;
         let role_enabled = match self.role_scope {
             ToolRoleScope::Any => true,
-            ToolRoleScope::MainOnly => {
+            ToolRoleScope::MainOnly => context.agent.role == AgentRole::Main,
+            ToolRoleScope::MainWithManager => {
                 context.agent.role == AgentRole::Main && context.subagents.is_some()
             }
         };
@@ -220,12 +231,14 @@ mod tests {
             config: sample_config(),
             approval_mode: ApprovalMode::Manual,
             approvals: WriteApprovalController::new(ApprovalMode::Manual),
+            ask_user_available: true,
             subagents: Some(test_subagent_manager()),
         });
 
         assert_eq!(
             tool_names,
             vec![
+                "AskUser",
                 "List",
                 "ReadFile",
                 "ReadFiles",
@@ -245,9 +258,11 @@ mod tests {
             config: sample_config(),
             approval_mode: ApprovalMode::Manual,
             approvals: WriteApprovalController::new(ApprovalMode::Manual),
+            ask_user_available: true,
             subagents: Some(test_subagent_manager()),
         });
 
+        assert!(tool_names.contains(&"AskUser".to_string()));
         assert!(tool_names.contains(&"ApplyPatches".to_string()));
         assert!(tool_names.contains(&"WriteFile".to_string()));
         assert!(tool_names.contains(&"DeletePath".to_string()));
@@ -262,6 +277,7 @@ mod tests {
             config: sample_config(),
             approval_mode: ApprovalMode::Manual,
             approvals: WriteApprovalController::new(ApprovalMode::Manual),
+            ask_user_available: true,
             subagents: Some(test_subagent_manager()),
         }) {
             assert!(
@@ -283,9 +299,11 @@ mod tests {
             config: sample_config(),
             approval_mode: ApprovalMode::Manual,
             approvals: WriteApprovalController::new(ApprovalMode::Manual),
+            ask_user_available: true,
             subagents: Some(test_subagent_manager()),
         });
 
+        assert!(!tool_names.contains(&"AskUser".to_string()));
         assert!(!tool_names.contains(&"SpawnSubagent".to_string()));
         assert!(!tool_names.contains(&"WaitSubagent".to_string()));
         assert!(!tool_names.contains(&"InspectSubagent".to_string()));
@@ -299,6 +317,7 @@ mod tests {
             config: sample_config(),
             approval_mode: ApprovalMode::Manual,
             approvals: WriteApprovalController::new(ApprovalMode::Manual),
+            ask_user_available: false,
             subagents: None,
         });
 

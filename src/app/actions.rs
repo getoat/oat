@@ -5,6 +5,7 @@ use super::state::{
     App, MessageStyle, PendingReply, PendingReplyKind, PickerSelection, SlashCommand,
     SubagentDisplayState, SubagentStatusKind, TranscriptEntry, WriteApprovalDecision,
 };
+use crate::ask_user::AskUserResponse;
 use crate::config::ReasoningEffort;
 use crate::llm::StreamEvent;
 use crate::model_registry;
@@ -29,6 +30,9 @@ pub enum Action {
     TogglePickerSelection,
     PickerTabLeft,
     PickerTabRight,
+    AskUserTabLeft,
+    AskUserTabRight,
+    AskUserToggleDetailEditor,
     ApproveWriteOnce,
     ApproveWriteAllSession,
     DenyWrite,
@@ -73,6 +77,10 @@ pub enum Effect {
         request_id: String,
         decision: WriteApprovalDecision,
     },
+    ResolveAskUser {
+        request_id: String,
+        response: AskUserResponse,
+    },
     CopyToClipboard {
         text: String,
     },
@@ -114,7 +122,9 @@ impl App {
                 })
             }
             Action::SelectPreviousCommand => {
-                if self.plan_review_selection_active() {
+                if self.has_pending_ask_user() {
+                    self.move_ask_user_answer_up();
+                } else if self.plan_review_selection_active() {
                     self.move_plan_review_selection(-1);
                 } else if self.selection_picker_visible() {
                     self.move_picker_selection_up();
@@ -127,7 +137,9 @@ impl App {
                 None
             }
             Action::SelectNextCommand => {
-                if self.plan_review_selection_active() {
+                if self.has_pending_ask_user() {
+                    self.move_ask_user_answer_down();
+                } else if self.plan_review_selection_active() {
                     self.move_plan_review_selection(1);
                 } else if self.selection_picker_visible() {
                     self.move_picker_selection_down();
@@ -182,6 +194,18 @@ impl App {
                 self.move_picker_tab_right();
                 None
             }
+            Action::AskUserTabLeft => {
+                self.move_ask_user_tab_left();
+                None
+            }
+            Action::AskUserTabRight => {
+                self.move_ask_user_tab_right();
+                None
+            }
+            Action::AskUserToggleDetailEditor => {
+                self.toggle_ask_user_detail_editing();
+                None
+            }
             Action::ApproveWriteOnce => resolve_write_approval(
                 apply_write_approval(self, WriteApprovalDecision::AllowOnce),
                 WriteApprovalDecision::AllowOnce,
@@ -205,11 +229,25 @@ impl App {
                 if self.has_pending_write_approval() || self.plan_review_selection_active() {
                     return None;
                 }
+                if self.ask_user_detail_editing() {
+                    self.apply_ask_user_input(input);
+                    return None;
+                }
+                if self.has_pending_ask_user() {
+                    return None;
+                }
                 self.apply_composer_input(input);
                 None
             }
             Action::Paste(text) => {
                 if self.has_pending_write_approval() || self.plan_review_selection_active() {
+                    return None;
+                }
+                if self.ask_user_detail_editing() {
+                    self.paste_into_ask_user_detail(&text);
+                    return None;
+                }
+                if self.has_pending_ask_user() {
                     return None;
                 }
                 self.paste_into_composer(&text);
@@ -249,6 +287,10 @@ fn submit_message(app: &mut App) -> Option<Effect> {
 
     if app.plan_review_selection_active() {
         return submit_plan_review_selection(app);
+    }
+
+    if app.has_pending_ask_user() {
+        return submit_ask_user(app);
     }
 
     if app.selection_picker_visible() {
@@ -292,6 +334,14 @@ fn submit_message(app: &mut App) -> Option<Effect> {
         reply_id,
         prompt: submitted,
         history: app.session_history().to_vec(),
+    })
+}
+
+fn submit_ask_user(app: &mut App) -> Option<Effect> {
+    let (request_id, response, _summary) = app.advance_ask_user()?;
+    Some(Effect::ResolveAskUser {
+        request_id,
+        response,
     })
 }
 
@@ -533,6 +583,12 @@ fn on_stream_event(app: &mut App, reply_id: u64, event: StreamEvent) {
         }
         StreamEvent::ToolCall { name, arguments } => app.push_tool_call(name, arguments),
         StreamEvent::ToolResult { name, output } => app.push_tool_result(name, output),
+        StreamEvent::AskUserRequested {
+            request_id,
+            request,
+        } => {
+            app.begin_ask_user(request_id, request);
+        }
         StreamEvent::WriteApprovalRequested {
             request_id,
             tool_name,
@@ -557,12 +613,14 @@ fn on_stream_event(app: &mut App, reply_id: u64, event: StreamEvent) {
             if let Some(history) = history {
                 app.replace_session_history(history);
             }
+            app.clear_pending_ask_user();
             app.pending_reply = None;
             if synthesized_plan {
                 app.begin_plan_review();
             }
         }
         StreamEvent::Failed(error) => {
+            app.clear_pending_ask_user();
             app.pending_reply = None;
             app.push_agent_error(format!("Request failed: {error}"));
         }
@@ -704,7 +762,10 @@ mod tests {
     use ratatui_textarea::CursorMove;
 
     use super::*;
-    use crate::app::{ChatMessage, Speaker};
+    use crate::{
+        app::{ChatMessage, Speaker},
+        ask_user::{AskUserAnswer, AskUserQuestion, AskUserRequest},
+    };
 
     fn new_app(show_thinking: bool) -> App {
         App::new(show_thinking, false, "gpt-5-mini", ReasoningEffort::Medium)
@@ -717,6 +778,26 @@ mod tests {
             "gpt-5.4-mini",
             ReasoningEffort::Medium,
         )
+    }
+
+    fn ask_user_request() -> AskUserRequest {
+        AskUserRequest {
+            title: Some("Clarify implementation".into()),
+            questions: vec![AskUserQuestion {
+                id: "scope".into(),
+                prompt: "Which scope?".into(),
+                answers: vec![
+                    AskUserAnswer {
+                        id: "narrow".into(),
+                        label: "Narrow".into(),
+                    },
+                    AskUserAnswer {
+                        id: "broad".into(),
+                        label: "Broad".into(),
+                    },
+                ],
+            }],
+        }
     }
 
     #[test]
@@ -1052,6 +1133,56 @@ mod tests {
             }
             entry => panic!("expected tool result, got {entry:?}"),
         }
+    }
+
+    #[test]
+    fn ask_user_stream_event_starts_pending_interaction() {
+        let mut app = new_app(true);
+        app.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
+
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: StreamEvent::AskUserRequested {
+                request_id: "call-1".into(),
+                request: ask_user_request(),
+            },
+        });
+
+        assert!(app.has_pending_ask_user());
+        assert_eq!(
+            app.pending_ask_user()
+                .map(|pending| pending.request_id.as_str()),
+            Some("call-1")
+        );
+    }
+
+    #[test]
+    fn ask_user_review_submission_returns_resolve_effect() {
+        let mut app = new_app(true);
+        app.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
+        app.begin_ask_user("call-1".into(), ask_user_request());
+
+        let first = app.apply(Action::SubmitMessage);
+        assert!(first.is_none());
+        assert_eq!(
+            app.pending_ask_user().map(|pending| pending.active_tab),
+            Some(1)
+        );
+
+        let effect = app.apply(Action::SubmitMessage);
+
+        match effect {
+            Some(Effect::ResolveAskUser {
+                request_id,
+                response,
+            }) => {
+                assert_eq!(request_id, "call-1");
+                assert_eq!(response.questions.len(), 1);
+                assert_eq!(response.questions[0].selected_answer.label, "Narrow");
+            }
+            other => panic!("expected ResolveAskUser effect, got {other:?}"),
+        }
+        assert!(!app.has_pending_ask_user());
     }
 
     #[test]
