@@ -15,7 +15,9 @@ use rig::{
         message::{ToolResult, ToolResultContent},
     },
     providers::openai,
-    streaming::{StreamedAssistantContent, StreamedUserContent, StreamingChat},
+    streaming::{
+        StreamedAssistantContent, StreamedUserContent, StreamingChat, ToolCallDeltaContent,
+    },
     tool::Tool,
 };
 use serde_json::json;
@@ -159,6 +161,27 @@ struct AskUserHook {
 #[derive(Clone, Default)]
 struct CompletionCaptureHook {
     capture: Option<CompletionCapture>,
+}
+
+#[derive(Default)]
+struct PartialToolCall {
+    name: Option<String>,
+    arguments: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReplayProbe {
+    expected: String,
+    buffered: String,
+}
+
+impl ReplayProbe {
+    fn new(expected: &str) -> Self {
+        Self {
+            expected: expected.to_string(),
+            buffered: String::new(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -360,15 +383,16 @@ impl LlmService {
             .await;
         let mut tool_calls = HashMap::<String, String>::new();
         let mut commentary_calls = HashSet::<String>::new();
+        let mut partial_tool_calls = HashMap::<String, PartialToolCall>::new();
         let mut output = String::new();
-        let mut replay_offset = None;
+        let mut replay_probe = None;
 
         while let Some(chunk) = stream.next().await {
             let event = match chunk {
                 Ok(MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(
                     text,
                 ))) => {
-                    let delta = reconcile_stream_text(&output, &text.text, &mut replay_offset);
+                    let delta = reconcile_stream_text(&text.text, &mut replay_probe);
                     if delta.is_empty() {
                         None
                     } else {
@@ -379,14 +403,32 @@ impl LlmService {
                 Ok(MultiTurnStreamItem::StreamAssistantItem(
                     StreamedAssistantContent::Reasoning(reasoning),
                 )) => {
-                    replay_offset = (!output.is_empty()).then_some(0);
+                    replay_probe = (!output.is_empty()).then(|| ReplayProbe::new(&output));
                     Some(StreamEvent::ReasoningDelta(reasoning.display_text()))
                 }
                 Ok(MultiTurnStreamItem::StreamAssistantItem(
                     StreamedAssistantContent::ReasoningDelta { reasoning, .. },
                 )) => {
-                    replay_offset = (!output.is_empty()).then_some(0);
+                    replay_probe = (!output.is_empty()).then(|| ReplayProbe::new(&output));
                     Some(StreamEvent::ReasoningDelta(reasoning))
+                }
+                Ok(MultiTurnStreamItem::StreamAssistantItem(
+                    StreamedAssistantContent::ToolCallDelta {
+                        internal_call_id,
+                        content,
+                        ..
+                    },
+                )) => {
+                    let partial = partial_tool_calls.entry(internal_call_id).or_default();
+                    match content {
+                        ToolCallDeltaContent::Name(name) => {
+                            partial.name = Some(name);
+                        }
+                        ToolCallDeltaContent::Delta(delta) => {
+                            partial.arguments.push_str(&delta);
+                        }
+                    }
+                    None
                 }
                 Ok(MultiTurnStreamItem::StreamAssistantItem(
                     StreamedAssistantContent::ToolCall {
@@ -394,29 +436,41 @@ impl LlmService {
                         internal_call_id,
                     },
                 )) => {
-                    replay_offset = (!output.is_empty()).then_some(0);
+                    replay_probe = (!output.is_empty()).then(|| ReplayProbe::new(&output));
                     let name = tool_call.function.name.clone();
-                    let arguments = format_tool_arguments(&tool_call.function.arguments);
+                    let fallback_arguments = format_tool_arguments(&tool_call.function.arguments);
                     tool_calls.insert(internal_call_id.clone(), name.clone());
                     if name == AskUserTool::NAME {
+                        partial_tool_calls.remove(&internal_call_id);
                         None
                     } else if name == CommentaryTool::NAME {
-                        match parse_commentary_message(&arguments) {
+                        match resolve_commentary_message(
+                            &mut partial_tool_calls,
+                            &internal_call_id,
+                            &fallback_arguments,
+                        ) {
                             Ok(message) => {
                                 commentary_calls.insert(internal_call_id);
                                 Some(StreamEvent::Commentary(message))
                             }
-                            Err(_) => Some(StreamEvent::ToolCall { name, arguments }),
+                            Err(_) => Some(StreamEvent::ToolCall {
+                                name,
+                                arguments: fallback_arguments,
+                            }),
                         }
                     } else {
-                        Some(StreamEvent::ToolCall { name, arguments })
+                        partial_tool_calls.remove(&internal_call_id);
+                        Some(StreamEvent::ToolCall {
+                            name,
+                            arguments: fallback_arguments,
+                        })
                     }
                 }
                 Ok(MultiTurnStreamItem::StreamUserItem(StreamedUserContent::ToolResult {
                     tool_result,
                     internal_call_id,
                 })) => {
-                    replay_offset = (!output.is_empty()).then_some(0);
+                    replay_probe = (!output.is_empty()).then(|| ReplayProbe::new(&output));
                     let name = tool_calls
                         .get(&internal_call_id)
                         .cloned()
@@ -1266,45 +1320,70 @@ fn parse_commentary_message(args: &str) -> Result<String> {
         .map_err(Into::into)
 }
 
-fn reconcile_stream_text(
-    output: &str,
-    incoming: &str,
-    replay_offset: &mut Option<usize>,
-) -> String {
+fn resolve_commentary_message(
+    partial_tool_calls: &mut HashMap<String, PartialToolCall>,
+    internal_call_id: &str,
+    fallback_arguments: &str,
+) -> Result<String> {
+    let mut candidates = Vec::new();
+    if let Some(partial) = partial_tool_calls.remove(internal_call_id)
+        && !partial.arguments.trim().is_empty()
+    {
+        candidates.push(partial.arguments);
+    }
+    candidates.push(fallback_arguments.to_string());
+
+    let mut best_message = None;
+    let mut last_error = None;
+    for candidate in candidates {
+        match parse_commentary_message(&candidate) {
+            Ok(message) => {
+                if best_message.as_ref().is_none_or(|current: &String| {
+                    message.chars().count() > current.chars().count()
+                }) {
+                    best_message = Some(message);
+                }
+            }
+            Err(error) => last_error = Some(error),
+        }
+    }
+
+    if let Some(message) = best_message {
+        Ok(message)
+    } else if let Some(error) = last_error {
+        Err(error)
+    } else {
+        parse_commentary_message(fallback_arguments)
+    }
+}
+
+fn reconcile_stream_text(incoming: &str, replay_probe: &mut Option<ReplayProbe>) -> String {
     if incoming.is_empty() {
         return String::new();
     }
 
-    let Some(offset) = *replay_offset else {
+    let Some(probe) = replay_probe.as_mut() else {
         return incoming.to_string();
     };
 
-    let remaining = match output.get(offset..) {
-        Some(remaining) => remaining,
-        None => {
-            *replay_offset = None;
-            return incoming.to_string();
+    probe.buffered.push_str(incoming);
+
+    if probe.expected.starts_with(&probe.buffered) {
+        if probe.expected.len() == probe.buffered.len() {
+            *replay_probe = None;
         }
-    };
-
-    if remaining.is_empty() {
-        *replay_offset = None;
-        return incoming.to_string();
-    }
-
-    if remaining.starts_with(incoming) {
-        let next_offset = offset + incoming.len();
-        *replay_offset = (next_offset < output.len()).then_some(next_offset);
         return String::new();
     }
 
-    if let Some(suffix) = incoming.strip_prefix(remaining) {
-        *replay_offset = None;
-        return suffix.to_string();
+    if probe.buffered.starts_with(&probe.expected) {
+        let suffix = probe.buffered[probe.expected.len()..].to_string();
+        *replay_probe = None;
+        return suffix;
     }
 
-    *replay_offset = None;
-    incoming.to_string()
+    let buffered = probe.buffered.clone();
+    *replay_probe = None;
+    buffered
 }
 
 #[cfg(test)]
@@ -1386,57 +1465,60 @@ mod tests {
 
     #[test]
     fn reconcile_stream_text_passes_through_normal_deltas() {
-        let mut replay_offset = None;
+        let mut replay_probe = None;
         assert_eq!(
-            reconcile_stream_text("message 1", " and more", &mut replay_offset),
+            reconcile_stream_text(" and more", &mut replay_probe),
             " and more"
         );
     }
 
     #[test]
     fn reconcile_stream_text_strips_replayed_prefix_at_new_segment_start() {
-        let mut replay_offset = Some(0);
+        let mut replay_probe = Some(ReplayProbe::new("message 1"));
         assert_eq!(
-            reconcile_stream_text("message 1", "message 1 and more", &mut replay_offset),
+            reconcile_stream_text("message 1 and more", &mut replay_probe),
             " and more"
         );
-        assert_eq!(replay_offset, None);
+        assert_eq!(replay_probe, None);
     }
 
     #[test]
     fn reconcile_stream_text_suppresses_fully_replayed_chunk() {
-        let mut replay_offset = Some(0);
-        assert_eq!(
-            reconcile_stream_text("message 1", "message 1", &mut replay_offset),
-            ""
-        );
-        assert_eq!(replay_offset, None);
+        let mut replay_probe = Some(ReplayProbe::new("message 1"));
+        assert_eq!(reconcile_stream_text("message 1", &mut replay_probe), "");
+        assert_eq!(replay_probe, None);
     }
 
     #[test]
     fn reconcile_stream_text_does_not_strip_unrelated_segment_start() {
-        let mut replay_offset = Some(0);
+        let mut replay_probe = Some(ReplayProbe::new("message 1"));
         assert_eq!(
-            reconcile_stream_text("message 1", "message 2", &mut replay_offset),
+            reconcile_stream_text("message 2", &mut replay_probe),
             "message 2"
         );
-        assert_eq!(replay_offset, None);
+        assert_eq!(replay_probe, None);
     }
 
     #[test]
     fn reconcile_stream_text_suppresses_chunked_replay_before_new_suffix() {
         let mut output = "Message 1".to_string();
-        let mut replay_offset = Some(0);
+        let mut replay_probe = Some(ReplayProbe::new(&output));
 
-        let first = reconcile_stream_text(&output, "Mess", &mut replay_offset);
+        let first = reconcile_stream_text("Mess", &mut replay_probe);
         assert_eq!(first, "");
-        assert_eq!(replay_offset, Some(4));
+        assert_eq!(
+            replay_probe,
+            Some(ReplayProbe {
+                expected: "Message 1".into(),
+                buffered: "Mess".into(),
+            })
+        );
 
-        let second = reconcile_stream_text(&output, "age 1", &mut replay_offset);
+        let second = reconcile_stream_text("age 1", &mut replay_probe);
         assert_eq!(second, "");
-        assert_eq!(replay_offset, None);
+        assert_eq!(replay_probe, None);
 
-        let third = reconcile_stream_text(&output, "\n\nMessage 2", &mut replay_offset);
+        let third = reconcile_stream_text("\n\nMessage 2", &mut replay_probe);
         assert_eq!(third, "\n\nMessage 2");
         output.push_str(&third);
         assert_eq!(output, "Message 1\n\nMessage 2");
@@ -1444,12 +1526,24 @@ mod tests {
 
     #[test]
     fn reconcile_stream_text_emits_only_new_tail_when_chunk_finishes_replay() {
-        let mut replay_offset = Some(4);
+        let mut replay_probe = Some(ReplayProbe::new("Message 1"));
         assert_eq!(
-            reconcile_stream_text("Message 1", "age 1\n\nMessage 2", &mut replay_offset),
+            reconcile_stream_text("Message 1\n\nMessage 2", &mut replay_probe),
             "\n\nMessage 2"
         );
-        assert_eq!(replay_offset, None);
+        assert_eq!(replay_probe, None);
+    }
+
+    #[test]
+    fn reconcile_stream_text_preserves_shared_prefix_until_divergence() {
+        let mut replay_probe = Some(ReplayProbe::new("checking the model registry"));
+
+        let first = reconcile_stream_text("checking the ", &mut replay_probe);
+        assert_eq!(first, "");
+
+        let second = reconcile_stream_text("plan in the registry", &mut replay_probe);
+        assert_eq!(second, "checking the plan in the registry");
+        assert_eq!(replay_probe, None);
     }
 
     #[test]
@@ -1465,6 +1559,39 @@ mod tests {
     fn parse_commentary_message_rejects_invalid_payload() {
         assert!(parse_commentary_message(r#"{"message":"   "}"#).is_err());
         assert!(parse_commentary_message(r#"{"text":"missing"}"#).is_err());
+    }
+
+    #[test]
+    fn resolve_commentary_message_prefers_longer_valid_payload() {
+        let mut partials = HashMap::from([(
+            "call-1".to_string(),
+            PartialToolCall {
+                name: Some("Commentary".into()),
+                arguments: r#"{"message":"’ve mapped the registry."}"#.into(),
+            },
+        )]);
+
+        assert_eq!(
+            resolve_commentary_message(
+                &mut partials,
+                "call-1",
+                r#"{"message":"I’ve mapped the registry."}"#
+            )
+            .expect("commentary resolves"),
+            "I’ve mapped the registry."
+        );
+        assert!(!partials.contains_key("call-1"));
+    }
+
+    #[test]
+    fn resolve_commentary_message_falls_back_when_no_delta_payload_exists() {
+        let mut partials = HashMap::new();
+
+        assert_eq!(
+            resolve_commentary_message(&mut partials, "call-1", r#"{"message":"fallback"}"#)
+                .expect("fallback commentary"),
+            "fallback"
+        );
     }
 
     #[test]

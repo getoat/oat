@@ -7,7 +7,7 @@ use ratatui::{
 };
 
 use crate::app::{
-    App, ChatMessage, SubagentStatusEntry, ToolCall, ToolResultEntry, TranscriptEntry,
+    App, ChatMessage, MessageStyle, SubagentStatusEntry, ToolCall, ToolResultEntry, TranscriptEntry,
 };
 
 use super::{
@@ -314,11 +314,23 @@ fn push_visible_entry_lines(
     accent: Color,
 ) {
     match entry {
-        VisibleEntry::Message(message) => push_message_lines(lines, message, width, accent),
+        VisibleEntry::Message(message) => {
+            if message.style == MessageStyle::Commentary {
+                lines.push(commentary_separator_line(width));
+            }
+            push_message_lines(lines, message, width, accent);
+        }
         VisibleEntry::ToolCall(tool_call) => push_tool_call_lines(lines, tool_call, width),
         VisibleEntry::ToolResult(tool_result) => push_tool_result_lines(lines, tool_result, width),
         VisibleEntry::SubagentStatus(status) => push_subagent_status_lines(lines, status, width),
     }
+}
+
+fn commentary_separator_line(width: usize) -> Line<'static> {
+    Line::from(Span::styled(
+        "─".repeat(width.max(1)),
+        Style::default().fg(Color::DarkGray),
+    ))
 }
 
 fn push_tool_activity_run_lines(
@@ -551,5 +563,35 @@ mod tests {
 
         assert!(first_tool_index < commentary_index);
         assert!(commentary_index < second_tool_index);
+    }
+
+    #[test]
+    fn commentary_renders_separator_before_message() {
+        let mut app = App::new(true, true, "gpt-5-mini", ReasoningEffort::Medium);
+        app.composer_mut().insert_str("Inspect the repo");
+        let effect = app.apply(Action::SubmitMessage);
+        assert!(matches!(
+            effect,
+            Some(Effect::PromptModel { reply_id: 1, .. })
+        ));
+
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: StreamEvent::Commentary("Checking the registry first.".into()),
+        });
+
+        let lines = build_history_lines(&app, 40, Color::Cyan, "...");
+        let rendered = lines.iter().map(rendered_line_text).collect::<Vec<_>>();
+        let separator = "─".repeat(40);
+        let separator_index = rendered
+            .iter()
+            .position(|line| line == &separator)
+            .expect("separator line");
+        let commentary_index = rendered
+            .iter()
+            .position(|line| line.contains("Checking the registry first."))
+            .expect("commentary line");
+
+        assert_eq!(separator_index + 1, commentary_index);
     }
 }
