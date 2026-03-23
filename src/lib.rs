@@ -97,6 +97,8 @@ pub fn run_with_options(
         startup.access_mode,
         startup.approval_mode,
     );
+    app.set_safety_model_name(config.safety.model_name.clone());
+    app.set_safety_reasoning_effort(config.safety.reasoning_effort);
     let stats = StatsStore::new();
     let (subagent_tx, mut subagent_rx) = mpsc::unbounded_channel();
     let subagents =
@@ -145,9 +147,13 @@ pub fn run_with_options(
 
         let timeout = tick_rate.saturating_sub(last_tick.elapsed());
         if event::poll(timeout)?
-            && let Some(action) = input::map_event_with_state(
+            && let Some(action) = input::map_event_with_shell_editor_state(
                 event::read()?,
                 app.has_pending_write_approval(),
+                app.has_pending_shell_approval(),
+                app.shell_approval_editing(),
+                app.shell_approval_editor_can_move_up(),
+                app.shell_approval_editor_can_move_down(),
                 app.has_pending_ask_user(),
                 app.selection_picker_visible(),
                 app.plan_review_selection_active(),
@@ -229,7 +235,8 @@ pub fn run_headless(
                 | llm::StreamEvent::ToolCall { .. }
                 | llm::StreamEvent::ToolResult { .. }
                 | llm::StreamEvent::AskUserRequested { .. }
-                | llm::StreamEvent::WriteApprovalRequested { .. } => {}
+                | llm::StreamEvent::WriteApprovalRequested { .. }
+                | llm::StreamEvent::ShellApprovalRequested { .. } => {}
             }
         }
 
@@ -312,6 +319,10 @@ impl EffectRunner<'_> {
                 *self.llm = rebuilt;
                 self.app.set_model_name(model_name.clone());
                 self.app.set_reasoning_effort(reasoning_effort);
+                self.app
+                    .set_safety_model_name(self.config.safety.model_name.clone());
+                self.app
+                    .set_safety_reasoning_effort(self.config.safety.reasoning_effort);
                 self.app.set_planning_agents(planning_agents);
                 self.app.open_reasoning_picker();
                 self.app.push_agent_message(format!(
@@ -326,6 +337,10 @@ impl EffectRunner<'_> {
                 *self.config = updated_config;
                 *self.llm = rebuilt;
                 self.app.set_reasoning_effort(reasoning_effort);
+                self.app
+                    .set_safety_model_name(self.config.safety.model_name.clone());
+                self.app
+                    .set_safety_reasoning_effort(self.config.safety.reasoning_effort);
                 self.app.push_agent_message(format!(
                     "Reasoning effort set to `{}` for model `{}` and saved to the active config.",
                     reasoning_effort.as_str(),
@@ -341,6 +356,24 @@ impl EffectRunner<'_> {
                     "Saved {} planning agent{} to the active config.",
                     planning_agents.len(),
                     if planning_agents.len() == 1 { "" } else { "s" }
+                ));
+                Ok(())
+            }
+            Effect::SetSafetySelection {
+                model_name,
+                reasoning_effort,
+            } => {
+                let updated_config =
+                    AppConfig::set_default_safety_selection(&model_name, reasoning_effort)?;
+                let rebuilt = self.rebuild_llm(&updated_config, self.app.mode())?;
+                *self.config = updated_config;
+                *self.llm = rebuilt;
+                self.app.set_safety_model_name(model_name.clone());
+                self.app.set_safety_reasoning_effort(reasoning_effort);
+                self.app.push_agent_message(format!(
+                    "Safety model set to `{}` with `{}` reasoning and saved to the active config.",
+                    model_name,
+                    reasoning_effort.as_str()
                 ));
                 Ok(())
             }
@@ -379,6 +412,16 @@ impl EffectRunner<'_> {
                 if !self.llm.resolve_write_approval(&request_id, decision) {
                     self.app
                         .push_error_message("Write approval request is no longer active.");
+                }
+                Ok(())
+            }
+            Effect::ResolveShellApproval {
+                request_id,
+                decision,
+            } => {
+                if !self.llm.resolve_shell_approval(&request_id, decision) {
+                    self.app
+                        .push_error_message("Shell approval request is no longer active.");
                 }
                 Ok(())
             }

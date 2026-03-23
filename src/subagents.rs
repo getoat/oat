@@ -17,7 +17,7 @@ use tokio::{
 
 use crate::{
     agent::AgentContext,
-    app::AccessMode,
+    app::{AccessMode, CommandRisk},
     completion_request::CompletionRequestSnapshot,
     config::AppConfig,
     llm::{CompletionCapture, LlmService, PromptRunResult, StreamEvent, WriteApprovalController},
@@ -105,6 +105,15 @@ pub enum SubagentUiEvent {
         request_id: String,
         tool_name: String,
         arguments: String,
+    },
+    ShellApprovalRequested {
+        id: String,
+        request_id: String,
+        risk: CommandRisk,
+        risk_explanation: String,
+        command: String,
+        working_directory: String,
+        reason: String,
     },
 }
 
@@ -401,6 +410,29 @@ impl SubagentManager {
                             request_id,
                             tool_name,
                             arguments,
+                        });
+                }
+            }
+            StreamEvent::ShellApprovalRequested {
+                request_id,
+                risk,
+                risk_explanation,
+                command,
+                working_directory,
+                reason,
+            } => {
+                if self.record_tool_activity(id, "RunShellScript".into()) {
+                    let _ = self
+                        .inner
+                        .ui_tx
+                        .send(SubagentUiEvent::ShellApprovalRequested {
+                            id: id.to_string(),
+                            request_id,
+                            risk,
+                            risk_explanation,
+                            command,
+                            working_directory,
+                            reason,
                         });
                 }
             }

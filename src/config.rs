@@ -4,7 +4,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::{
     model_registry,
@@ -16,17 +16,24 @@ const DEFAULT_CONFIG_PATH: &str = "config.toml";
 const HOME_CONFIG_RELATIVE_PATH: &str = ".config/oat/config.toml";
 const DEFAULT_API_VERSION: &str = "2025-01-01-preview";
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppConfig {
     pub azure: AzureConfig,
-    #[serde(default)]
+    pub safety: SafetyConfig,
     pub ui: UiConfig,
-    #[serde(default)]
     pub subagents: SubagentConfig,
-    #[serde(default)]
     pub planning: PlanningConfig,
-    #[serde(default)]
     pub tools: ToolConfig,
+}
+
+impl<'de> Deserialize<'de> for AppConfig {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let partial = PartialAppConfig::deserialize(deserializer)?;
+        partial.finalize().map_err(serde::de::Error::custom)
+    }
 }
 
 impl AppConfig {
@@ -91,7 +98,7 @@ impl AppConfig {
         let home_path = default_home_config_path();
         let cwd_path = PathBuf::from(DEFAULT_CONFIG_PATH);
         let target_path = default_config_update_path(home_path.as_deref(), Some(&cwd_path))?;
-        write_config_updates_at_path(&target_path, None, Some(reasoning_effort), None)?;
+        write_config_updates_at_path(&target_path, None, Some(reasoning_effort), None, None, None)?;
         Self::load_from_default_path()
     }
 
@@ -99,7 +106,7 @@ impl AppConfig {
         path: &Path,
         reasoning_effort: ReasoningEffort,
     ) -> Result<Self> {
-        write_config_updates_at_path(path, None, Some(reasoning_effort), None)?;
+        write_config_updates_at_path(path, None, Some(reasoning_effort), None, None, None)?;
         Self::load_from_path(path)
     }
 
@@ -110,7 +117,14 @@ impl AppConfig {
         let home_path = default_home_config_path();
         let cwd_path = PathBuf::from(DEFAULT_CONFIG_PATH);
         let target_path = default_config_update_path(home_path.as_deref(), Some(&cwd_path))?;
-        write_config_updates_at_path(&target_path, Some(model_name), Some(reasoning_effort), None)?;
+        write_config_updates_at_path(
+            &target_path,
+            Some(model_name),
+            Some(reasoning_effort),
+            None,
+            None,
+            None,
+        )?;
         Self::load_from_default_path()
     }
 
@@ -127,6 +141,8 @@ impl AppConfig {
             Some(model_name),
             Some(reasoning_effort),
             Some(planning_agents),
+            None,
+            None,
         )?;
         Self::load_from_default_path()
     }
@@ -136,7 +152,14 @@ impl AppConfig {
         model_name: &str,
         reasoning_effort: ReasoningEffort,
     ) -> Result<Self> {
-        write_config_updates_at_path(path, Some(model_name), Some(reasoning_effort), None)?;
+        write_config_updates_at_path(
+            path,
+            Some(model_name),
+            Some(reasoning_effort),
+            None,
+            None,
+            None,
+        )?;
         Self::load_from_path(path)
     }
 
@@ -144,7 +167,7 @@ impl AppConfig {
         let home_path = default_home_config_path();
         let cwd_path = PathBuf::from(DEFAULT_CONFIG_PATH);
         let target_path = default_config_update_path(home_path.as_deref(), Some(&cwd_path))?;
-        write_config_updates_at_path(&target_path, None, None, Some(planning_agents))?;
+        write_config_updates_at_path(&target_path, None, None, Some(planning_agents), None, None)?;
         Self::load_from_default_path()
     }
 
@@ -152,7 +175,41 @@ impl AppConfig {
         path: &Path,
         planning_agents: &[PlanningAgentConfig],
     ) -> Result<Self> {
-        write_config_updates_at_path(path, None, None, Some(planning_agents))?;
+        write_config_updates_at_path(path, None, None, Some(planning_agents), None, None)?;
+        Self::load_from_path(path)
+    }
+
+    pub fn set_default_safety_selection(
+        model_name: &str,
+        reasoning_effort: ReasoningEffort,
+    ) -> Result<Self> {
+        let home_path = default_home_config_path();
+        let cwd_path = PathBuf::from(DEFAULT_CONFIG_PATH);
+        let target_path = default_config_update_path(home_path.as_deref(), Some(&cwd_path))?;
+        write_config_updates_at_path(
+            &target_path,
+            None,
+            None,
+            None,
+            Some(model_name),
+            Some(reasoning_effort),
+        )?;
+        Self::load_from_default_path()
+    }
+
+    pub fn set_safety_selection_at_path(
+        path: &Path,
+        model_name: &str,
+        reasoning_effort: ReasoningEffort,
+    ) -> Result<Self> {
+        write_config_updates_at_path(
+            path,
+            None,
+            None,
+            None,
+            Some(model_name),
+            Some(reasoning_effort),
+        )?;
         Self::load_from_path(path)
     }
 
@@ -169,6 +226,10 @@ impl AppConfig {
             bail!("azure.model_name must not be empty");
         }
 
+        if self.safety.model_name.trim().is_empty() {
+            bail!("safety.model_name must not be empty");
+        }
+
         if let Some(model) = model_registry::find_model(&self.azure.model_name)
             && !model.supports_reasoning(self.azure.reasoning_effort)
         {
@@ -182,6 +243,22 @@ impl AppConfig {
                 "azure.reasoning_effort `{}` is not supported by model `{}`. Supported values: {supported}",
                 self.azure.reasoning_effort.as_str(),
                 self.azure.model_name
+            );
+        }
+
+        if let Some(model) = model_registry::find_model(&self.safety.model_name)
+            && !model.supports_reasoning(self.safety.reasoning_effort)
+        {
+            let supported = model
+                .supported_reasoning_levels
+                .iter()
+                .map(|level| level.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            bail!(
+                "safety.reasoning_effort `{}` is not supported by model `{}`. Supported values: {supported}",
+                self.safety.reasoning_effort.as_str(),
+                self.safety.model_name
             );
         }
 
@@ -209,6 +286,7 @@ impl AppConfig {
 #[derive(Debug, Clone, Default, Deserialize)]
 struct PartialAppConfig {
     azure: Option<PartialAzureConfig>,
+    safety: Option<PartialSafetyConfig>,
     ui: Option<PartialUiConfig>,
     subagents: Option<PartialSubagentConfig>,
     planning: Option<PartialPlanningConfig>,
@@ -227,6 +305,12 @@ impl PartialAppConfig {
             self.ui
                 .get_or_insert_with(PartialUiConfig::default)
                 .merge(ui);
+        }
+
+        if let Some(safety) = other.safety {
+            self.safety
+                .get_or_insert_with(PartialSafetyConfig::default)
+                .merge(safety);
         }
 
         if let Some(subagents) = other.subagents {
@@ -249,11 +333,13 @@ impl PartialAppConfig {
     }
 
     fn finalize(self) -> Result<AppConfig> {
+        let azure = self
+            .azure
+            .context("config is missing the [azure] table")?
+            .finalize()?;
         Ok(AppConfig {
-            azure: self
-                .azure
-                .context("config is missing the [azure] table")?
-                .finalize()?,
+            safety: self.safety.unwrap_or_default().finalize(&azure),
+            azure,
             ui: self.ui.unwrap_or_default().finalize(),
             subagents: self.subagents.unwrap_or_default().finalize(),
             planning: self.planning.unwrap_or_default().finalize(),
@@ -421,6 +507,12 @@ impl AzureConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct SafetyConfig {
+    pub model_name: String,
+    pub reasoning_effort: ReasoningEffort,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct UiConfig {
     #[serde(default = "default_show_thinking")]
     pub show_thinking: bool,
@@ -563,6 +655,8 @@ fn write_config_updates_at_path(
     model_name: Option<&str>,
     reasoning_effort: Option<ReasoningEffort>,
     planning_agents: Option<&[PlanningAgentConfig]>,
+    safety_model_name: Option<&str>,
+    safety_reasoning_effort: Option<ReasoningEffort>,
 ) -> Result<()> {
     let raw = fs::read_to_string(path).unwrap_or_default();
     let mut value: toml::Value = if raw.trim().is_empty() {
@@ -610,6 +704,25 @@ fn write_config_updates_at_path(
             .as_table_mut()
             .context("config planning value must be a TOML table")?;
         planning.insert("agents".into(), toml::Value::Array(serialized));
+    }
+    if safety_model_name.is_some() || safety_reasoning_effort.is_some() {
+        let safety = root
+            .entry("safety")
+            .or_insert_with(|| toml::Value::Table(Default::default()))
+            .as_table_mut()
+            .context("config safety value must be a TOML table")?;
+        if let Some(model_name) = safety_model_name {
+            safety.insert(
+                "model_name".into(),
+                toml::Value::String(model_name.to_string()),
+            );
+        }
+        if let Some(reasoning_effort) = safety_reasoning_effort {
+            safety.insert(
+                "reasoning_effort".into(),
+                toml::Value::String(reasoning_effort.as_str().to_string()),
+            );
+        }
     }
 
     let formatted = toml::to_string_pretty(&value)
@@ -667,6 +780,8 @@ mod tests {
 
         assert_eq!(config.azure.resource_name, "demo-resource");
         assert_eq!(config.azure.reasoning_effort, ReasoningEffort::Medium);
+        assert_eq!(config.safety.model_name, "gpt-5-mini");
+        assert_eq!(config.safety.reasoning_effort, ReasoningEffort::Medium);
         assert!(!config.ui.show_thinking);
         assert!(config.ui.show_tool_output);
         assert_eq!(config.ui.command_history_limit, 42);
@@ -694,6 +809,8 @@ mod tests {
         assert_eq!(config.ui.command_history_limit, 20);
         assert_eq!(config.subagents.max_concurrent, 4);
         assert!(config.tools.search_include_patterns.is_empty());
+        assert_eq!(config.safety.model_name, "gpt-5-mini");
+        assert_eq!(config.safety.reasoning_effort, ReasoningEffort::Medium);
         assert_eq!(
             config.tools.max_output_tokens,
             tool_policy::default_tool_output_max_tokens()
@@ -722,6 +839,10 @@ mod tests {
                 model_name: "gpt-5-mini".into(),
                 reasoning_effort: ReasoningEffort::Low,
                 api_version: default_api_version(),
+            },
+            safety: SafetyConfig {
+                model_name: "gpt-5-mini".into(),
+                reasoning_effort: ReasoningEffort::Low,
             },
             ui: UiConfig::default(),
             subagents: SubagentConfig::default(),
@@ -757,6 +878,10 @@ mod tests {
                 model_name: "gpt-5.4-mini".into(),
                 reasoning_effort: ReasoningEffort::Minimal,
                 api_version: default_api_version(),
+            },
+            safety: SafetyConfig {
+                model_name: "gpt-5.4-mini".into(),
+                reasoning_effort: ReasoningEffort::Medium,
             },
             ui: UiConfig::default(),
             subagents: SubagentConfig::default(),
@@ -822,6 +947,8 @@ mod tests {
         assert_eq!(config.azure.api_key, "home-secret");
         assert_eq!(config.azure.model_name, "cwd-model");
         assert_eq!(config.azure.reasoning_effort, ReasoningEffort::High);
+        assert_eq!(config.safety.model_name, "cwd-model");
+        assert_eq!(config.safety.reasoning_effort, ReasoningEffort::High);
         assert!(config.ui.show_thinking);
         assert!(config.ui.show_tool_output);
         assert_eq!(config.ui.command_history_limit, 7);
@@ -864,6 +991,7 @@ mod tests {
             .expect("merged config loads");
 
         assert_eq!(config.azure.model_name, "gpt-5-mini");
+        assert_eq!(config.safety.model_name, "gpt-5-mini");
         assert!(!config.ui.show_thinking);
         assert!(!config.ui.show_tool_output);
         assert_eq!(config.ui.command_history_limit, 9);
@@ -991,6 +1119,36 @@ mod tests {
     }
 
     #[test]
+    fn set_safety_selection_updates_config_file() {
+        let path = unique_temp_path("safety-selection");
+
+        fs::write(
+            &path,
+            r#"
+            [azure]
+            resource_name = "demo-resource"
+            api_key = "secret"
+            model_name = "gpt-5.4-mini"
+            reasoning_effort = "medium"
+            "#,
+        )
+        .expect("write temp config");
+
+        let updated =
+            AppConfig::set_safety_selection_at_path(&path, "gpt-5.4", ReasoningEffort::High)
+                .expect("update config");
+
+        assert_eq!(updated.safety.model_name, "gpt-5.4");
+        assert_eq!(updated.safety.reasoning_effort, ReasoningEffort::High);
+        let raw = fs::read_to_string(&path).expect("read updated config");
+        assert!(raw.contains("[safety]"));
+        assert!(raw.contains("model_name = \"gpt-5.4\""));
+        assert!(raw.contains("reasoning_effort = \"high\""));
+
+        fs::remove_file(path).expect("remove temp config");
+    }
+
+    #[test]
     fn default_config_update_path_prefers_existing_cwd_config() {
         let home_path = unique_temp_path("home-effort");
         let cwd_path = unique_temp_path("cwd-effort");
@@ -1025,6 +1183,10 @@ mod tests {
                 reasoning_effort: ReasoningEffort::Medium,
                 api_version: default_api_version(),
             },
+            safety: SafetyConfig {
+                model_name: "gpt-5.4-mini".into(),
+                reasoning_effort: ReasoningEffort::Medium,
+            },
             ui: UiConfig::default(),
             subagents: SubagentConfig { max_concurrent: 0 },
             planning: PlanningConfig::default(),
@@ -1043,6 +1205,10 @@ mod tests {
                 model_name: "gpt-5.4-mini".into(),
                 reasoning_effort: ReasoningEffort::Medium,
                 api_version: default_api_version(),
+            },
+            safety: SafetyConfig {
+                model_name: "gpt-5.4-mini".into(),
+                reasoning_effort: ReasoningEffort::Medium,
             },
             ui: UiConfig::default(),
             subagents: SubagentConfig::default(),
@@ -1066,6 +1232,10 @@ mod tests {
                 reasoning_effort: ReasoningEffort::Medium,
                 api_version: default_api_version(),
             },
+            safety: SafetyConfig {
+                model_name: "gpt-5.4-mini".into(),
+                reasoning_effort: ReasoningEffort::Medium,
+            },
             ui: UiConfig::default(),
             subagents: SubagentConfig::default(),
             planning: PlanningConfig::default(),
@@ -1076,5 +1246,51 @@ mod tests {
         };
 
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validation_rejects_unsupported_safety_reasoning_effort() {
+        let config = AppConfig {
+            azure: AzureConfig {
+                resource_name: "demo-resource".into(),
+                api_key: "secret".into(),
+                model_name: "gpt-5.4-mini".into(),
+                reasoning_effort: ReasoningEffort::Medium,
+                api_version: default_api_version(),
+            },
+            safety: SafetyConfig {
+                model_name: "gpt-5.4-mini".into(),
+                reasoning_effort: ReasoningEffort::Minimal,
+            },
+            ui: UiConfig::default(),
+            subagents: SubagentConfig::default(),
+            planning: PlanningConfig::default(),
+            tools: ToolConfig::default(),
+        };
+
+        assert!(config.validate().is_err());
+    }
+}
+#[derive(Debug, Clone, Default, Deserialize)]
+struct PartialSafetyConfig {
+    model_name: Option<String>,
+    reasoning_effort: Option<ReasoningEffort>,
+}
+
+impl PartialSafetyConfig {
+    fn merge(&mut self, other: Self) {
+        if other.model_name.is_some() {
+            self.model_name = other.model_name;
+        }
+        if other.reasoning_effort.is_some() {
+            self.reasoning_effort = other.reasoning_effort;
+        }
+    }
+
+    fn finalize(self, azure: &AzureConfig) -> SafetyConfig {
+        SafetyConfig {
+            model_name: self.model_name.unwrap_or_else(|| azure.model_name.clone()),
+            reasoning_effort: self.reasoning_effort.unwrap_or(azure.reasoning_effort),
+        }
     }
 }

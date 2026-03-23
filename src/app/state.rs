@@ -126,6 +126,7 @@ impl SlashCommand {
 pub enum ModelPickerTab {
     NormalAgent,
     PlanningAgents,
+    SafetyModel,
 }
 
 impl ModelPickerTab {
@@ -133,14 +134,15 @@ impl ModelPickerTab {
         match self {
             Self::NormalAgent => "Normal agent",
             Self::PlanningAgents => "Planning agents",
+            Self::SafetyModel => "Safety model",
         }
     }
 
     fn toggle(&mut self, direction: isize) {
-        *self = match (*self, direction.is_negative()) {
-            (Self::NormalAgent, false) | (Self::PlanningAgents, true) => Self::PlanningAgents,
-            (Self::PlanningAgents, false) | (Self::NormalAgent, true) => Self::NormalAgent,
-        };
+        let tabs = [Self::NormalAgent, Self::PlanningAgents, Self::SafetyModel];
+        let current = tabs.iter().position(|tab| *tab == *self).unwrap_or(0);
+        let next = (current as isize + direction).rem_euclid(tabs.len() as isize) as usize;
+        *self = tabs[next];
     }
 }
 
@@ -148,6 +150,7 @@ impl ModelPickerTab {
 pub enum ReasoningPickerTarget {
     NormalAgent,
     PlanningAgent,
+    SafetyModel,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -156,6 +159,7 @@ pub enum SelectionPicker {
         active_tab: ModelPickerTab,
         normal_selected_index: usize,
         planning_selected_index: usize,
+        safety_selected_index: usize,
     },
     Reasoning {
         target: ReasoningPickerTarget,
@@ -170,6 +174,10 @@ pub(super) enum PickerSelection {
     Model(String),
     Reasoning(ReasoningEffort),
     PlanningAgent(PlanningAgentConfig),
+    SafetySelection {
+        model_name: String,
+        reasoning_effort: ReasoningEffort,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -221,6 +229,60 @@ pub struct PendingWriteApproval {
     pub summary: String,
     pub target: Option<String>,
     pub source_label: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum CommandRisk {
+    Low,
+    Medium,
+    High,
+}
+
+impl CommandRisk {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Low => "Low",
+            Self::Medium => "Medium",
+            Self::High => "High",
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ShellApprovalDecision {
+    AllowOnce,
+    AllowPattern(String),
+    AllowAllRisk,
+    Deny(Option<String>),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ShellApprovalEditMode {
+    Pattern,
+    Deny,
+}
+
+#[derive(Debug)]
+pub struct PendingShellApproval {
+    pub request_id: String,
+    pub risk: CommandRisk,
+    pub risk_explanation: String,
+    pub command: String,
+    pub working_directory: String,
+    pub reason: String,
+    pub source_label: Option<String>,
+    pub selected_index: usize,
+    pub edit_mode: Option<ShellApprovalEditMode>,
+    pub pattern_input: TextArea<'static>,
+    pub deny_input: TextArea<'static>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -396,6 +458,7 @@ pub struct App {
     pub(super) mode: AccessMode,
     pub(super) approval_mode: ApprovalMode,
     pub(super) pending_write_approvals: VecDeque<PendingWriteApproval>,
+    pub(super) pending_shell_approvals: VecDeque<PendingShellApproval>,
     pub(super) should_quit: bool,
     pub(super) composer: TextArea<'static>,
     pub(super) entries: Vec<TranscriptEntry>,
@@ -409,6 +472,8 @@ pub struct App {
     pub(super) show_tool_output: bool,
     pub(super) model_name: String,
     pub(super) reasoning_effort: ReasoningEffort,
+    pub(super) safety_model_name: String,
+    pub(super) safety_reasoning_effort: ReasoningEffort,
     pub(super) planning_agents: Vec<PlanningAgentConfig>,
     pub(super) session_stats: StatsTotals,
     pub(super) selected_command: SlashCommand,
@@ -459,6 +524,7 @@ impl App {
             mode: initial_mode,
             approval_mode: initial_approval_mode,
             pending_write_approvals: VecDeque::new(),
+            pending_shell_approvals: VecDeque::new(),
             should_quit: false,
             composer: new_composer(),
             entries: vec![TranscriptEntry::Message(ChatMessage {
@@ -474,8 +540,10 @@ impl App {
             tick_count: 0,
             show_thinking,
             show_tool_output,
+            safety_model_name: model_name.clone(),
             model_name,
             reasoning_effort,
+            safety_reasoning_effort: reasoning_effort,
             planning_agents,
             session_stats: StatsTotals::default(),
             selected_command: SlashCommand::NewSession,
@@ -504,12 +572,43 @@ impl App {
         self.approval_mode
     }
 
+    pub fn safety_model_name(&self) -> &str {
+        &self.safety_model_name
+    }
+
+    pub fn safety_reasoning_effort(&self) -> ReasoningEffort {
+        self.safety_reasoning_effort
+    }
+
     pub fn pending_write_approval(&self) -> Option<&PendingWriteApproval> {
         self.pending_write_approvals.front()
     }
 
     pub fn has_pending_write_approval(&self) -> bool {
         !self.pending_write_approvals.is_empty()
+    }
+
+    pub fn pending_shell_approval(&self) -> Option<&PendingShellApproval> {
+        self.pending_shell_approvals.front()
+    }
+
+    pub fn has_pending_shell_approval(&self) -> bool {
+        !self.pending_shell_approvals.is_empty()
+    }
+
+    pub fn shell_approval_editing(&self) -> bool {
+        self.pending_shell_approval()
+            .is_some_and(PendingShellApproval::is_editing)
+    }
+
+    pub fn shell_approval_editor_can_move_up(&self) -> bool {
+        self.pending_shell_approval()
+            .is_some_and(PendingShellApproval::editor_can_move_up)
+    }
+
+    pub fn shell_approval_editor_can_move_down(&self) -> bool {
+        self.pending_shell_approval()
+            .is_some_and(PendingShellApproval::editor_can_move_down)
     }
 
     pub fn pending_ask_user(&self) -> Option<&PendingAskUser> {
@@ -822,6 +921,7 @@ impl App {
         self.estimated_session_history_tokens = 0;
         self.pending_reply = None;
         self.pending_write_approvals.clear();
+        self.pending_shell_approvals.clear();
         self.pending_plan_review = None;
         self.pending_ask_user = None;
         self.approval_mode = self.initial_approval_mode;
@@ -842,12 +942,20 @@ impl App {
         self.reasoning_effort = reasoning_effort;
     }
 
+    pub(crate) fn set_safety_reasoning_effort(&mut self, reasoning_effort: ReasoningEffort) {
+        self.safety_reasoning_effort = reasoning_effort;
+    }
+
     pub(crate) fn set_session_stats(&mut self, session_stats: StatsTotals) {
         self.session_stats = session_stats;
     }
 
     pub(crate) fn set_model_name(&mut self, model_name: impl Into<String>) {
         self.model_name = model_name.into();
+    }
+
+    pub(crate) fn set_safety_model_name(&mut self, model_name: impl Into<String>) {
+        self.safety_model_name = model_name.into();
     }
 
     pub(crate) fn set_planning_agents(&mut self, planning_agents: Vec<PlanningAgentConfig>) {
@@ -862,6 +970,7 @@ impl App {
     pub(crate) fn cancel_pending_reply(&mut self) {
         self.pending_reply = None;
         self.pending_write_approvals.clear();
+        self.pending_shell_approvals.clear();
         self.pending_ask_user = None;
         self.push_error_message("Request cancelled.");
     }
@@ -931,6 +1040,47 @@ impl App {
         self.enqueue_write_approval(Some(subagent_id), request_id, tool_name, arguments);
     }
 
+    pub(super) fn begin_shell_approval(
+        &mut self,
+        request_id: String,
+        risk: CommandRisk,
+        risk_explanation: String,
+        command: String,
+        working_directory: String,
+        reason: String,
+    ) {
+        self.enqueue_shell_approval(
+            None,
+            request_id,
+            risk,
+            risk_explanation,
+            command,
+            working_directory,
+            reason,
+        );
+    }
+
+    pub(super) fn begin_subagent_shell_approval(
+        &mut self,
+        subagent_id: String,
+        request_id: String,
+        risk: CommandRisk,
+        risk_explanation: String,
+        command: String,
+        working_directory: String,
+        reason: String,
+    ) {
+        self.enqueue_shell_approval(
+            Some(subagent_id),
+            request_id,
+            risk,
+            risk_explanation,
+            command,
+            working_directory,
+            reason,
+        );
+    }
+
     fn enqueue_write_approval(
         &mut self,
         source_label: Option<String>,
@@ -956,6 +1106,37 @@ impl App {
             approval.tool_name, source_context
         ));
         self.pending_write_approvals.push_back(approval);
+    }
+
+    fn enqueue_shell_approval(
+        &mut self,
+        source_label: Option<String>,
+        request_id: String,
+        risk: CommandRisk,
+        risk_explanation: String,
+        command: String,
+        working_directory: String,
+        reason: String,
+    ) {
+        let source_context = source_label
+            .as_ref()
+            .map(|source| format!(" from `{source}`"))
+            .unwrap_or_default();
+        let approval = PendingShellApproval::new(
+            request_id,
+            risk,
+            risk_explanation,
+            command,
+            working_directory,
+            reason,
+            source_label,
+        );
+        self.push_agent_message(format!(
+            "{} risk shell approval required{}.",
+            approval.risk.label(),
+            source_context
+        ));
+        self.pending_shell_approvals.push_back(approval);
     }
 
     pub(super) fn resolve_write_approval(
@@ -990,6 +1171,120 @@ impl App {
             }
         }
         Some(pending)
+    }
+
+    pub(super) fn move_shell_approval_selection(&mut self, direction: isize) {
+        let Some(pending) = self.pending_shell_approvals.front_mut() else {
+            return;
+        };
+        pending.move_selection(direction);
+    }
+
+    pub(super) fn cancel_shell_approval_editing(&mut self) -> bool {
+        let Some(pending) = self.pending_shell_approvals.front_mut() else {
+            return false;
+        };
+        if pending.edit_mode != Some(ShellApprovalEditMode::Deny) {
+            return false;
+        }
+        pending.cancel_editing();
+        true
+    }
+
+    pub(super) fn toggle_shell_approval_detail_editing(&mut self) {
+        let Some(pending) = self.pending_shell_approvals.front_mut() else {
+            return;
+        };
+        if pending.selected_index != 3 {
+            return;
+        }
+        pending.edit_mode = match pending.edit_mode {
+            Some(ShellApprovalEditMode::Deny) => None,
+            _ => Some(ShellApprovalEditMode::Deny),
+        };
+    }
+
+    pub(super) fn apply_shell_approval_input(&mut self, input: Input) {
+        let Some(pending) = self.pending_shell_approvals.front_mut() else {
+            return;
+        };
+        let Some(editor) = pending.active_editor_mut() else {
+            return;
+        };
+        editor.input(input);
+    }
+
+    pub(super) fn paste_into_shell_approval_detail(&mut self, text: &str) {
+        let Some(pending) = self.pending_shell_approvals.front_mut() else {
+            return;
+        };
+        let Some(editor) = pending.active_editor_mut() else {
+            return;
+        };
+        editor.insert_str(normalize_pasted_line_endings(text));
+    }
+
+    pub(super) fn submit_shell_approval(
+        &mut self,
+    ) -> Option<(String, ShellApprovalDecision, CommandRisk)> {
+        let pending = self.pending_shell_approvals.front_mut()?;
+        if pending.is_editing() {
+            if pending.edit_mode == Some(ShellApprovalEditMode::Pattern)
+                && pending.selected_decision().is_none()
+            {
+                self.push_error_message("Provide a non-empty shell approval pattern.");
+                return None;
+            }
+            if pending.edit_mode == Some(ShellApprovalEditMode::Deny) {
+                pending.cancel_editing();
+            }
+        } else if pending.selected_index == 1 {
+            pending.begin_editing();
+            return None;
+        }
+
+        let pending = self.pending_shell_approvals.pop_front()?;
+        let source_context = pending
+            .source_label
+            .as_ref()
+            .map(|source| format!(" from `{source}`"))
+            .unwrap_or_default();
+        let decision = pending
+            .selected_decision()
+            .unwrap_or(ShellApprovalDecision::Deny(None));
+        match &decision {
+            ShellApprovalDecision::AllowOnce => self.push_agent_message(format!(
+                "Approved {} risk shell command once{}.",
+                pending.risk.as_str(),
+                source_context
+            )),
+            ShellApprovalDecision::AllowPattern(pattern) => self.push_agent_message(format!(
+                "Approved {} risk shell commands matching `{}`{}.",
+                pending.risk.as_str(),
+                pattern,
+                source_context
+            )),
+            ShellApprovalDecision::AllowAllRisk => self.push_agent_message(format!(
+                "Approved all future {} risk shell commands this session{}.",
+                pending.risk.as_str(),
+                source_context
+            )),
+            ShellApprovalDecision::Deny(note) => {
+                let suffix = note
+                    .as_deref()
+                    .filter(|note| !note.is_empty())
+                    .map(|note| format!(" ({note})"))
+                    .unwrap_or_default();
+                self.push_error_message(format!(
+                    "Denied {} risk shell command{}{}.",
+                    pending.risk.as_str(),
+                    source_context,
+                    suffix
+                ));
+            }
+        }
+
+        Some((pending.request_id, decision, pending.risk))
     }
 
     pub fn push_agent_message(&mut self, text: impl Into<String>) {
@@ -1131,10 +1426,15 @@ impl App {
             .iter()
             .position(|model| model.name == self.model_name)
             .unwrap_or(0);
+        let safety_selected_index = model_registry::models()
+            .iter()
+            .position(|model| model.name == self.safety_model_name)
+            .unwrap_or(0);
         self.picker = Some(SelectionPicker::Model {
             active_tab: ModelPickerTab::NormalAgent,
             normal_selected_index,
             planning_selected_index: 0,
+            safety_selected_index,
         });
     }
 
@@ -1165,6 +1465,17 @@ impl App {
                         .find(|agent| agent.model_name == model_name)
                         .map(|agent| *level == agent.reasoning_effort)
                         .unwrap_or(false)
+                })
+                .unwrap_or_else(|| {
+                    options
+                        .iter()
+                        .position(|level| *level == default_planning_reasoning(&model_name))
+                        .unwrap_or(0)
+                }),
+            ReasoningPickerTarget::SafetyModel => options
+                .iter()
+                .position(|level| {
+                    model_name == self.safety_model_name && *level == self.safety_reasoning_effort
                 })
                 .unwrap_or_else(|| {
                     options
@@ -1243,6 +1554,7 @@ impl App {
                 active_tab,
                 normal_selected_index,
                 planning_selected_index,
+                safety_selected_index,
             } => match active_tab {
                 ModelPickerTab::NormalAgent => model_registry::models()
                     .get(normal_selected_index)
@@ -1256,6 +1568,13 @@ impl App {
                         ReasoningPickerTarget::PlanningAgent,
                         model_name,
                     );
+                    None
+                }
+                ModelPickerTab::SafetyModel => {
+                    let model_name = model_registry::models()
+                        .get(safety_selected_index)
+                        .map(|model| model.name.to_string())?;
+                    self.open_reasoning_picker_for(ReasoningPickerTarget::SafetyModel, model_name);
                     None
                 }
             },
@@ -1286,6 +1605,14 @@ impl App {
                             self.planning_agents.push(planning_agent.clone());
                         }
                         PickerSelection::PlanningAgent(planning_agent)
+                    }
+                    ReasoningPickerTarget::SafetyModel => {
+                        self.safety_model_name = model_name.clone();
+                        self.safety_reasoning_effort = reasoning_effort;
+                        PickerSelection::SafetySelection {
+                            model_name,
+                            reasoning_effort,
+                        }
                     }
                 }),
         }
@@ -1723,6 +2050,7 @@ impl App {
                 active_tab,
                 normal_selected_index,
                 planning_selected_index,
+                safety_selected_index,
             } => match active_tab {
                 ModelPickerTab::NormalAgent => {
                     let len = model_registry::models().len();
@@ -1739,6 +2067,15 @@ impl App {
                     }
                     *planning_selected_index = (*planning_selected_index as isize + direction)
                         .rem_euclid(planning_len as isize)
+                        as usize;
+                }
+                ModelPickerTab::SafetyModel => {
+                    let len = model_registry::models().len();
+                    if len == 0 {
+                        return;
+                    }
+                    *safety_selected_index = (*safety_selected_index as isize + direction)
+                        .rem_euclid(len as isize)
                         as usize;
                 }
             },
@@ -2052,6 +2389,232 @@ impl PendingAskUserAnswer {
     }
 }
 
+impl PendingShellApproval {
+    fn new(
+        request_id: String,
+        risk: CommandRisk,
+        risk_explanation: String,
+        command: String,
+        working_directory: String,
+        reason: String,
+        source_label: Option<String>,
+    ) -> Self {
+        let mut pattern_input =
+            new_text_area_with_text(&default_shell_approval_pattern(&command), "");
+        pattern_input.move_cursor(CursorMove::End);
+        Self {
+            request_id,
+            risk,
+            risk_explanation,
+            command: command.clone(),
+            working_directory,
+            reason,
+            source_label,
+            selected_index: 0,
+            edit_mode: None,
+            pattern_input,
+            deny_input: new_text_area_with_text("", ""),
+        }
+    }
+
+    fn option_count(&self) -> usize {
+        4
+    }
+
+    fn move_selection(&mut self, direction: isize) {
+        self.selected_index = (self.selected_index as isize + direction)
+            .rem_euclid(self.option_count() as isize) as usize;
+        match self.selected_index {
+            1 => {
+                self.edit_mode = Some(ShellApprovalEditMode::Pattern);
+                self.pattern_input.move_cursor(CursorMove::End);
+            }
+            3 => {
+                if self.edit_mode == Some(ShellApprovalEditMode::Pattern) {
+                    self.edit_mode = None;
+                }
+            }
+            _ => self.edit_mode = None,
+        }
+    }
+
+    fn selected_edit_mode(&self) -> Option<ShellApprovalEditMode> {
+        match self.selected_index {
+            1 => Some(ShellApprovalEditMode::Pattern),
+            3 => Some(ShellApprovalEditMode::Deny),
+            _ => None,
+        }
+    }
+
+    fn begin_editing(&mut self) {
+        self.edit_mode = self.selected_edit_mode();
+        if self.edit_mode == Some(ShellApprovalEditMode::Pattern) {
+            self.pattern_input.move_cursor(CursorMove::End);
+        }
+    }
+
+    fn cancel_editing(&mut self) {
+        self.edit_mode = None;
+    }
+
+    fn is_editing(&self) -> bool {
+        self.edit_mode.is_some()
+    }
+
+    fn active_editor_mut(&mut self) -> Option<&mut TextArea<'static>> {
+        match self.edit_mode {
+            Some(ShellApprovalEditMode::Pattern) => Some(&mut self.pattern_input),
+            Some(ShellApprovalEditMode::Deny) => Some(&mut self.deny_input),
+            None => None,
+        }
+    }
+
+    fn active_editor(&self) -> Option<&TextArea<'static>> {
+        match self.edit_mode {
+            Some(ShellApprovalEditMode::Pattern) => Some(&self.pattern_input),
+            Some(ShellApprovalEditMode::Deny) => Some(&self.deny_input),
+            None => None,
+        }
+    }
+
+    fn editor_can_move_up(&self) -> bool {
+        self.active_editor()
+            .is_some_and(|editor| editor.cursor().0 > 0)
+    }
+
+    fn editor_can_move_down(&self) -> bool {
+        self.active_editor().is_some_and(|editor| {
+            let current_row = editor.cursor().0;
+            current_row + 1 < editor.lines().len()
+        })
+    }
+
+    fn selected_decision(&self) -> Option<ShellApprovalDecision> {
+        match self.selected_index {
+            0 => Some(ShellApprovalDecision::AllowOnce),
+            1 => {
+                let pattern = self.pattern_input.lines().join("\n").trim().to_string();
+                (!pattern.is_empty()).then_some(ShellApprovalDecision::AllowPattern(pattern))
+            }
+            2 => Some(ShellApprovalDecision::AllowAllRisk),
+            3 => {
+                let note = self.deny_input.lines().join("\n").trim().to_string();
+                Some(ShellApprovalDecision::Deny(
+                    (!note.is_empty()).then_some(note),
+                ))
+            }
+            _ => None,
+        }
+    }
+}
+
+fn default_shell_approval_pattern(command: &str) -> String {
+    let first_line = command.lines().next().unwrap_or("").trim();
+    if first_line.is_empty() {
+        return command.trim().to_string();
+    }
+
+    let tokens = shell_command_prefix_tokens(first_line);
+    let word_tokens = tokens
+        .iter()
+        .copied()
+        .filter(|token| !is_shell_redirection_token(token))
+        .collect::<Vec<_>>();
+    let has_extra_shell_syntax = command.lines().nth(1).is_some()
+        || tokens.iter().any(|token| is_shell_redirection_token(token));
+
+    match word_tokens.as_slice() {
+        [] => first_line.to_string(),
+        [single] if has_extra_shell_syntax => format!("{single} *"),
+        [single] => (*single).to_string(),
+        many => format!("{} *", many[..many.len() - 1].join(" ")),
+    }
+}
+
+fn shell_command_prefix_tokens(line: &str) -> Vec<&str> {
+    let mut tokens = Vec::new();
+    let mut index = 0;
+
+    while index < line.len() {
+        let ch = line[index..]
+            .chars()
+            .next()
+            .expect("valid char boundary while tokenizing shell command");
+        if ch.is_whitespace() {
+            index += ch.len_utf8();
+            continue;
+        }
+        if starts_with_shell_control_operator(&line[index..]) {
+            break;
+        }
+
+        let start = index;
+        let mut in_single_quotes = false;
+        let mut in_double_quotes = false;
+        let mut escaped = false;
+
+        while index < line.len() {
+            let ch = line[index..]
+                .chars()
+                .next()
+                .expect("valid char boundary while scanning shell token");
+
+            if escaped {
+                escaped = false;
+                index += ch.len_utf8();
+                continue;
+            }
+
+            if !in_single_quotes && ch == '\\' {
+                escaped = true;
+                index += ch.len_utf8();
+                continue;
+            }
+
+            if !in_double_quotes && ch == '\'' {
+                in_single_quotes = !in_single_quotes;
+                index += ch.len_utf8();
+                continue;
+            }
+
+            if !in_single_quotes && ch == '"' {
+                in_double_quotes = !in_double_quotes;
+                index += ch.len_utf8();
+                continue;
+            }
+
+            if !in_single_quotes && !in_double_quotes {
+                if ch.is_whitespace() || starts_with_shell_control_operator(&line[index..]) {
+                    break;
+                }
+            }
+
+            index += ch.len_utf8();
+        }
+
+        tokens.push(&line[start..index]);
+
+        if starts_with_shell_control_operator(&line[index..]) {
+            break;
+        }
+    }
+
+    tokens
+}
+
+fn starts_with_shell_control_operator(input: &str) -> bool {
+    input.starts_with("&&")
+        || input.starts_with("||")
+        || input.starts_with('|')
+        || input.starts_with(';')
+        || input.starts_with('&')
+}
+
+fn is_shell_redirection_token(token: &str) -> bool {
+    let trimmed = token.trim_start_matches(|ch: char| ch.is_ascii_digit());
+    trimmed.starts_with('<') || trimmed.starts_with('>')
+}
+
 impl Default for CommandRecallState {
     fn default() -> Self {
         Self {
@@ -2198,6 +2761,7 @@ mod tests {
     use super::*;
     use crate::ask_user::{AskUserAnswer, AskUserQuestion, AskUserRequest};
     use ratatui::{style::Color, text::Line};
+    use ratatui_textarea::CursorMove;
 
     fn sample_ask_user_request() -> AskUserRequest {
         AskUserRequest {
@@ -2377,9 +2941,33 @@ mod tests {
                 active_tab: ModelPickerTab::NormalAgent,
                 normal_selected_index: 1,
                 planning_selected_index: 0,
+                safety_selected_index: 1,
             })
         );
         assert_eq!(app.overlay_height(), 6);
+    }
+
+    #[test]
+    fn safety_reasoning_picker_uses_current_safety_selection() {
+        let mut app = App::new(true, false, "gpt-5.4-mini", ReasoningEffort::Medium);
+        app.set_safety_model_name("gpt-5.4");
+        app.set_safety_reasoning_effort(ReasoningEffort::High);
+
+        app.open_reasoning_picker_for(ReasoningPickerTarget::SafetyModel, "gpt-5.4".into());
+
+        assert_eq!(
+            app.selection_picker(),
+            Some(&SelectionPicker::Reasoning {
+                target: ReasoningPickerTarget::SafetyModel,
+                model_name: "gpt-5.4".into(),
+                options: vec![
+                    ReasoningEffort::Low,
+                    ReasoningEffort::Medium,
+                    ReasoningEffort::High,
+                ],
+                selected_index: 2,
+            })
+        );
     }
 
     #[test]
@@ -2610,5 +3198,74 @@ mod tests {
         assert_eq!(app.composer.cursor(), (0, 0));
         app.apply(crate::app::actions::Action::SelectPreviousCommand);
         assert_eq!(app.composer.lines(), ["alpha"]);
+    }
+
+    #[test]
+    fn shell_approval_editor_vertical_movement_tracks_multiline_pattern_bounds() {
+        let mut app = App::new(true, false, "gpt-5-mini", ReasoningEffort::Medium);
+        app.begin_shell_approval(
+            "call-1".into(),
+            CommandRisk::Low,
+            "read-only inspection command with no obvious mutation".into(),
+            "first\nsecond\nthird".into(),
+            ".".into(),
+            "review shell command".into(),
+        );
+        app.pending_shell_approvals
+            .front_mut()
+            .expect("shell approval")
+            .pattern_input = TextArea::from(["first", "second", "third"]);
+
+        app.move_shell_approval_selection(1);
+        assert!(app.shell_approval_editing());
+        assert!(!app.shell_approval_editor_can_move_up());
+        assert!(app.shell_approval_editor_can_move_down());
+
+        let pending = app
+            .pending_shell_approvals
+            .front_mut()
+            .expect("shell approval");
+        pending.pattern_input.move_cursor(CursorMove::Down);
+
+        assert!(app.shell_approval_editor_can_move_up());
+        assert!(app.shell_approval_editor_can_move_down());
+
+        let pending = app
+            .pending_shell_approvals
+            .front_mut()
+            .expect("shell approval");
+        pending.pattern_input.move_cursor(CursorMove::Down);
+
+        assert!(app.shell_approval_editor_can_move_up());
+        assert!(!app.shell_approval_editor_can_move_down());
+    }
+
+    #[test]
+    fn shell_approval_pattern_defaults_to_program_prefix_for_heredoc_commands() {
+        let mut app = App::new(true, false, "gpt-5-mini", ReasoningEffort::Medium);
+        app.begin_shell_approval(
+            "call-1".into(),
+            CommandRisk::Low,
+            "read-only inspection command with no obvious mutation".into(),
+            "python3 - <<'PY'\nprint('hello world')\nPY".into(),
+            ".".into(),
+            "inspect output".into(),
+        );
+
+        let pending = app.pending_shell_approvals.front().expect("shell approval");
+        assert_eq!(pending.pattern_input.lines(), ["python3 *"]);
+    }
+
+    #[test]
+    fn shell_approval_pattern_preserves_quoted_prefix_before_wildcard() {
+        assert_eq!(
+            default_shell_approval_pattern(r#"rg "foo bar" src"#),
+            r#"rg "foo bar" *"#
+        );
+    }
+
+    #[test]
+    fn shell_approval_pattern_keeps_single_word_commands_exact() {
+        assert_eq!(default_shell_approval_pattern("pwd"), "pwd");
     }
 }

@@ -7,7 +7,9 @@ use ratatui::{
 };
 
 use crate::{
-    app::{App, ModelPickerTab, PendingAskUser, SelectionPicker, SlashCommand},
+    app::{
+        App, ModelPickerTab, PendingAskUser, PendingShellApproval, SelectionPicker, SlashCommand,
+    },
     composer::ComposerLayout,
 };
 
@@ -21,6 +23,8 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     let accent = accent_color(app.mode(), app.plan_active());
     let input_height = if let Some(pending) = app.pending_write_approval() {
         pending_write_approval_height(pending, screen.width)
+    } else if let Some(pending) = app.pending_shell_approval() {
+        pending_shell_approval_height(pending, screen.width)
     } else if let Some(pending) = app.pending_ask_user() {
         pending_ask_user_height(pending, screen.width)
     } else if app.plan_review_selection_active() {
@@ -55,6 +59,11 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 fn render_input(frame: &mut Frame, app: &mut App, area: Rect, accent: Color) {
     if let Some(pending) = app.pending_write_approval() {
         render_write_approval_prompt(frame, pending, area, accent);
+        return;
+    }
+
+    if let Some(pending) = app.pending_shell_approval() {
+        render_shell_approval_prompt(frame, pending, area, accent);
         return;
     }
 
@@ -427,6 +436,38 @@ fn render_detail_lines(lines: Vec<Line<'static>>, editing: bool) -> Vec<Line<'st
         .collect()
 }
 
+fn command_block_style() -> Style {
+    Style::default().bg(Color::Rgb(24, 24, 24))
+}
+
+fn render_static_text_lines(
+    text: &str,
+    content_width: usize,
+    style: Option<Style>,
+) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    for raw_line in text.split('\n') {
+        let wrapped = if raw_line.is_empty() {
+            vec![String::new()]
+        } else {
+            wrap_text(raw_line, content_width.max(1))
+        };
+        match style {
+            Some(style) => lines.extend(wrapped.into_iter().map(|row| {
+                let content = format!(" {row} ");
+                Line::from(Span::styled(content, style))
+            })),
+            None => lines.extend(wrapped.into_iter().map(Line::from)),
+        }
+    }
+
+    if lines.is_empty() {
+        vec![Line::default()]
+    } else {
+        lines
+    }
+}
+
 fn render_aux_textarea_lines(
     textarea: &ratatui_textarea::TextArea<'_>,
     content_width: usize,
@@ -557,6 +598,184 @@ fn render_write_approval_prompt(
     frame.render_widget(prompt, area);
 }
 
+fn render_shell_approval_prompt(
+    frame: &mut Frame,
+    pending: &PendingShellApproval,
+    area: Rect,
+    accent: Color,
+) {
+    let content_width = composer_content_width(area.width);
+    let selected_style = Style::default().fg(accent).add_modifier(Modifier::BOLD);
+    let unselected_style = Style::default().fg(Color::Gray);
+    let mut lines = Vec::new();
+    if let Some(source_label) = &pending.source_label {
+        lines.push(Line::from(vec![
+            Span::styled(
+                "Source:",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" "),
+            Span::styled(source_label.clone(), Style::default().fg(Color::Yellow)),
+        ]));
+    }
+    lines.push(Line::from(Span::styled(
+        format!(
+            "Risk: {}; {}",
+            pending.risk.label(),
+            pending.risk_explanation
+        ),
+        Style::default().fg(accent).add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(Span::raw(format!("Reason: {}", pending.reason))));
+    lines.push(Line::from(Span::raw(format!(
+        "Working directory: {}",
+        pending.working_directory
+    ))));
+    lines.push(Line::from(Span::raw("Command:")));
+    lines.extend(render_detail_lines(
+        render_static_text_lines(
+            &pending.command,
+            content_width.saturating_sub(4).max(1),
+            Some(command_block_style()),
+        ),
+        false,
+    ));
+
+    let option_style = |selected: bool| {
+        if selected {
+            selected_style
+        } else {
+            Style::default()
+        }
+    };
+    let marker_style = |selected: bool| {
+        if selected {
+            selected_style
+        } else {
+            unselected_style
+        }
+    };
+
+    lines.push(Line::from(vec![
+        Span::styled(
+            if pending.selected_index == 0 {
+                "›"
+            } else {
+                " "
+            },
+            marker_style(pending.selected_index == 0),
+        ),
+        Span::raw(" "),
+        Span::styled("Approve once", option_style(pending.selected_index == 0)),
+    ]));
+
+    lines.push(Line::from(vec![
+        Span::styled(
+            if pending.selected_index == 1 {
+                "›"
+            } else {
+                " "
+            },
+            marker_style(pending.selected_index == 1),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            "Approve commands starting with",
+            option_style(pending.selected_index == 1),
+        ),
+    ]));
+    lines.extend(render_detail_lines(
+        render_aux_textarea_lines(
+            &pending.pattern_input,
+            content_width.saturating_sub(2).max(1),
+            accent,
+            pending.selected_index == 1,
+        ),
+        pending.selected_index == 1,
+    ));
+
+    lines.push(Line::from(vec![
+        Span::styled(
+            if pending.selected_index == 2 {
+                "›"
+            } else {
+                " "
+            },
+            marker_style(pending.selected_index == 2),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            format!("Approve all {} risk commands", pending.risk.as_str()),
+            option_style(pending.selected_index == 2),
+        ),
+    ]));
+
+    lines.push(Line::from(vec![
+        Span::styled(
+            if pending.selected_index == 3 {
+                "›"
+            } else {
+                " "
+            },
+            marker_style(pending.selected_index == 3),
+        ),
+        Span::raw(" "),
+        Span::styled("Deny", option_style(pending.selected_index == 3)),
+    ]));
+
+    let deny_text = pending.deny_input.lines().join("\n");
+    if pending.edit_mode == Some(crate::app::ShellApprovalEditMode::Deny)
+        || !deny_text.trim().is_empty()
+    {
+        lines.push(Line::from(Span::styled(
+            if pending.edit_mode == Some(crate::app::ShellApprovalEditMode::Deny) {
+                "Details (editing)"
+            } else {
+                "Details"
+            },
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
+        )));
+        lines.extend(render_detail_lines(
+            render_aux_textarea_lines(
+                &pending.deny_input,
+                content_width.saturating_sub(2).max(1),
+                accent,
+                pending.edit_mode == Some(crate::app::ShellApprovalEditMode::Deny),
+            ),
+            pending.edit_mode == Some(crate::app::ShellApprovalEditMode::Deny),
+        ));
+    } else if pending.selected_index == 3 {
+        lines.push(Line::from(Span::styled(
+            "Tab to add optional deny details.",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+
+    lines.push(Line::default());
+    let hint = if pending.selected_index == 1 {
+        "Use * as a wildcard. Up/Down switch options  Enter submits selected option"
+    } else if pending.selected_index == 3 {
+        "Tab edits deny details  Up/Down switch options  Enter submits selected option"
+    } else {
+        "Up/Down switch options  Enter submits selected option"
+    };
+    lines.push(Line::from(Span::styled(
+        hint,
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let prompt = Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+        Block::default()
+            .title(" Shell Approval Required ")
+            .borders(Borders::ALL)
+            .padding(Padding::horizontal(1))
+            .border_style(Style::default().fg(Color::Yellow)),
+    );
+    frame.render_widget(prompt, area);
+}
+
 fn render_plan_review_prompt(frame: &mut Frame, app: &App, area: Rect, accent: Color) {
     let selected_index = app.selected_plan_review_index().unwrap_or(0);
     let selected_style = Style::default().fg(accent).add_modifier(Modifier::BOLD);
@@ -672,6 +891,7 @@ fn render_selection_picker(
             active_tab,
             normal_selected_index,
             planning_selected_index,
+            safety_selected_index,
         } => {
             let mut lines = vec![model_picker_tab_line(*active_tab, accent)];
             let row_budget = visible_rows.saturating_sub(1);
@@ -723,6 +943,30 @@ fn render_selection_picker(
                             }),
                     );
                 }
+                ModelPickerTab::SafetyModel => {
+                    lines.extend(
+                        crate::model_registry::models()
+                            .iter()
+                            .take(row_budget)
+                            .enumerate()
+                            .map(|(index, model)| {
+                                let detail = if app.safety_model_name() == model.name {
+                                    format!(
+                                        "selected  effort: {}",
+                                        app.safety_reasoning_effort().as_str()
+                                    )
+                                } else {
+                                    "Enter sets effort".into()
+                                };
+                                selection_picker_line(
+                                    index == *safety_selected_index,
+                                    model.name,
+                                    detail,
+                                    accent,
+                                )
+                            }),
+                    );
+                }
             }
             (" Models ", lines)
         }
@@ -747,6 +991,9 @@ fn render_selection_picker(
                             crate::app::ReasoningPickerTarget::PlanningAgent => {
                                 format!("for planning with {}", model_name)
                             }
+                            crate::app::ReasoningPickerTarget::SafetyModel => {
+                                format!("for safety classification with {}", model_name)
+                            }
                         },
                         accent,
                     )
@@ -755,6 +1002,7 @@ fn render_selection_picker(
             let title = match target {
                 crate::app::ReasoningPickerTarget::NormalAgent => " Reasoning ",
                 crate::app::ReasoningPickerTarget::PlanningAgent => " Planning Reasoning ",
+                crate::app::ReasoningPickerTarget::SafetyModel => " Safety Reasoning ",
             };
             (title, lines)
         }
@@ -783,11 +1031,18 @@ fn model_picker_tab_line(active_tab: ModelPickerTab, accent: Color) -> Line<'sta
     } else {
         Style::default().fg(Color::Gray)
     };
+    let safety_style = if active_tab == ModelPickerTab::SafetyModel {
+        Style::default().fg(accent).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Gray)
+    };
 
     Line::from(vec![
         Span::styled("Normal agent", normal_style),
         Span::styled("  |  ", Style::default().fg(Color::DarkGray)),
         Span::styled("Planning agents", planning_style),
+        Span::styled("  |  ", Style::default().fg(Color::DarkGray)),
+        Span::styled("Safety model", safety_style),
     ])
 }
 
@@ -826,9 +1081,17 @@ fn render_mode(frame: &mut Frame, app: &App, area: Rect, accent: Color) {
             ),
             Style::default().fg(Color::Yellow),
         ));
+    } else if let Some(pending) = app.pending_shell_approval() {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(
+            format!("Approval pending: {} risk shell", pending.risk.label()),
+            Style::default().fg(Color::Yellow),
+        ));
     } else {
         let hint = match app.mode() {
-            crate::app::AccessMode::ReadOnly => "  Tab switches to write mode for edits",
+            crate::app::AccessMode::ReadOnly => {
+                "  Tab switches to write mode for edits and higher-risk shell commands"
+            }
             crate::app::AccessMode::ReadWrite => "",
         };
         if !hint.is_empty() {
@@ -867,6 +1130,63 @@ fn pending_write_approval_height(
         .unwrap_or(0);
     let summary_lines = wrap_text(&pending.summary, content_width.max(1)).len();
     (source_lines + summary_lines + 3 + 2) as u16
+}
+
+fn pending_shell_approval_height(pending: &PendingShellApproval, panel_width: u16) -> u16 {
+    let content_width = panel_width.saturating_sub(4) as usize;
+    let source_lines = pending
+        .source_label
+        .as_ref()
+        .map(|source| wrap_text(&format!("Source: {source}"), content_width.max(1)).len())
+        .unwrap_or(0);
+    let base_lines = source_lines
+        + wrap_text(
+            &format!(
+                "Risk: {}; {}",
+                pending.risk.label(),
+                pending.risk_explanation
+            ),
+            content_width.max(1),
+        )
+        .len()
+        + wrap_text(&format!("Reason: {}", pending.reason), content_width.max(1)).len()
+        + wrap_text(
+            &format!("Working directory: {}", pending.working_directory),
+            content_width.max(1),
+        )
+        .len()
+        + 1
+        + render_static_text_lines(
+            &pending.command,
+            content_width.saturating_sub(4).max(1),
+            Some(command_block_style()),
+        )
+        .len()
+        + 4;
+    let pattern_lines = ComposerLayout::new(
+        pending.pattern_input.lines(),
+        content_width.saturating_sub(2).max(1),
+    )
+    .rows()
+    .len()
+    .max(1);
+    let deny_text = pending.deny_input.lines().join("\n");
+    let deny_lines = if pending.edit_mode == Some(crate::app::ShellApprovalEditMode::Deny)
+        || !deny_text.trim().is_empty()
+    {
+        1 + ComposerLayout::new(
+            pending.deny_input.lines(),
+            content_width.saturating_sub(2).max(1),
+        )
+        .rows()
+        .len()
+        .max(1)
+    } else if pending.selected_index == 3 {
+        1
+    } else {
+        0
+    };
+    (base_lines + pattern_lines + deny_lines + 4) as u16
 }
 
 fn pending_ask_user_height(pending: &PendingAskUser, panel_width: u16) -> u16 {
@@ -1025,6 +1345,7 @@ fn format_compact_tokens(tokens: u64) -> String {
 #[cfg(test)]
 mod tests {
     use ratatui::{Terminal, backend::TestBackend};
+    use ratatui_textarea::TextArea;
     use std::{
         fs,
         path::PathBuf,
@@ -1444,6 +1765,37 @@ mod tests {
     }
 
     #[test]
+    fn render_shows_multiline_shell_command_as_multiple_rows() {
+        let backend = TestBackend::new(120, 18);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut app = App::new(true, false, "gpt-5.4-mini", ReasoningEffort::Medium);
+        app.composer_mut().insert_str("run shell");
+        app.apply(Action::SubmitMessage);
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: crate::llm::StreamEvent::ShellApprovalRequested {
+                request_id: "call-1".into(),
+                risk: crate::app::CommandRisk::Low,
+                risk_explanation: "read-only inspection command with no obvious mutation".into(),
+                command: "printf 'one\\n'\nprintf 'two\\n'".into(),
+                working_directory: ".".into(),
+                reason: "inspect output".into(),
+            },
+        });
+
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render succeeds");
+
+        let rendered = buffer_string(terminal.backend());
+        let lines = buffer_lines(terminal.backend());
+        assert!(rendered.contains("Shell Approval Required"));
+        assert!(rendered.contains("Command:"));
+        assert!(lines.iter().any(|line| line.contains("printf 'one\\n'")));
+        assert!(lines.iter().any(|line| line.contains("printf 'two\\n'")));
+    }
+
+    #[test]
     fn render_highlights_selected_plan_review_option() {
         let backend = TestBackend::new(120, 12);
         let mut terminal = Terminal::new(backend).expect("test terminal");
@@ -1506,6 +1858,41 @@ mod tests {
             source_label: None,
         };
         assert!(pending_write_approval_height(&wrapped, 36) > 6);
+    }
+
+    #[test]
+    fn pending_shell_approval_height_grows_for_multiline_commands() {
+        let short = crate::app::PendingShellApproval {
+            request_id: "call-1".into(),
+            risk: crate::app::CommandRisk::Low,
+            risk_explanation: "read-only inspection command with no obvious mutation".into(),
+            command: "pwd".into(),
+            working_directory: ".".into(),
+            reason: "inspect workspace".into(),
+            source_label: None,
+            selected_index: 0,
+            edit_mode: None,
+            pattern_input: TextArea::from(["pwd"]),
+            deny_input: TextArea::default(),
+        };
+        let multiline = crate::app::PendingShellApproval {
+            request_id: "call-2".into(),
+            risk: crate::app::CommandRisk::Low,
+            risk_explanation: "read-only inspection command with no obvious mutation".into(),
+            command: "printf one\nprintf two".into(),
+            working_directory: ".".into(),
+            reason: "inspect workspace".into(),
+            source_label: None,
+            selected_index: 0,
+            edit_mode: None,
+            pattern_input: TextArea::from(["printf one", "printf two"]),
+            deny_input: TextArea::default(),
+        };
+
+        assert!(
+            pending_shell_approval_height(&multiline, 120)
+                > pending_shell_approval_height(&short, 120)
+        );
     }
 
     #[test]

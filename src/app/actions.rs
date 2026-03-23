@@ -2,8 +2,8 @@ use ratatui_textarea::Input;
 use rig::completion::Message as RigMessage;
 
 use super::state::{
-    App, MessageStyle, PendingReply, PendingReplyKind, PickerSelection, SlashCommand,
-    SubagentDisplayState, SubagentStatusKind, TranscriptEntry, WriteApprovalDecision,
+    App, MessageStyle, PendingReply, PendingReplyKind, PickerSelection, ShellApprovalDecision,
+    SlashCommand, SubagentDisplayState, SubagentStatusKind, TranscriptEntry, WriteApprovalDecision,
 };
 use crate::ask_user::AskUserResponse;
 use crate::config::ReasoningEffort;
@@ -33,6 +33,7 @@ pub enum Action {
     AskUserTabLeft,
     AskUserTabRight,
     AskUserToggleDetailEditor,
+    ShellApprovalToggleDetailEditor,
     ApproveWriteOnce,
     ApproveWriteAllSession,
     DenyWrite,
@@ -66,6 +67,10 @@ pub enum Effect {
     SetPlanningAgents {
         planning_agents: Vec<PlanningAgentConfig>,
     },
+    SetSafetySelection {
+        model_name: String,
+        reasoning_effort: ReasoningEffort,
+    },
     RunPlanningWorkflow {
         reply_id: u64,
         description: String,
@@ -76,6 +81,10 @@ pub enum Effect {
     ResolveWriteApproval {
         request_id: String,
         decision: WriteApprovalDecision,
+    },
+    ResolveShellApproval {
+        request_id: String,
+        decision: ShellApprovalDecision,
     },
     ResolveAskUser {
         request_id: String,
@@ -103,7 +112,9 @@ impl App {
                 }
             }
             Action::CancelPendingReply => {
-                if self.has_pending_reply() {
+                if self.cancel_shell_approval_editing() {
+                    None
+                } else if self.has_pending_reply() {
                     self.cancel_pending_reply();
                     Some(Effect::CancelPendingReply)
                 } else if self.cancel_picker() {
@@ -122,7 +133,9 @@ impl App {
                 })
             }
             Action::SelectPreviousCommand => {
-                if self.has_pending_ask_user() {
+                if self.has_pending_shell_approval() {
+                    self.move_shell_approval_selection(-1);
+                } else if self.has_pending_ask_user() {
                     self.move_ask_user_answer_up();
                 } else if self.plan_review_selection_active() {
                     self.move_plan_review_selection(-1);
@@ -137,7 +150,9 @@ impl App {
                 None
             }
             Action::SelectNextCommand => {
-                if self.has_pending_ask_user() {
+                if self.has_pending_shell_approval() {
+                    self.move_shell_approval_selection(1);
+                } else if self.has_pending_ask_user() {
                     self.move_ask_user_answer_down();
                 } else if self.plan_review_selection_active() {
                     self.move_plan_review_selection(1);
@@ -176,7 +191,10 @@ impl App {
                 None
             }
             Action::InsertComposerNewline => {
-                if self.has_pending_write_approval() || self.plan_review_selection_active() {
+                if self.has_pending_write_approval()
+                    || self.has_pending_shell_approval()
+                    || self.plan_review_selection_active()
+                {
                     return None;
                 }
                 self.insert_composer_newline();
@@ -206,6 +224,10 @@ impl App {
                 self.toggle_ask_user_detail_editing();
                 None
             }
+            Action::ShellApprovalToggleDetailEditor => {
+                self.toggle_shell_approval_detail_editing();
+                None
+            }
             Action::ApproveWriteOnce => resolve_write_approval(
                 apply_write_approval(self, WriteApprovalDecision::AllowOnce),
                 WriteApprovalDecision::AllowOnce,
@@ -229,6 +251,13 @@ impl App {
                 if self.has_pending_write_approval() || self.plan_review_selection_active() {
                     return None;
                 }
+                if self.shell_approval_editing() {
+                    self.apply_shell_approval_input(input);
+                    return None;
+                }
+                if self.has_pending_shell_approval() {
+                    return None;
+                }
                 if self.ask_user_detail_editing() {
                     self.apply_ask_user_input(input);
                     return None;
@@ -241,6 +270,13 @@ impl App {
             }
             Action::Paste(text) => {
                 if self.has_pending_write_approval() || self.plan_review_selection_active() {
+                    return None;
+                }
+                if self.shell_approval_editing() {
+                    self.paste_into_shell_approval_detail(&text);
+                    return None;
+                }
+                if self.has_pending_shell_approval() {
                     return None;
                 }
                 if self.ask_user_detail_editing() {
@@ -283,6 +319,10 @@ impl App {
 fn submit_message(app: &mut App) -> Option<Effect> {
     if app.has_pending_write_approval() {
         return None;
+    }
+
+    if app.has_pending_shell_approval() {
+        return submit_shell_approval(app);
     }
 
     if app.plan_review_selection_active() {
@@ -342,6 +382,14 @@ fn submit_ask_user(app: &mut App) -> Option<Effect> {
     Some(Effect::ResolveAskUser {
         request_id,
         response,
+    })
+}
+
+fn submit_shell_approval(app: &mut App) -> Option<Effect> {
+    let (request_id, decision, _risk) = app.submit_shell_approval()?;
+    Some(Effect::ResolveShellApproval {
+        request_id,
+        decision,
     })
 }
 
@@ -457,6 +505,13 @@ fn submit_picker_selection(app: &mut App) -> Option<Effect> {
         }
         PickerSelection::PlanningAgent(_) => Some(Effect::SetPlanningAgents {
             planning_agents: app.planning_agents().to_vec(),
+        }),
+        PickerSelection::SafetySelection {
+            model_name,
+            reasoning_effort,
+        } => Some(Effect::SetSafetySelection {
+            model_name,
+            reasoning_effort,
         }),
     }
 }
@@ -596,6 +651,23 @@ fn on_stream_event(app: &mut App, reply_id: u64, event: StreamEvent) {
         } => {
             app.begin_write_approval(request_id, tool_name, arguments);
         }
+        StreamEvent::ShellApprovalRequested {
+            request_id,
+            risk,
+            risk_explanation,
+            command,
+            working_directory,
+            reason,
+        } => {
+            app.begin_shell_approval(
+                request_id,
+                risk,
+                risk_explanation,
+                command,
+                working_directory,
+                reason,
+            );
+        }
         StreamEvent::Finished { history } => {
             let synthesized_plan = app
                 .pending_reply
@@ -733,6 +805,25 @@ fn on_subagent_event(app: &mut App, event: SubagentUiEvent) {
             arguments,
         } => {
             app.begin_subagent_write_approval(id, request_id, tool_name, arguments);
+        }
+        SubagentUiEvent::ShellApprovalRequested {
+            id,
+            request_id,
+            risk,
+            risk_explanation,
+            command,
+            working_directory,
+            reason,
+        } => {
+            app.begin_subagent_shell_approval(
+                id,
+                request_id,
+                risk,
+                risk_explanation,
+                command,
+                working_directory,
+                reason,
+            );
         }
     }
 }

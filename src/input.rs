@@ -8,12 +8,38 @@ use crate::app::Action;
 const MOUSE_SCROLL_LINES: usize = 3;
 
 pub fn map_event(event: Event) -> Option<Action> {
-    map_event_with_state(event, false, false, false, false)
+    map_event_with_state(event, false, false, false, false, false, false)
 }
 
 pub fn map_event_with_state(
     event: Event,
     awaiting_write_approval: bool,
+    awaiting_shell_approval: bool,
+    shell_approval_editing: bool,
+    awaiting_ask_user: bool,
+    selection_picker_visible: bool,
+    awaiting_plan_review: bool,
+) -> Option<Action> {
+    map_event_with_shell_editor_state(
+        event,
+        awaiting_write_approval,
+        awaiting_shell_approval,
+        shell_approval_editing,
+        false,
+        false,
+        awaiting_ask_user,
+        selection_picker_visible,
+        awaiting_plan_review,
+    )
+}
+
+pub fn map_event_with_shell_editor_state(
+    event: Event,
+    awaiting_write_approval: bool,
+    awaiting_shell_approval: bool,
+    shell_approval_editing: bool,
+    shell_approval_can_move_up: bool,
+    shell_approval_can_move_down: bool,
     awaiting_ask_user: bool,
     selection_picker_visible: bool,
     awaiting_plan_review: bool,
@@ -22,6 +48,10 @@ pub fn map_event_with_state(
         Event::Key(key) if key.kind == KeyEventKind::Press => Some(map_key_event(
             key,
             awaiting_write_approval,
+            awaiting_shell_approval,
+            shell_approval_editing,
+            shell_approval_can_move_up,
+            shell_approval_can_move_down,
             awaiting_ask_user,
             selection_picker_visible,
             awaiting_plan_review,
@@ -37,6 +67,10 @@ pub fn map_event_with_state(
 fn map_key_event(
     key: KeyEvent,
     awaiting_write_approval: bool,
+    awaiting_shell_approval: bool,
+    shell_approval_editing: bool,
+    shell_approval_can_move_up: bool,
+    shell_approval_can_move_down: bool,
     awaiting_ask_user: bool,
     selection_picker_visible: bool,
     awaiting_plan_review: bool,
@@ -54,6 +88,35 @@ fn map_key_event(
             (KeyCode::PageDown, _) => Action::ScrollHistoryPageDown,
             (KeyCode::Home, _) => Action::ScrollHistoryToTop,
             (KeyCode::End, _) => Action::ScrollHistoryToBottom,
+            _ => Action::Tick,
+        };
+    }
+
+    if awaiting_shell_approval {
+        return match (key.code, key.modifiers) {
+            (KeyCode::Esc, _) => Action::CancelPendingReply,
+            (KeyCode::Char('c'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
+                Action::ClearComposerOrQuit
+            }
+            (KeyCode::Tab, _) => Action::ShellApprovalToggleDetailEditor,
+            (KeyCode::Up, KeyModifiers::NONE)
+                if shell_approval_editing && shell_approval_can_move_up =>
+            {
+                Action::Editor(Input::from(key))
+            }
+            (KeyCode::Down, KeyModifiers::NONE)
+                if shell_approval_editing && shell_approval_can_move_down =>
+            {
+                Action::Editor(Input::from(key))
+            }
+            (KeyCode::Up, KeyModifiers::NONE) => Action::SelectPreviousCommand,
+            (KeyCode::Down, KeyModifiers::NONE) => Action::SelectNextCommand,
+            (KeyCode::Enter, _) => Action::SubmitMessage,
+            (KeyCode::PageUp, _) => Action::ScrollHistoryPageUp,
+            (KeyCode::PageDown, _) => Action::ScrollHistoryPageDown,
+            (KeyCode::Home, _) => Action::ScrollHistoryToTop,
+            (KeyCode::End, _) => Action::ScrollHistoryToBottom,
+            _ if shell_approval_editing => Action::Editor(Input::from(key)),
             _ => Action::Tick,
         };
     }
@@ -205,6 +268,8 @@ mod tests {
                 Event::Key(key(KeyCode::Left, KeyModifiers::NONE)),
                 false,
                 false,
+                false,
+                false,
                 true,
                 false
             ),
@@ -215,6 +280,8 @@ mod tests {
                 Event::Key(key(KeyCode::Right, KeyModifiers::NONE)),
                 false,
                 false,
+                false,
+                false,
                 true,
                 false
             ),
@@ -223,6 +290,8 @@ mod tests {
         assert_eq!(
             map_event_with_state(
                 Event::Key(key(KeyCode::Char(' '), KeyModifiers::NONE)),
+                false,
+                false,
                 false,
                 false,
                 true,
@@ -271,6 +340,8 @@ mod tests {
                 false,
                 false,
                 false,
+                false,
+                false,
             ),
             Some(Action::ApproveWriteOnce)
         );
@@ -281,6 +352,8 @@ mod tests {
                 false,
                 false,
                 false,
+                false,
+                false,
             ),
             Some(Action::ApproveWriteAllSession)
         );
@@ -288,6 +361,8 @@ mod tests {
             map_event_with_state(
                 Event::Key(key(KeyCode::Char('d'), KeyModifiers::NONE)),
                 true,
+                false,
+                false,
                 false,
                 false,
                 false,
@@ -305,12 +380,129 @@ mod tests {
                 false,
                 false,
                 false,
+                false,
+                false,
             ),
             Some(Action::Tick)
         );
         assert_eq!(
-            map_event_with_state(Event::Paste("hello".into()), true, false, false, false),
+            map_event_with_state(
+                Event::Paste("hello".into()),
+                true,
+                false,
+                false,
+                false,
+                false,
+                false
+            ),
             None
+        );
+    }
+
+    #[test]
+    fn shell_approval_prompt_maps_navigation_and_submit() {
+        assert_eq!(
+            map_event_with_state(
+                Event::Key(key(KeyCode::Up, KeyModifiers::NONE)),
+                false,
+                true,
+                false,
+                false,
+                false,
+                false,
+            ),
+            Some(Action::SelectPreviousCommand)
+        );
+        assert_eq!(
+            map_event_with_state(
+                Event::Key(key(KeyCode::Enter, KeyModifiers::NONE)),
+                false,
+                true,
+                false,
+                false,
+                false,
+                false,
+            ),
+            Some(Action::SubmitMessage)
+        );
+        assert_eq!(
+            map_event_with_state(
+                Event::Key(key(KeyCode::Tab, KeyModifiers::NONE)),
+                false,
+                true,
+                false,
+                false,
+                false,
+                false,
+            ),
+            Some(Action::ShellApprovalToggleDetailEditor)
+        );
+    }
+
+    #[test]
+    fn shell_approval_editor_uses_up_down_for_multiline_navigation_when_possible() {
+        let up = key(KeyCode::Up, KeyModifiers::NONE);
+        assert_eq!(
+            map_event_with_shell_editor_state(
+                Event::Key(up),
+                false,
+                true,
+                true,
+                true,
+                false,
+                false,
+                false,
+                false,
+            ),
+            Some(Action::Editor(Input::from(up)))
+        );
+
+        let down = key(KeyCode::Down, KeyModifiers::NONE);
+        assert_eq!(
+            map_event_with_shell_editor_state(
+                Event::Key(down),
+                false,
+                true,
+                true,
+                false,
+                true,
+                false,
+                false,
+                false,
+            ),
+            Some(Action::Editor(Input::from(down)))
+        );
+    }
+
+    #[test]
+    fn shell_approval_editor_uses_option_navigation_at_text_bounds() {
+        assert_eq!(
+            map_event_with_shell_editor_state(
+                Event::Key(key(KeyCode::Up, KeyModifiers::NONE)),
+                false,
+                true,
+                true,
+                false,
+                true,
+                false,
+                false,
+                false,
+            ),
+            Some(Action::SelectPreviousCommand)
+        );
+        assert_eq!(
+            map_event_with_shell_editor_state(
+                Event::Key(key(KeyCode::Down, KeyModifiers::NONE)),
+                false,
+                true,
+                true,
+                true,
+                false,
+                false,
+                false,
+                false,
+            ),
+            Some(Action::SelectNextCommand)
         );
     }
 
@@ -319,6 +511,8 @@ mod tests {
         assert_eq!(
             map_event_with_state(
                 Event::Key(key(KeyCode::Char('1'), KeyModifiers::NONE)),
+                false,
+                false,
                 false,
                 false,
                 false,
@@ -332,6 +526,8 @@ mod tests {
                 false,
                 false,
                 false,
+                false,
+                false,
                 true,
             ),
             Some(Action::SuggestPlanChanges)
@@ -339,6 +535,8 @@ mod tests {
         assert_eq!(
             map_event_with_state(
                 Event::Key(key(KeyCode::Up, KeyModifiers::NONE)),
+                false,
+                false,
                 false,
                 false,
                 false,
@@ -352,6 +550,8 @@ mod tests {
                 false,
                 false,
                 false,
+                false,
+                false,
                 true,
             ),
             Some(Action::SelectNextCommand)
@@ -359,6 +559,8 @@ mod tests {
         assert_eq!(
             map_event_with_state(
                 Event::Key(key(KeyCode::Enter, KeyModifiers::NONE)),
+                false,
+                false,
                 false,
                 false,
                 false,
@@ -376,12 +578,22 @@ mod tests {
                 false,
                 false,
                 false,
+                false,
+                false,
                 true,
             ),
             Some(Action::Tick)
         );
         assert_eq!(
-            map_event_with_state(Event::Paste("hello".into()), false, false, false, true),
+            map_event_with_state(
+                Event::Paste("hello".into()),
+                false,
+                false,
+                false,
+                false,
+                false,
+                true
+            ),
             None
         );
     }
@@ -391,6 +603,8 @@ mod tests {
         assert_eq!(
             map_event_with_state(
                 Event::Key(key(KeyCode::Left, KeyModifiers::NONE)),
+                false,
+                false,
                 false,
                 true,
                 false,
@@ -402,6 +616,8 @@ mod tests {
             map_event_with_state(
                 Event::Key(key(KeyCode::Right, KeyModifiers::NONE)),
                 false,
+                false,
+                false,
                 true,
                 false,
                 false,
@@ -411,6 +627,8 @@ mod tests {
         assert_eq!(
             map_event_with_state(
                 Event::Key(key(KeyCode::Tab, KeyModifiers::NONE)),
+                false,
+                false,
                 false,
                 true,
                 false,

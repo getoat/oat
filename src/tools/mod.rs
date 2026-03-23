@@ -8,6 +8,7 @@ mod output_limit;
 mod preview;
 mod read_file;
 mod read_files;
+mod run_shell_script;
 mod subagent;
 mod write_file;
 
@@ -35,6 +36,10 @@ pub use preview::{
 };
 pub use read_file::{ReadFileArgs, ReadFileTool};
 pub use read_files::{ReadFilesArgs, ReadFilesTool};
+pub use run_shell_script::{
+    RUN_SHELL_SCRIPT_TOOL_NAME, RunShellScriptArgs, RunShellScriptTool,
+    display_requested_shell_cwd, display_shell_command,
+};
 pub use subagent::{
     INSPECT_SUBAGENT_TOOL_NAME, InspectSubagentArgs, InspectSubagentTool, SPAWN_SUBAGENT_TOOL_NAME,
     SpawnSubagentArgs, SpawnSubagentTool, WAIT_SUBAGENT_TOOL_NAME, WaitSubagentArgs,
@@ -81,7 +86,7 @@ enum ToolRoleScope {
     MainWithManager,
 }
 
-const TOOL_DESCRIPTORS: [ToolDescriptor; 11] = [
+const TOOL_DESCRIPTORS: [ToolDescriptor; 12] = [
     ToolDescriptor::read_only(AskUserTool::NAME, ToolRoleScope::MainOnly, |_context| {
         Box::new(AskUserTool)
     }),
@@ -98,6 +103,9 @@ const TOOL_DESCRIPTORS: [ToolDescriptor; 11] = [
     ToolDescriptor::read_only(GrepTool::NAME, ToolRoleScope::Any, |context| {
         let search_policy = context.search_policy();
         Box::new(GrepTool::new(context.root, search_policy))
+    }),
+    ToolDescriptor::read_only(RunShellScriptTool::NAME, ToolRoleScope::Any, |context| {
+        Box::new(RunShellScriptTool::new(context.root))
     }),
     ToolDescriptor::mutation(ApplyPatchesTool::NAME, ToolRoleScope::Any, |context| {
         Box::new(ApplyPatchesTool::new(context.root))
@@ -219,6 +227,10 @@ pub fn is_mutation_tool(tool_name: &str) -> bool {
         tool.access_mode == ToolAccess::Mutation && tool.name.eq_ignore_ascii_case(tool_name)
     })
 }
+
+pub fn is_shell_tool(tool_name: &str) -> bool {
+    tool_name.eq_ignore_ascii_case(RUN_SHELL_SCRIPT_TOOL_NAME)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -243,6 +255,7 @@ mod tests {
                 "ReadFile",
                 "ReadFiles",
                 "Grep",
+                "RunShellScript",
                 "SpawnSubagent",
                 "WaitSubagent",
                 "InspectSubagent"
@@ -263,6 +276,7 @@ mod tests {
         });
 
         assert!(tool_names.contains(&"AskUser".to_string()));
+        assert!(tool_names.contains(&"RunShellScript".to_string()));
         assert!(tool_names.contains(&"ApplyPatches".to_string()));
         assert!(tool_names.contains(&"WriteFile".to_string()));
         assert!(tool_names.contains(&"DeletePath".to_string()));
@@ -289,6 +303,7 @@ mod tests {
         for tool_name in ["ApplyPatches", "WriteFile", "DeletePath"] {
             assert!(is_mutation_tool(tool_name), "{tool_name} should be mutable");
         }
+        assert!(is_shell_tool("RunShellScript"));
     }
 
     #[test]
@@ -321,7 +336,10 @@ mod tests {
             subagents: None,
         });
 
-        assert_eq!(tool_names, vec!["List", "ReadFile", "ReadFiles", "Grep"]);
+        assert_eq!(
+            tool_names,
+            vec!["List", "ReadFile", "ReadFiles", "Grep", "RunShellScript"]
+        );
     }
 
     fn sample_config() -> AppConfig {
@@ -332,6 +350,10 @@ mod tests {
                 model_name: "gpt-5.4-mini".into(),
                 reasoning_effort: crate::config::ReasoningEffort::Medium,
                 api_version: "2025-01-01-preview".into(),
+            },
+            safety: crate::config::SafetyConfig {
+                model_name: "gpt-5.4-mini".into(),
+                reasoning_effort: crate::config::ReasoningEffort::Medium,
             },
             ui: crate::config::UiConfig::default(),
             subagents: crate::config::SubagentConfig { max_concurrent: 4 },

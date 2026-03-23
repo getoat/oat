@@ -243,7 +243,9 @@ mod tests {
     use super::*;
     use crate::{
         app::ApprovalMode,
-        config::{AzureConfig, ReasoningEffort, SubagentConfig, ToolConfig, UiConfig},
+        config::{
+            AzureConfig, ReasoningEffort, SafetyConfig, SubagentConfig, ToolConfig, UiConfig,
+        },
         planning::PlanningConfig,
         stats::StatsStore,
     };
@@ -256,6 +258,10 @@ mod tests {
                 model_name: "gpt-5.4-mini".into(),
                 reasoning_effort: ReasoningEffort::Medium,
                 api_version: "2025-01-01-preview".into(),
+            },
+            safety: SafetyConfig {
+                model_name: "gpt-5.4-mini".into(),
+                reasoning_effort: ReasoningEffort::Medium,
             },
             ui: UiConfig::default(),
             subagents: SubagentConfig { max_concurrent: 4 },

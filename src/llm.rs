@@ -6,11 +6,12 @@ use std::{
 
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
+use globset::Glob;
 use rig::{
     agent::{HookAction, MultiTurnStreamItem, PromptHook, ToolCallHookAction},
     client::CompletionClient,
     completion::{
-        CompletionModel, Message as RigMessage,
+        Chat, CompletionModel, Message as RigMessage,
         message::{ToolResult, ToolResultContent},
     },
     providers::openai,
@@ -22,14 +23,16 @@ use tokio::sync::{mpsc::UnboundedSender, oneshot};
 
 use crate::{
     agent::{AgentContext, AgentRole},
-    app::{AccessMode, ApprovalMode, WriteApprovalDecision},
+    app::{AccessMode, ApprovalMode, CommandRisk, ShellApprovalDecision, WriteApprovalDecision},
     ask_user::{AskUserRequest, AskUserResponse, validate_request},
     completion_request::CompletionRequestSnapshot,
-    config::AppConfig,
+    config::{AppConfig, ReasoningEffort},
     stats::StatsHook,
     subagents::SubagentManager,
     tools::{
-        AskUserTool, ToolContext, is_mutation_tool, tool_names_for_context, tools_for_context,
+        AskUserTool, RUN_SHELL_SCRIPT_TOOL_NAME, RunShellScriptArgs, ToolContext,
+        display_requested_shell_cwd, display_shell_command, is_mutation_tool,
+        tool_names_for_context, tools_for_context,
     },
 };
 
@@ -56,6 +59,14 @@ pub enum StreamEvent {
         tool_name: String,
         arguments: String,
     },
+    ShellApprovalRequested {
+        request_id: String,
+        risk: CommandRisk,
+        risk_explanation: String,
+        command: String,
+        working_directory: String,
+        reason: String,
+    },
     Finished {
         history: Option<Vec<RigMessage>>,
     },
@@ -77,12 +88,55 @@ struct WriteApprovalState {
 }
 
 #[derive(Clone)]
+pub struct ShellApprovalController {
+    inner: Arc<Mutex<ShellApprovalState>>,
+}
+
+struct ShellApprovalState {
+    default_mode: ApprovalMode,
+    low: ShellRiskApprovalBucket,
+    medium: ShellRiskApprovalBucket,
+    high: ShellRiskApprovalBucket,
+    pending: HashMap<String, PendingShellApprovalEntry>,
+}
+
+struct PendingShellApprovalEntry {
+    risk: CommandRisk,
+    sender: oneshot::Sender<ShellApprovalDecision>,
+}
+
+#[derive(Clone)]
+struct ShellRiskApprovalBucket {
+    mode: ApprovalMode,
+    patterns: Vec<String>,
+}
+
+impl ShellApprovalState {
+    fn bucket_mut(&mut self, risk: CommandRisk) -> &mut ShellRiskApprovalBucket {
+        match risk {
+            CommandRisk::Low => &mut self.low,
+            CommandRisk::Medium => &mut self.medium,
+            CommandRisk::High => &mut self.high,
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct AskUserController {
     inner: Arc<Mutex<AskUserState>>,
 }
 
 struct AskUserState {
     pending: HashMap<String, oneshot::Sender<AskUserResponse>>,
+}
+
+#[derive(Clone)]
+struct ShellApprovalHook {
+    reply_id: u64,
+    emit: EventCallback,
+    access_mode: AccessMode,
+    approvals: ShellApprovalController,
+    safety: SafetyClassifier,
 }
 
 #[derive(Clone)]
@@ -111,9 +165,24 @@ struct CombinedHook<H1, H2> {
 }
 
 #[derive(Clone)]
+struct SafetyClassifier {
+    agent: LlmAgent,
+}
+
+#[derive(Clone)]
+struct SafetyClassification {
+    risk: CommandRisk,
+    risk_explanation: String,
+    reason: String,
+}
+
+#[derive(Clone)]
 pub struct LlmService {
     agent: LlmAgent,
+    access_mode: AccessMode,
     approvals: WriteApprovalController,
+    shell_approvals: ShellApprovalController,
+    safety: SafetyClassifier,
     ask_user: Option<AskUserController>,
     #[cfg_attr(not(test), allow(dead_code))]
     tool_names: Vec<String>,
@@ -157,6 +226,7 @@ impl LlmService {
             subagents,
         };
         let tool_names = tool_names_for_context(&tool_context);
+        let approval_mode = approvals.mode();
         let agent = client
             .agent(
                 context
@@ -165,13 +235,17 @@ impl LlmService {
                     .unwrap_or_else(|| config.azure.model_name.clone()),
             )
             .preamble(&preamble)
-            .additional_params(reasoning_params(config))
+            .additional_params(reasoning_params(config.azure.reasoning_effort))
             .tools(tools_for_context(tool_context))
             .build();
+        let safety = SafetyClassifier::from_client(&client, config);
 
         Ok(Self {
             agent,
+            access_mode: context.access_mode,
             approvals,
+            shell_approvals: ShellApprovalController::new(approval_mode),
+            safety,
             ask_user,
             tool_names,
             preamble,
@@ -194,6 +268,14 @@ impl LlmService {
         self.approvals.resolve(request_id, decision)
     }
 
+    pub fn resolve_shell_approval(
+        &self,
+        request_id: &str,
+        decision: ShellApprovalDecision,
+    ) -> bool {
+        self.shell_approvals.resolve(request_id, decision)
+    }
+
     pub fn resolve_ask_user(&self, request_id: &str, response: AskUserResponse) -> bool {
         self.ask_user
             .as_ref()
@@ -202,10 +284,12 @@ impl LlmService {
 
     pub fn reset_write_approvals(&self) {
         self.approvals.reset_session();
+        self.shell_approvals.reset_session();
     }
 
     pub fn cancel_pending_interactions(&self) {
         self.approvals.cancel_pending();
+        self.shell_approvals.cancel_pending();
         if let Some(controller) = &self.ask_user {
             controller.cancel_pending();
         }
@@ -240,6 +324,13 @@ impl LlmService {
             emit: emit.clone(),
             approvals: self.approvals.clone(),
         };
+        let shell_approval_hook = ShellApprovalHook {
+            reply_id,
+            emit: emit.clone(),
+            access_mode: self.access_mode,
+            approvals: self.shell_approvals.clone(),
+            safety: self.safety.clone(),
+        };
         let ask_user_hook = AskUserHook {
             reply_id,
             emit: emit.clone(),
@@ -250,8 +341,11 @@ impl LlmService {
             second: CombinedHook {
                 first: CompletionCaptureHook { capture },
                 second: CombinedHook {
-                    first: write_approval_hook,
-                    second: ask_user_hook,
+                    first: shell_approval_hook,
+                    second: CombinedHook {
+                        first: write_approval_hook,
+                        second: ask_user_hook,
+                    },
                 },
             },
         };
@@ -362,9 +456,50 @@ impl Default for WriteApprovalController {
     }
 }
 
+impl Default for ShellApprovalController {
+    fn default() -> Self {
+        Self::new(ApprovalMode::Manual)
+    }
+}
+
 impl Default for AskUserController {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl SafetyClassifier {
+    fn from_client(client: &openai::CompletionsClient, config: &AppConfig) -> Self {
+        let agent = client
+            .agent(config.safety.model_name.clone())
+            .preamble(safety_classifier_preamble())
+            .additional_params(reasoning_params(config.safety.reasoning_effort))
+            .build();
+        Self { agent }
+    }
+
+    async fn classify(
+        &self,
+        access_mode: AccessMode,
+        args: &RunShellScriptArgs,
+    ) -> SafetyClassification {
+        let command = display_shell_command(&args.script);
+        let heuristic = minimum_shell_risk(&command, &args.script);
+        let reason = normalize_summary(&args.intent);
+        let working_directory = display_requested_shell_cwd(args.cwd.as_deref());
+        let prompt =
+            safety_classifier_prompt(access_mode, &command, &working_directory, args, heuristic);
+        let model_risk = match self.agent.chat(prompt, Vec::<RigMessage>::new()).await {
+            Ok(output) => parse_command_risk(&output).unwrap_or(CommandRisk::High),
+            Err(_) => CommandRisk::High,
+        };
+        let risk = max_command_risk(model_risk, heuristic.unwrap_or(CommandRisk::Low));
+
+        SafetyClassification {
+            risk,
+            risk_explanation: shell_risk_explanation(risk, &command, &args.script),
+            reason,
+        }
     }
 }
 
@@ -459,6 +594,154 @@ impl WriteApprovalController {
     }
 }
 
+impl ShellApprovalController {
+    pub fn new(mode: ApprovalMode) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(ShellApprovalState {
+                default_mode: mode,
+                low: ShellRiskApprovalBucket {
+                    mode,
+                    patterns: Vec::new(),
+                },
+                medium: ShellRiskApprovalBucket {
+                    mode,
+                    patterns: Vec::new(),
+                },
+                high: ShellRiskApprovalBucket {
+                    mode,
+                    patterns: Vec::new(),
+                },
+                pending: HashMap::new(),
+            })),
+        }
+    }
+
+    async fn request_approval(
+        &self,
+        reply_id: u64,
+        access_mode: AccessMode,
+        internal_call_id: &str,
+        args: &RunShellScriptArgs,
+        emit: &EventCallback,
+        safety: &SafetyClassifier,
+    ) -> ToolCallHookAction {
+        let classification = safety.classify(access_mode, args).await;
+        let command = display_shell_command(&args.script);
+        let working_directory = display_requested_shell_cwd(args.cwd.as_deref());
+        if access_mode == AccessMode::ReadOnly && classification.risk != CommandRisk::Low {
+            return ToolCallHookAction::skip(format!(
+                "{} risk shell commands require write mode. Switch to write mode before retrying.\nWorking directory: {}\nCommand: {}",
+                classification.risk.label(),
+                working_directory,
+                command
+            ));
+        }
+
+        let rx = {
+            let mut state = self.inner.lock().expect("shell approval state lock");
+            let bucket = state.bucket_mut(classification.risk);
+            if matches!(bucket.mode, ApprovalMode::Disabled)
+                || bucket
+                    .patterns
+                    .iter()
+                    .any(|pattern| shell_pattern_matches(pattern, &command))
+            {
+                return ToolCallHookAction::Continue;
+            }
+
+            let (tx, rx) = oneshot::channel();
+            state.pending.insert(
+                internal_call_id.to_string(),
+                PendingShellApprovalEntry {
+                    risk: classification.risk,
+                    sender: tx,
+                },
+            );
+            rx
+        };
+
+        if !(emit)(
+            reply_id,
+            StreamEvent::ShellApprovalRequested {
+                request_id: internal_call_id.to_string(),
+                risk: classification.risk,
+                risk_explanation: classification.risk_explanation.clone(),
+                command: command.clone(),
+                working_directory: working_directory.clone(),
+                reason: classification.reason.clone(),
+            },
+        ) {
+            let mut state = self.inner.lock().expect("shell approval state lock");
+            state.pending.remove(internal_call_id);
+            return ToolCallHookAction::skip(
+                "Shell command cancelled because approval UI is unavailable.",
+            );
+        }
+
+        match rx.await {
+            Ok(ShellApprovalDecision::AllowOnce) => ToolCallHookAction::Continue,
+            Ok(ShellApprovalDecision::AllowPattern(_)) => ToolCallHookAction::Continue,
+            Ok(ShellApprovalDecision::AllowAllRisk) => ToolCallHookAction::Continue,
+            Ok(ShellApprovalDecision::Deny(note)) => ToolCallHookAction::skip(
+                note.unwrap_or_else(|| "Shell command denied by user.".into()),
+            ),
+            Err(_) => ToolCallHookAction::skip("Shell command cancelled before approval."),
+        }
+    }
+
+    fn resolve(&self, request_id: &str, decision: ShellApprovalDecision) -> bool {
+        let pending = {
+            let mut state = self.inner.lock().expect("shell approval state lock");
+            let pending = state.pending.remove(request_id);
+            if let Some(entry) = pending.as_ref() {
+                let bucket = state.bucket_mut(entry.risk);
+                match &decision {
+                    ShellApprovalDecision::AllowPattern(pattern) => {
+                        if !bucket.patterns.iter().any(|existing| existing == pattern) {
+                            bucket.patterns.push(pattern.clone());
+                        }
+                    }
+                    ShellApprovalDecision::AllowAllRisk => {
+                        bucket.mode = ApprovalMode::Disabled;
+                    }
+                    ShellApprovalDecision::AllowOnce | ShellApprovalDecision::Deny(_) => {}
+                }
+            }
+            pending
+        };
+
+        if let Some(entry) = pending {
+            entry.sender.send(decision).is_ok()
+        } else {
+            false
+        }
+    }
+
+    fn reset_session(&self) {
+        let mut state = self.inner.lock().expect("shell approval state lock");
+        state.low = ShellRiskApprovalBucket {
+            mode: state.default_mode,
+            patterns: Vec::new(),
+        };
+        state.medium = ShellRiskApprovalBucket {
+            mode: state.default_mode,
+            patterns: Vec::new(),
+        };
+        state.high = ShellRiskApprovalBucket {
+            mode: state.default_mode,
+            patterns: Vec::new(),
+        };
+        for (_, entry) in state.pending.drain() {
+            let _ = entry.sender.send(ShellApprovalDecision::Deny(None));
+        }
+    }
+
+    fn cancel_pending(&self) {
+        let mut state = self.inner.lock().expect("shell approval state lock");
+        state.pending.clear();
+    }
+}
+
 impl AskUserController {
     pub fn new() -> Self {
         Self {
@@ -534,6 +817,40 @@ impl AskUserController {
     fn cancel_pending(&self) {
         let mut state = self.inner.lock().expect("ask user state lock");
         state.pending.clear();
+    }
+}
+
+impl PromptHook<openai::CompletionModel> for ShellApprovalHook {
+    async fn on_tool_call(
+        &self,
+        tool_name: &str,
+        _tool_call_id: Option<String>,
+        internal_call_id: &str,
+        args: &str,
+    ) -> ToolCallHookAction {
+        if tool_name != RUN_SHELL_SCRIPT_TOOL_NAME {
+            return ToolCallHookAction::Continue;
+        }
+
+        let args = match serde_json::from_str::<RunShellScriptArgs>(args) {
+            Ok(args) => args,
+            Err(error) => {
+                return ToolCallHookAction::skip(format!(
+                    "RunShellScript request was invalid JSON: {error}"
+                ));
+            }
+        };
+
+        self.approvals
+            .request_approval(
+                self.reply_id,
+                self.access_mode,
+                internal_call_id,
+                &args,
+                &self.emit,
+                &self.safety,
+            )
+            .await
     }
 }
 
@@ -703,10 +1020,146 @@ where
     }
 }
 
-fn reasoning_params(config: &AppConfig) -> serde_json::Value {
+fn reasoning_params(reasoning_effort: ReasoningEffort) -> serde_json::Value {
     json!({
-        "reasoning_effort": config.azure.reasoning_effort.as_str()
+        "reasoning_effort": reasoning_effort.as_str()
     })
+}
+
+fn safety_classifier_preamble() -> &'static str {
+    concat!(
+        "You classify shell commands for execution safety.\n",
+        "Return exactly one word: Low, Medium, or High.\n",
+        "Low: clearly read-only and non-destructive inspection commands.\n",
+        "Medium: changes are possible but local, non-destructive, and reversible.\n",
+        "High: destructive, irreversible, repository-changing, system-changing, network-changing, package-installing, or otherwise risky commands.\n",
+        "Git commands are not automatically High. Read-only git inspection commands such as status, diff, log, and show can be Low. Git commands that modify repository state, contact remotes, or may discard work are usually High.\n",
+        "If unsure, return High."
+    )
+}
+
+fn safety_classifier_prompt(
+    access_mode: AccessMode,
+    command: &str,
+    working_directory: &str,
+    args: &RunShellScriptArgs,
+    heuristic: Option<CommandRisk>,
+) -> String {
+    format!(
+        concat!(
+            "Access mode: {}\n",
+            "Display command: {}\n",
+            "Working directory: {}\n",
+            "Intent: {}\n",
+            "Heuristic minimum risk: {}\n",
+            "Script:\n{}\n"
+        ),
+        access_mode.label(),
+        command,
+        working_directory,
+        normalize_summary(&args.intent),
+        heuristic.map(CommandRisk::label).unwrap_or("None"),
+        args.script
+    )
+}
+
+fn parse_command_risk(output: &str) -> Option<CommandRisk> {
+    let label = output.trim().lines().next()?.trim().to_ascii_lowercase();
+    match label.as_str() {
+        "low" => Some(CommandRisk::Low),
+        "medium" => Some(CommandRisk::Medium),
+        "high" => Some(CommandRisk::High),
+        _ => None,
+    }
+}
+
+fn normalize_summary(summary: &str) -> String {
+    let normalized = summary.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() {
+        "No reason provided for this shell command".into()
+    } else {
+        normalized
+    }
+}
+
+fn shell_risk_explanation(risk: CommandRisk, command: &str, script: &str) -> String {
+    let normalized = format!("{command}\n{script}").to_ascii_lowercase();
+    match risk {
+        CommandRisk::Low => {
+            if normalized.contains("cat ")
+                || normalized.contains("ls ")
+                || normalized.contains("pwd")
+                || normalized.contains("rg ")
+                || normalized.contains("find ")
+            {
+                "read-only inspection command with no obvious mutation".into()
+            } else {
+                "no obvious file, repository, or system mutation".into()
+            }
+        }
+        CommandRisk::Medium => {
+            if normalized.contains("mkdir ") || normalized.contains("touch ") {
+                "may create workspace files or directories, but appears local and reversible".into()
+            } else if normalized.contains("cp ") || normalized.contains("mv ") {
+                "may change workspace files, but appears limited and reversible".into()
+            } else {
+                "may modify local state, but does not look destructive".into()
+            }
+        }
+        CommandRisk::High => {
+            if normalized.contains("rm ") || normalized.contains("rm -") {
+                "includes removal commands that can destroy data".into()
+            } else {
+                "could irreversibly change repository, filesystem, or system state".into()
+            }
+        }
+    }
+}
+
+fn minimum_shell_risk(command: &str, script: &str) -> Option<CommandRisk> {
+    let normalized = format!("{command}\n{script}").to_ascii_lowercase();
+    let high_markers = [
+        " rm ", "\nrm ", "rm -", "mkfs", "shutdown", "reboot", "kill ", "killall", "sudo ",
+        "chmod ", "chown ", "dd ",
+    ];
+    if high_markers
+        .iter()
+        .any(|marker| normalized.contains(marker))
+    {
+        return Some(CommandRisk::High);
+    }
+
+    let medium_markers = [
+        "mkdir ", "touch ", " mv ", "\nmv ", " cp ", "\ncp ", "tee ", ">>", " >", "install ",
+        "sed -i", "perl -pi",
+    ];
+    if medium_markers
+        .iter()
+        .any(|marker| normalized.contains(marker))
+    {
+        return Some(CommandRisk::Medium);
+    }
+
+    None
+}
+
+fn max_command_risk(left: CommandRisk, right: CommandRisk) -> CommandRisk {
+    use CommandRisk::{High, Low, Medium};
+    match (left, right) {
+        (High, _) | (_, High) => High,
+        (Medium, _) | (_, Medium) => Medium,
+        (Low, Low) => Low,
+    }
+}
+
+fn shell_pattern_matches(pattern: &str, command: &str) -> bool {
+    if pattern.contains('*') {
+        Glob::new(pattern)
+            .ok()
+            .is_some_and(|glob| glob.compile_matcher().is_match(command))
+    } else {
+        command.starts_with(pattern)
+    }
 }
 
 fn azure_openai_base_url(config: &AppConfig) -> String {
@@ -744,12 +1197,12 @@ fn mode_preamble(context: &AgentContext) -> String {
     match context.access_mode {
         AccessMode::ReadOnly => {
             preamble.push_str(
-                "\n\nYou are currently in read-only mode. Use the provided readonly workspace tools when they are useful. If the user asks you to edit, create, or delete files, explain that you are in read-only mode and the user must switch to write mode before you can modify the workspace. Do not print large amounts of code in read-only mode unless the user explicitly asks for it.",
+                "\n\nYou are currently in read-only mode. Use the provided readonly workspace tools when they are useful. A shell tool may also be available, but only low-risk inspection commands can be approved in read-only mode; anything medium or high risk requires write mode. If the user asks you to edit, create, or delete files, explain that you are in read-only mode and the user must switch to write mode before you can modify the workspace. Do not print large amounts of code in read-only mode unless the user explicitly asks for it.",
             );
         }
         AccessMode::ReadWrite => {
             preamble.push_str(
-                "\n\nYou are currently in write mode. Use the provided workspace tools when useful. If the user asks you to write code, they usually mean to file (either as a new file, or to edit an existing one), rather than just printing it in their terminal, unless they explicitly ask for it.",
+                "\n\nYou are currently in write mode. Use the provided workspace tools when useful. Shell commands may still require per-command approval depending on risk. If the user asks you to write code, they usually mean to file (either as a new file, or to edit an existing one), rather than just printing it in their terminal, unless they explicitly ask for it.",
             );
         }
     }
@@ -783,7 +1236,9 @@ mod tests {
     use super::*;
     use crate::{
         agent::AgentContext,
-        config::{AzureConfig, ReasoningEffort, SubagentConfig, ToolConfig, UiConfig},
+        config::{
+            AzureConfig, ReasoningEffort, SafetyConfig, SubagentConfig, ToolConfig, UiConfig,
+        },
         planning::PlanningConfig,
     };
     use rig::{OneOrMany, completion::message::Text};
@@ -796,6 +1251,10 @@ mod tests {
                 model_name: "gpt-5-mini".into(),
                 reasoning_effort: ReasoningEffort::Minimal,
                 api_version: "2025-01-01-preview".into(),
+            },
+            safety: SafetyConfig {
+                model_name: "gpt-5-mini".into(),
+                reasoning_effort: ReasoningEffort::Low,
             },
             ui: UiConfig {
                 show_thinking: true,
@@ -810,7 +1269,7 @@ mod tests {
 
     #[test]
     fn reasoning_params_match_requested_effort() {
-        let params = reasoning_params(&sample_config());
+        let params = reasoning_params(sample_config().azure.reasoning_effort);
         assert_eq!(params, json!({ "reasoning_effort": "minimal" }));
     }
 
@@ -982,5 +1441,25 @@ mod tests {
         assert_eq!(approvals.mode(), ApprovalMode::Disabled);
         approvals.reset_session();
         assert_eq!(approvals.mode(), ApprovalMode::Disabled);
+    }
+
+    #[test]
+    fn safety_preamble_allows_read_only_git_commands_to_be_low() {
+        let preamble = safety_classifier_preamble();
+        assert!(preamble.contains("Git commands are not automatically High."));
+        assert!(preamble.contains("status, diff, log, and show can be Low"));
+    }
+
+    #[test]
+    fn minimum_shell_risk_does_not_force_git_status_high() {
+        assert_eq!(minimum_shell_risk("git status", "git status"), None);
+        assert_eq!(
+            minimum_shell_risk("git diff --stat", "git diff --stat"),
+            None
+        );
+        assert_eq!(
+            minimum_shell_risk("rm -rf target", "rm -rf target"),
+            Some(CommandRisk::High)
+        );
     }
 }
