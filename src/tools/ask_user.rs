@@ -17,7 +17,7 @@ impl Tool for AskUserTool {
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         ToolDefinition {
             name: Self::NAME.to_string(),
-            description: "Ask the user 1 to 3 clarification questions through the interactive AskUser UI. Provide only meaningful multiple-choice options. For each question, include 1 to 3 answers and put the recommended answer first. Do not include `Something else`; the UI adds it automatically and requires user input when selected.".to_string(),
+            description: "Ask the user 1 to 3 clarification questions through the interactive AskUser UI. Provide only meaningful multiple-choice options. For each question, include 1 to 3 answers and put the recommended answer first. Do not include the word `Recommended` in any answer label; the UI marks the first answer automatically. Do not include `Something else`; the UI adds it automatically and requires user input when selected.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -44,7 +44,7 @@ impl Tool for AskUserTool {
                                     "type": "array",
                                     "minItems": 1,
                                     "maxItems": 3,
-                                    "description": "Meaningful answer options. The first answer is treated as the recommended option.",
+                                    "description": "Meaningful answer options. The first answer is treated as the recommended option. Do not include the word `Recommended` in any label.",
                                     "items": {
                                         "type": "object",
                                         "properties": {

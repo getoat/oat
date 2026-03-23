@@ -407,10 +407,11 @@ fn submit_plan_acceptance(app: &mut App) -> Option<Effect> {
         return None;
     }
 
-    let prompt = accepted_plan_prompt().to_string();
-    app.record_submitted_input(&prompt);
+    let visible_prompt = accepted_plan_prompt().to_string();
+    let prompt = accepted_plan_implementation_prompt(app);
+    app.record_submitted_input(&visible_prompt);
     app.clear_plan_review();
-    app.push_user_message(prompt.clone());
+    app.push_user_message(visible_prompt);
     app.resume_history_follow();
     app.clear_composer();
     let reply_id = app.next_reply_id();
@@ -419,7 +420,7 @@ fn submit_plan_acceptance(app: &mut App) -> Option<Effect> {
     Some(Effect::PromptModel {
         reply_id,
         prompt,
-        history: app.session_history().to_vec(),
+        history: Vec::new(),
     })
 }
 
@@ -907,6 +908,22 @@ fn resolve_write_approval(
 
 fn accepted_plan_prompt() -> &'static str {
     "I accept this plan. Begin implementation now."
+}
+
+fn accepted_plan_implementation_prompt(app: &App) -> String {
+    let accepted_plan = app.latest_proposed_plan_message().unwrap_or(
+        "<proposed_plan>\nAccepted plan content was not found in transcript.\n</proposed_plan>",
+    );
+    format!(
+        concat!(
+            "You are no longer in Plan Mode. The plan has been accepted for implementation.\n",
+            "Do not say that you still need a developer or system transition out of plan mode.\n",
+            "Use the accepted plan below as the implementation brief, explore the workspace as needed, and begin implementation now.\n\n",
+            "Accepted plan:\n",
+            "{accepted_plan}\n"
+        ),
+        accepted_plan = accepted_plan
+    )
 }
 
 #[cfg(test)]
@@ -1483,18 +1500,22 @@ mod tests {
     #[test]
     fn accepting_plan_starts_normal_prompt_model_turn() {
         let mut app = registry_app(true);
+        app.push_agent_message("<proposed_plan>\n# Test Plan\n\n- step one\n</proposed_plan>");
         app.begin_plan_review();
 
         let effect = app.apply(Action::AcceptPlanAndImplement);
 
-        assert_eq!(
+        assert!(matches!(
             effect,
             Some(Effect::PromptModel {
                 reply_id: 1,
-                prompt: "I accept this plan. Begin implementation now.".into(),
-                history: Vec::new(),
-            })
-        );
+                history,
+                prompt,
+            }) if history.is_empty()
+                && prompt.contains("You are no longer in Plan Mode")
+                && prompt.contains("# Test Plan")
+                && prompt.contains("step one")
+        ));
         assert!(app.pending_reply.is_some());
         assert!(!app.plan_review_selection_active());
         assert_eq!(

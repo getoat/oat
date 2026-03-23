@@ -3,6 +3,7 @@ use std::collections::HashSet;
 
 pub const SOMETHING_ELSE_ID: &str = "__something_else";
 pub const SOMETHING_ELSE_LABEL: &str = "Something else";
+pub const RECOMMENDED_LABEL: &str = "Recommended";
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct AskUserRequest {
@@ -121,6 +122,12 @@ pub fn validate_request(request: &AskUserRequest) -> Result<(), String> {
                     question.id, SOMETHING_ELSE_LABEL
                 ));
             }
+            if answer.label.to_ascii_lowercase().contains("recommended") {
+                return Err(format!(
+                    "AskUser question `{}` must not include `{}` in answer labels; the UI marks the first answer automatically.",
+                    question.id, RECOMMENDED_LABEL
+                ));
+            }
         }
     }
 
@@ -166,6 +173,15 @@ mod tests {
 
         let error = validate_request(&request).expect_err("payload should fail");
         assert!(error.contains("UI adds it automatically"));
+    }
+
+    #[test]
+    fn validate_request_rejects_manual_recommended_label() {
+        let mut request = sample_request();
+        request.questions[0].answers[1].label = "Broad (Recommended)".into();
+
+        let error = validate_request(&request).expect_err("payload should fail");
+        assert!(error.contains("first answer automatically"));
     }
 
     #[test]

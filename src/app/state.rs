@@ -15,7 +15,7 @@ use crate::{
     composer::{ComposerLayout, slice_line},
     config::ReasoningEffort,
     model_registry,
-    planning::{PlanningAgentConfig, default_planning_reasoning},
+    planning::{PlanningAgentConfig, contains_proposed_plan, default_planning_reasoning},
     stats::StatsTotals,
     tools::{MutationPreview, mutation_preview, write_approval_summary},
 };
@@ -671,6 +671,15 @@ impl App {
 
     pub fn entries(&self) -> &[TranscriptEntry] {
         &self.entries
+    }
+
+    pub fn latest_proposed_plan_message(&self) -> Option<&str> {
+        self.entries.iter().rev().find_map(|entry| match entry {
+            TranscriptEntry::Message(message) if contains_proposed_plan(&message.text) => {
+                Some(message.text.as_str())
+            }
+            _ => None,
+        })
     }
 
     pub fn session_history(&self) -> &[RigMessage] {
