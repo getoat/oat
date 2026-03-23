@@ -6,6 +6,7 @@ pub mod config;
 pub mod input;
 pub mod llm;
 pub mod model_registry;
+pub mod planning;
 pub mod stats;
 pub mod subagents;
 pub mod token_counting;
@@ -16,6 +17,7 @@ pub mod ui;
 use std::{
     error::Error,
     io::{self, Stdout, Write},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -30,11 +32,18 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
-use tokio::{runtime::Runtime, sync::mpsc, task::JoinHandle};
+use tokio::{runtime::Runtime, sync::mpsc, task::JoinHandle, time::sleep};
 
 use crate::{
-    agent::AgentContext, command_history::CommandHistoryStore, config::AppConfig, llm::LlmService,
-    stats::StatsStore, subagents::SubagentManager,
+    agent::AgentContext,
+    command_history::CommandHistoryStore,
+    config::AppConfig,
+    llm::{LlmService, StreamEvent, WriteApprovalController},
+    planning::{
+        PlanningJob, planner_prompt, planning_jobs, sanitize_planning_agents, synthesis_prompt,
+    },
+    stats::StatsStore,
+    subagents::{SubagentActivityKind, SubagentManager, SubagentSpawnRequest, SubagentStatus},
 };
 
 pub type Tui = Terminal<CrosstermBackend<Stdout>>;
@@ -82,6 +91,7 @@ pub fn run_with_options(
         config.ui.show_tool_output,
         config.azure.model_name.clone(),
         config.azure.reasoning_effort,
+        config.planning.agents.clone(),
         startup.access_mode,
         startup.approval_mode,
     );
@@ -132,8 +142,11 @@ pub fn run_with_options(
 
         let timeout = tick_rate.saturating_sub(last_tick.elapsed());
         if event::poll(timeout)?
-            && let Some(action) =
-                input::map_event_with_state(event::read()?, app.has_pending_write_approval())
+            && let Some(action) = input::map_event_with_state(
+                event::read()?,
+                app.has_pending_write_approval(),
+                app.selection_picker_visible(),
+            )
             && let Some(effect) = app.apply(action)
         {
             let mut runner = EffectRunner {
@@ -278,13 +291,19 @@ impl EffectRunner<'_> {
             Effect::SetModelSelection { model_name } => {
                 let reasoning_effort =
                     app::compatible_reasoning_effort(&model_name, self.app.reasoning_effort());
-                let updated_config =
-                    AppConfig::set_default_model_selection(&model_name, reasoning_effort)?;
+                let planning_agents =
+                    sanitize_planning_agents(&model_name, self.app.planning_agents());
+                let updated_config = AppConfig::set_default_model_selection_with_planning(
+                    &model_name,
+                    reasoning_effort,
+                    &planning_agents,
+                )?;
                 let rebuilt = self.rebuild_llm(&updated_config, self.app.mode())?;
                 *self.config = updated_config;
                 *self.llm = rebuilt;
                 self.app.set_model_name(model_name.clone());
                 self.app.set_reasoning_effort(reasoning_effort);
+                self.app.set_planning_agents(planning_agents);
                 self.app.open_reasoning_picker();
                 self.app.push_agent_message(format!(
                     "Model set to `{}` and saved to the active config. Select a reasoning effort.",
@@ -303,6 +322,40 @@ impl EffectRunner<'_> {
                     reasoning_effort.as_str(),
                     self.app.model_name()
                 ));
+                Ok(())
+            }
+            Effect::SetPlanningAgents { planning_agents } => {
+                let updated_config = AppConfig::set_default_planning_agents(&planning_agents)?;
+                *self.config = updated_config;
+                self.app.set_planning_agents(planning_agents.clone());
+                self.app.push_agent_message(format!(
+                    "Saved {} planning agent{} to the active config.",
+                    planning_agents.len(),
+                    if planning_agents.len() == 1 { "" } else { "s" }
+                ));
+                Ok(())
+            }
+            Effect::RunPlanningWorkflow {
+                reply_id,
+                description,
+            } => {
+                self.cancel_active_reply();
+                let config = self.config.clone();
+                let stats = self.stats.clone();
+                let stream_tx = self.stream_tx.clone();
+                let subagents = self.subagents.clone();
+                let task = self.runtime.spawn(async move {
+                    run_planning_workflow(
+                        reply_id,
+                        description,
+                        config,
+                        stats,
+                        stream_tx,
+                        subagents,
+                    )
+                    .await;
+                });
+                *self.active_reply_task = Some((reply_id, task));
                 Ok(())
             }
             Effect::RebuildLlm { access_mode } => {
@@ -370,6 +423,166 @@ fn persist_command_history_if_needed(app: &mut App, store: &CommandHistoryStore)
     if let Err(error) = store.save(&entries) {
         app.push_error_message(format!("Failed to save input history: {error}"));
     }
+}
+
+async fn run_planning_workflow(
+    reply_id: u64,
+    description: String,
+    config: AppConfig,
+    stats: StatsStore,
+    stream_tx: mpsc::UnboundedSender<(u64, StreamEvent)>,
+    subagents: SubagentManager,
+) {
+    let emit: llm::EventCallback =
+        Arc::new(move |reply_id, event| stream_tx.send((reply_id, event)).is_ok());
+
+    let jobs = planning_jobs(
+        &config.azure.model_name,
+        config.azure.reasoning_effort,
+        &config.planning.agents,
+    );
+    let mut successful_plans = Vec::new();
+    let mut failed_models = Vec::new();
+
+    for batch in jobs.chunks(config.subagents.max_concurrent.max(1)) {
+        let batch_ids =
+            spawn_planning_batch(&subagents, &config, &description, batch, &mut failed_models)
+                .await;
+        let (successful, failed) = collect_planning_batch_results(&subagents, batch_ids).await;
+        successful_plans.extend(successful);
+        failed_models.extend(failed);
+    }
+
+    if successful_plans.is_empty() {
+        let message = if failed_models.is_empty() {
+            "Planning failed before any planner produced output.".to_string()
+        } else {
+            format!(
+                "Planning failed. No planner completed successfully. Failed planners: {}.",
+                failed_models.join(", ")
+            )
+        };
+        let _ = emit(reply_id, StreamEvent::Failed(message));
+        return;
+    }
+
+    let synth_prompt = synthesis_prompt(&description, &successful_plans, &failed_models);
+    let synth_service = match LlmService::from_config(
+        &config,
+        AgentContext::main(app::AccessMode::ReadOnly),
+        WriteApprovalController::new(ApprovalMode::Manual),
+        None,
+    ) {
+        Ok(service) => service,
+        Err(error) => {
+            let _ = emit(
+                reply_id,
+                StreamEvent::Failed(format!("Failed to start planning synthesis: {error}")),
+            );
+            return;
+        }
+    };
+
+    let stats_hook = stats.hook_for_model(config.azure.model_name.clone());
+    if let Err(error) = synth_service
+        .run_prompt(
+            reply_id,
+            synth_prompt,
+            Vec::new(),
+            stats_hook,
+            None,
+            emit.clone(),
+        )
+        .await
+    {
+        let _ = emit(
+            reply_id,
+            StreamEvent::Failed(format!("Planning synthesis failed: {error}")),
+        );
+    }
+}
+
+async fn spawn_planning_batch(
+    subagents: &SubagentManager,
+    config: &AppConfig,
+    description: &str,
+    batch: &[PlanningJob],
+    failed_models: &mut Vec<String>,
+) -> Vec<(PlanningJob, String)> {
+    let mut spawned = Vec::new();
+
+    for job in batch {
+        match spawn_planning_subagent(subagents, config, description, job.clone()).await {
+            Ok(id) => spawned.push((job.clone(), id)),
+            Err(_) => failed_models.push(job.model_name.clone()),
+        }
+    }
+
+    spawned
+}
+
+async fn spawn_planning_subagent(
+    subagents: &SubagentManager,
+    config: &AppConfig,
+    description: &str,
+    job: PlanningJob,
+) -> anyhow::Result<String> {
+    let mut planner_config = config.clone();
+    planner_config.azure.model_name = job.model_name.clone();
+    planner_config.azure.reasoning_effort = job.reasoning_effort;
+    let snapshot = subagents
+        .spawn(SubagentSpawnRequest {
+            prompt: planner_prompt(description),
+            access_mode: app::AccessMode::ReadOnly,
+            activity_kind: SubagentActivityKind::Planning {
+                model_name: job.model_name.clone(),
+            },
+            model_name_override: Some(job.model_name.clone()),
+            config: planner_config,
+            approvals: WriteApprovalController::new(ApprovalMode::Manual),
+        })
+        .await?;
+
+    Ok(snapshot.id)
+}
+
+async fn collect_planning_batch_results(
+    subagents: &SubagentManager,
+    batch_ids: Vec<(PlanningJob, String)>,
+) -> (Vec<(PlanningJob, String)>, Vec<String>) {
+    let mut pending = batch_ids;
+    let mut successful = Vec::new();
+    let mut failed = Vec::new();
+
+    while !pending.is_empty() {
+        let mut next_pending = Vec::new();
+
+        for (job, id) in pending {
+            match subagents.inspect(&id) {
+                Ok(snapshot) => match snapshot.status {
+                    SubagentStatus::Running => next_pending.push((job, id)),
+                    SubagentStatus::Completed => {
+                        if let Some(output) = snapshot.output {
+                            successful.push((job, output));
+                        } else {
+                            failed.push(job.model_name);
+                        }
+                    }
+                    SubagentStatus::Failed => failed.push(job.model_name),
+                },
+                Err(_) => failed.push(job.model_name),
+            }
+        }
+
+        if next_pending.is_empty() {
+            break;
+        }
+
+        pending = next_pending;
+        sleep(Duration::from_millis(100)).await;
+    }
+
+    (successful, failed)
 }
 
 fn osc52_copy_sequence(text: &str) -> String {

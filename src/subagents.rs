@@ -70,10 +70,17 @@ pub enum SubagentStatus {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SubagentActivityKind {
+    General,
+    Planning { model_name: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SubagentUiEvent {
     Spawned {
         id: String,
         access_mode: AccessMode,
+        activity_kind: SubagentActivityKind,
     },
     Updated {
         id: String,
@@ -99,6 +106,7 @@ pub enum SubagentUiEvent {
 pub struct SubagentSpawnRequest {
     pub prompt: String,
     pub access_mode: AccessMode,
+    pub activity_kind: SubagentActivityKind,
     pub model_name_override: Option<String>,
     pub config: AppConfig,
     pub approvals: WriteApprovalController,
@@ -181,6 +189,7 @@ impl SubagentManager {
         let _ = self.inner.ui_tx.send(SubagentUiEvent::Spawned {
             id: id.clone(),
             access_mode: request.access_mode,
+            activity_kind: request.activity_kind.clone(),
         });
 
         let manager = self.clone();

@@ -6,7 +6,7 @@ use ratatui::{
     widgets::{Block, Borders, Padding, Paragraph, Wrap},
 };
 
-use crate::app::{App, SelectionPicker, SlashCommand};
+use crate::app::{App, ModelPickerTab, SelectionPicker, SlashCommand};
 
 use super::{
     history::render_history, markdown::loading_frame, theme::accent_color, wrap::wrap_text,
@@ -150,35 +150,84 @@ fn render_command_palette(frame: &mut Frame, app: &App, area: Rect, accent: Colo
 
 fn render_overlay(frame: &mut Frame, app: &App, area: Rect, accent: Color) {
     if let Some(picker) = app.selection_picker() {
-        render_selection_picker(frame, picker, area, accent);
+        render_selection_picker(frame, app, picker, area, accent);
     } else {
         render_command_palette(frame, app, area, accent);
     }
 }
 
-fn render_selection_picker(frame: &mut Frame, picker: &SelectionPicker, area: Rect, accent: Color) {
+fn render_selection_picker(
+    frame: &mut Frame,
+    app: &App,
+    picker: &SelectionPicker,
+    area: Rect,
+    accent: Color,
+) {
     let visible_rows = area.height.saturating_sub(2) as usize;
     let (title, lines) = match picker {
-        SelectionPicker::Model { selected_index } => {
-            let lines: Vec<Line<'static>> = crate::model_registry::models()
-                .iter()
-                .take(visible_rows)
-                .enumerate()
-                .map(|(index, model)| {
-                    selection_picker_line(
-                        index == *selected_index,
-                        model.name,
-                        model_picker_detail(model),
-                        accent,
-                    )
-                })
-                .collect();
+        SelectionPicker::Model {
+            active_tab,
+            normal_selected_index,
+            planning_selected_index,
+        } => {
+            let mut lines = vec![model_picker_tab_line(*active_tab, accent)];
+            let row_budget = visible_rows.saturating_sub(1);
+            match active_tab {
+                ModelPickerTab::NormalAgent => {
+                    lines.extend(
+                        crate::model_registry::models()
+                            .iter()
+                            .take(row_budget)
+                            .enumerate()
+                            .map(|(index, model)| {
+                                selection_picker_line(
+                                    index == *normal_selected_index,
+                                    model.name,
+                                    model_picker_detail(model),
+                                    accent,
+                                )
+                            }),
+                    );
+                }
+                ModelPickerTab::PlanningAgents => {
+                    lines.extend(
+                        crate::model_registry::models()
+                            .iter()
+                            .filter(|model| model.name != app.model_name())
+                            .take(row_budget)
+                            .enumerate()
+                            .map(|(index, model)| {
+                                let planning_agent = app
+                                    .planning_agents()
+                                    .iter()
+                                    .find(|agent| agent.model_name == model.name);
+                                let detail = planning_agent
+                                    .map(|agent| {
+                                        format!(
+                                            "selected  effort: {}",
+                                            agent.reasoning_effort.as_str()
+                                        )
+                                    })
+                                    .unwrap_or_else(|| {
+                                        "not selected  Space toggles  Enter sets effort".into()
+                                    });
+                                selection_picker_line(
+                                    index == *planning_selected_index,
+                                    model.name,
+                                    detail,
+                                    accent,
+                                )
+                            }),
+                    );
+                }
+            }
             (" Models ", lines)
         }
         SelectionPicker::Reasoning {
             model_name,
             options,
             selected_index,
+            target,
         } => {
             let lines: Vec<Line<'static>> = options
                 .iter()
@@ -188,12 +237,23 @@ fn render_selection_picker(frame: &mut Frame, picker: &SelectionPicker, area: Re
                     selection_picker_line(
                         index == *selected_index,
                         level.as_str(),
-                        format!("for {}", model_name),
+                        match target {
+                            crate::app::ReasoningPickerTarget::NormalAgent => {
+                                format!("for {}", model_name)
+                            }
+                            crate::app::ReasoningPickerTarget::PlanningAgent => {
+                                format!("for planning with {}", model_name)
+                            }
+                        },
                         accent,
                     )
                 })
                 .collect();
-            (" Reasoning ", lines)
+            let title = match target {
+                crate::app::ReasoningPickerTarget::NormalAgent => " Reasoning ",
+                crate::app::ReasoningPickerTarget::PlanningAgent => " Planning Reasoning ",
+            };
+            (title, lines)
         }
     };
 
@@ -207,6 +267,25 @@ fn render_selection_picker(frame: &mut Frame, picker: &SelectionPicker, area: Re
         )
         .wrap(Wrap { trim: false });
     frame.render_widget(picker, area);
+}
+
+fn model_picker_tab_line(active_tab: ModelPickerTab, accent: Color) -> Line<'static> {
+    let normal_style = if active_tab == ModelPickerTab::NormalAgent {
+        Style::default().fg(accent).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Gray)
+    };
+    let planning_style = if active_tab == ModelPickerTab::PlanningAgents {
+        Style::default().fg(accent).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Gray)
+    };
+
+    Line::from(vec![
+        Span::styled("Normal agent", normal_style),
+        Span::styled("  |  ", Style::default().fg(Color::DarkGray)),
+        Span::styled("Planning agents", planning_style),
+    ])
 }
 
 fn render_mode(frame: &mut Frame, app: &App, area: Rect, accent: Color) {
@@ -757,6 +836,7 @@ mod tests {
             crate::subagents::SubagentUiEvent::Spawned {
                 id: "subagent-2".into(),
                 access_mode: crate::app::AccessMode::ReadOnly,
+                activity_kind: crate::subagents::SubagentActivityKind::General,
             },
         ));
         app.apply(Action::SubagentEvent(

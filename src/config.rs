@@ -4,9 +4,13 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-use crate::{model_registry, tool_policy};
+use crate::{
+    model_registry,
+    planning::{PlanningAgentConfig, PlanningConfig, sanitize_planning_agents},
+    tool_policy,
+};
 
 const DEFAULT_CONFIG_PATH: &str = "config.toml";
 const HOME_CONFIG_RELATIVE_PATH: &str = ".config/oat/config.toml";
@@ -19,6 +23,8 @@ pub struct AppConfig {
     pub ui: UiConfig,
     #[serde(default)]
     pub subagents: SubagentConfig,
+    #[serde(default)]
+    pub planning: PlanningConfig,
     #[serde(default)]
     pub tools: ToolConfig,
 }
@@ -85,7 +91,7 @@ impl AppConfig {
         let home_path = default_home_config_path();
         let cwd_path = PathBuf::from(DEFAULT_CONFIG_PATH);
         let target_path = default_config_update_path(home_path.as_deref(), Some(&cwd_path))?;
-        write_azure_config_updates_at_path(&target_path, None, Some(reasoning_effort))?;
+        write_config_updates_at_path(&target_path, None, Some(reasoning_effort), None)?;
         Self::load_from_default_path()
     }
 
@@ -93,7 +99,7 @@ impl AppConfig {
         path: &Path,
         reasoning_effort: ReasoningEffort,
     ) -> Result<Self> {
-        write_azure_config_updates_at_path(path, None, Some(reasoning_effort))?;
+        write_config_updates_at_path(path, None, Some(reasoning_effort), None)?;
         Self::load_from_path(path)
     }
 
@@ -104,7 +110,24 @@ impl AppConfig {
         let home_path = default_home_config_path();
         let cwd_path = PathBuf::from(DEFAULT_CONFIG_PATH);
         let target_path = default_config_update_path(home_path.as_deref(), Some(&cwd_path))?;
-        write_azure_config_updates_at_path(&target_path, Some(model_name), Some(reasoning_effort))?;
+        write_config_updates_at_path(&target_path, Some(model_name), Some(reasoning_effort), None)?;
+        Self::load_from_default_path()
+    }
+
+    pub fn set_default_model_selection_with_planning(
+        model_name: &str,
+        reasoning_effort: ReasoningEffort,
+        planning_agents: &[PlanningAgentConfig],
+    ) -> Result<Self> {
+        let home_path = default_home_config_path();
+        let cwd_path = PathBuf::from(DEFAULT_CONFIG_PATH);
+        let target_path = default_config_update_path(home_path.as_deref(), Some(&cwd_path))?;
+        write_config_updates_at_path(
+            &target_path,
+            Some(model_name),
+            Some(reasoning_effort),
+            Some(planning_agents),
+        )?;
         Self::load_from_default_path()
     }
 
@@ -113,7 +136,23 @@ impl AppConfig {
         model_name: &str,
         reasoning_effort: ReasoningEffort,
     ) -> Result<Self> {
-        write_azure_config_updates_at_path(path, Some(model_name), Some(reasoning_effort))?;
+        write_config_updates_at_path(path, Some(model_name), Some(reasoning_effort), None)?;
+        Self::load_from_path(path)
+    }
+
+    pub fn set_default_planning_agents(planning_agents: &[PlanningAgentConfig]) -> Result<Self> {
+        let home_path = default_home_config_path();
+        let cwd_path = PathBuf::from(DEFAULT_CONFIG_PATH);
+        let target_path = default_config_update_path(home_path.as_deref(), Some(&cwd_path))?;
+        write_config_updates_at_path(&target_path, None, None, Some(planning_agents))?;
+        Self::load_from_default_path()
+    }
+
+    pub fn set_planning_agents_at_path(
+        path: &Path,
+        planning_agents: &[PlanningAgentConfig],
+    ) -> Result<Self> {
+        write_config_updates_at_path(path, None, None, Some(planning_agents))?;
         Self::load_from_path(path)
     }
 
@@ -150,6 +189,13 @@ impl AppConfig {
             bail!("subagents.max_concurrent must be at least 1");
         }
 
+        let sanitized = sanitize_planning_agents(&self.azure.model_name, &self.planning.agents);
+        if sanitized.len() != self.planning.agents.len() {
+            bail!(
+                "planning.agents must reference unique registry models other than the current azure.model_name, and each selected reasoning_effort must be supported by that model"
+            );
+        }
+
         if self.tools.max_output_tokens == 0 {
             bail!("tools.max_output_tokens must be at least 1");
         }
@@ -165,6 +211,7 @@ struct PartialAppConfig {
     azure: Option<PartialAzureConfig>,
     ui: Option<PartialUiConfig>,
     subagents: Option<PartialSubagentConfig>,
+    planning: Option<PartialPlanningConfig>,
     tools: Option<PartialToolConfig>,
 }
 
@@ -188,6 +235,12 @@ impl PartialAppConfig {
                 .merge(subagents);
         }
 
+        if let Some(planning) = other.planning {
+            self.planning
+                .get_or_insert_with(PartialPlanningConfig::default)
+                .merge(planning);
+        }
+
         if let Some(tools) = other.tools {
             self.tools
                 .get_or_insert_with(PartialToolConfig::default)
@@ -203,6 +256,7 @@ impl PartialAppConfig {
                 .finalize()?,
             ui: self.ui.unwrap_or_default().finalize(),
             subagents: self.subagents.unwrap_or_default().finalize(),
+            planning: self.planning.unwrap_or_default().finalize(),
             tools: self.tools.unwrap_or_default().finalize(),
         })
     }
@@ -306,6 +360,25 @@ impl PartialSubagentConfig {
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
+struct PartialPlanningConfig {
+    agents: Option<Vec<PlanningAgentConfig>>,
+}
+
+impl PartialPlanningConfig {
+    fn merge(&mut self, other: Self) {
+        if other.agents.is_some() {
+            self.agents = other.agents;
+        }
+    }
+
+    fn finalize(self) -> PlanningConfig {
+        PlanningConfig {
+            agents: self.agents.unwrap_or_default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
 struct PartialToolConfig {
     search_include_patterns: Option<Vec<String>>,
     max_output_tokens: Option<usize>,
@@ -398,7 +471,7 @@ impl Default for ToolConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum ReasoningEffort {
     Minimal,
@@ -485,10 +558,11 @@ fn default_config_update_path(
     bail!("failed to determine a config path for config updates")
 }
 
-fn write_azure_config_updates_at_path(
+fn write_config_updates_at_path(
     path: &Path,
     model_name: Option<&str>,
     reasoning_effort: Option<ReasoningEffort>,
+    planning_agents: Option<&[PlanningAgentConfig]>,
 ) -> Result<()> {
     let raw = fs::read_to_string(path).unwrap_or_default();
     let mut value: toml::Value = if raw.trim().is_empty() {
@@ -516,6 +590,26 @@ fn write_azure_config_updates_at_path(
             "reasoning_effort".into(),
             toml::Value::String(reasoning_effort.as_str().to_string()),
         );
+    }
+    let current_main_model = azure
+        .get("model_name")
+        .and_then(toml::Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    if let Some(planning_agents) = planning_agents {
+        let agents = sanitize_planning_agents(&current_main_model, planning_agents);
+        let serialized = agents
+            .into_iter()
+            .map(toml::Value::try_from)
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .context("failed to serialize planning agents")?;
+        let _ = azure;
+        let planning = root
+            .entry("planning")
+            .or_insert_with(|| toml::Value::Table(Default::default()))
+            .as_table_mut()
+            .context("config planning value must be a TOML table")?;
+        planning.insert("agents".into(), toml::Value::Array(serialized));
     }
 
     let formatted = toml::to_string_pretty(&value)
@@ -631,6 +725,7 @@ mod tests {
             },
             ui: UiConfig::default(),
             subagents: SubagentConfig::default(),
+            planning: PlanningConfig::default(),
             tools: ToolConfig::default(),
         };
 
@@ -665,6 +760,7 @@ mod tests {
             },
             ui: UiConfig::default(),
             subagents: SubagentConfig::default(),
+            planning: PlanningConfig::default(),
             tools: ToolConfig::default(),
         };
 
@@ -819,6 +915,53 @@ mod tests {
     }
 
     #[test]
+    fn set_planning_agents_updates_config_file() {
+        let path = std::env::temp_dir().join(format!(
+            "oat-planning-config-{}-{}.toml",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("timestamp")
+                .as_nanos()
+        ));
+
+        fs::write(
+            &path,
+            r#"
+            [azure]
+            resource_name = "demo-resource"
+            api_key = "secret"
+            model_name = "gpt-5.4-mini"
+            reasoning_effort = "medium"
+            "#,
+        )
+        .expect("write temp config");
+
+        let updated = AppConfig::set_planning_agents_at_path(
+            &path,
+            &[PlanningAgentConfig {
+                model_name: "gpt-5.4".into(),
+                reasoning_effort: ReasoningEffort::High,
+            }],
+        )
+        .expect("update planning config");
+
+        assert_eq!(
+            updated.planning.agents,
+            vec![PlanningAgentConfig {
+                model_name: "gpt-5.4".into(),
+                reasoning_effort: ReasoningEffort::High,
+            }]
+        );
+
+        let raw = fs::read_to_string(&path).expect("read updated config");
+        assert!(raw.contains("model_name = \"gpt-5.4\""));
+        assert!(raw.contains("reasoning_effort = \"high\""));
+
+        fs::remove_file(path).expect("remove temp config");
+    }
+
+    #[test]
     fn set_model_selection_updates_config_file() {
         let path = unique_temp_path("model-selection");
 
@@ -884,6 +1027,7 @@ mod tests {
             },
             ui: UiConfig::default(),
             subagents: SubagentConfig { max_concurrent: 0 },
+            planning: PlanningConfig::default(),
             tools: ToolConfig::default(),
         };
 
@@ -902,6 +1046,7 @@ mod tests {
             },
             ui: UiConfig::default(),
             subagents: SubagentConfig::default(),
+            planning: PlanningConfig::default(),
             tools: ToolConfig {
                 search_include_patterns: Vec::new(),
                 max_output_tokens: 0,
@@ -923,6 +1068,7 @@ mod tests {
             },
             ui: UiConfig::default(),
             subagents: SubagentConfig::default(),
+            planning: PlanningConfig::default(),
             tools: ToolConfig {
                 search_include_patterns: vec!["[".into()],
                 max_output_tokens: tool_policy::default_tool_output_max_tokens(),

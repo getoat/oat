@@ -316,6 +316,7 @@ mod tests {
             },
             ui: crate::config::UiConfig::default(),
             subagents: crate::config::SubagentConfig { max_concurrent: 4 },
+            planning: crate::planning::PlanningConfig::default(),
             tools: crate::config::ToolConfig::default(),
         }
     }

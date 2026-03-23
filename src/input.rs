@@ -8,21 +8,31 @@ use crate::app::Action;
 const MOUSE_SCROLL_LINES: usize = 3;
 
 pub fn map_event(event: Event) -> Option<Action> {
-    map_event_with_state(event, false)
+    map_event_with_state(event, false, false)
 }
 
-pub fn map_event_with_state(event: Event, awaiting_write_approval: bool) -> Option<Action> {
+pub fn map_event_with_state(
+    event: Event,
+    awaiting_write_approval: bool,
+    selection_picker_visible: bool,
+) -> Option<Action> {
     match event {
-        Event::Key(key) if key.kind == KeyEventKind::Press => {
-            Some(map_key_event(key, awaiting_write_approval))
-        }
+        Event::Key(key) if key.kind == KeyEventKind::Press => Some(map_key_event(
+            key,
+            awaiting_write_approval,
+            selection_picker_visible,
+        )),
         Event::Mouse(mouse) => map_mouse_event(mouse),
         Event::Paste(text) => (!awaiting_write_approval).then_some(Action::Paste(text)),
         _ => None,
     }
 }
 
-fn map_key_event(key: KeyEvent, awaiting_write_approval: bool) -> Action {
+fn map_key_event(
+    key: KeyEvent,
+    awaiting_write_approval: bool,
+    selection_picker_visible: bool,
+) -> Action {
     if awaiting_write_approval {
         return match (key.code, key.modifiers) {
             (KeyCode::Esc, _) => Action::CancelPendingReply,
@@ -46,6 +56,11 @@ fn map_key_event(key: KeyEvent, awaiting_write_approval: bool) -> Action {
             Action::ClearComposerOrQuit
         }
         (KeyCode::Tab, _) => Action::ToggleMode,
+        (KeyCode::Left, KeyModifiers::NONE) if selection_picker_visible => Action::PickerTabLeft,
+        (KeyCode::Right, KeyModifiers::NONE) if selection_picker_visible => Action::PickerTabRight,
+        (KeyCode::Char(' '), KeyModifiers::NONE) if selection_picker_visible => {
+            Action::TogglePickerSelection
+        }
         (KeyCode::Up, KeyModifiers::NONE) => Action::SelectPreviousCommand,
         (KeyCode::Down, KeyModifiers::NONE) => Action::SelectNextCommand,
         (KeyCode::PageUp, _) => Action::ScrollHistoryPageUp,
@@ -141,6 +156,34 @@ mod tests {
     }
 
     #[test]
+    fn picker_visible_remaps_left_right_and_space() {
+        assert_eq!(
+            map_event_with_state(
+                Event::Key(key(KeyCode::Left, KeyModifiers::NONE)),
+                false,
+                true
+            ),
+            Some(Action::PickerTabLeft)
+        );
+        assert_eq!(
+            map_event_with_state(
+                Event::Key(key(KeyCode::Right, KeyModifiers::NONE)),
+                false,
+                true
+            ),
+            Some(Action::PickerTabRight)
+        );
+        assert_eq!(
+            map_event_with_state(
+                Event::Key(key(KeyCode::Char(' '), KeyModifiers::NONE)),
+                false,
+                true
+            ),
+            Some(Action::TogglePickerSelection)
+        );
+    }
+
+    #[test]
     fn page_up_maps_to_history_scroll() {
         let action = map_event(Event::Key(key(KeyCode::PageUp, KeyModifiers::NONE)));
         assert_eq!(action, Some(Action::ScrollHistoryPageUp));
@@ -175,21 +218,24 @@ mod tests {
         assert_eq!(
             map_event_with_state(
                 Event::Key(key(KeyCode::Char('a'), KeyModifiers::NONE)),
-                true
+                true,
+                false,
             ),
             Some(Action::ApproveWriteOnce)
         );
         assert_eq!(
             map_event_with_state(
                 Event::Key(key(KeyCode::Char('s'), KeyModifiers::NONE)),
-                true
+                true,
+                false,
             ),
             Some(Action::ApproveWriteAllSession)
         );
         assert_eq!(
             map_event_with_state(
                 Event::Key(key(KeyCode::Char('d'), KeyModifiers::NONE)),
-                true
+                true,
+                false,
             ),
             Some(Action::DenyWrite)
         );
@@ -200,12 +246,13 @@ mod tests {
         assert_eq!(
             map_event_with_state(
                 Event::Key(key(KeyCode::Char('x'), KeyModifiers::NONE)),
-                true
+                true,
+                false,
             ),
             Some(Action::Tick)
         );
         assert_eq!(
-            map_event_with_state(Event::Paste("hello".into()), true),
+            map_event_with_state(Event::Paste("hello".into()), true, false),
             None
         );
     }

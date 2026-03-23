@@ -1,4 +1,4 @@
-use ratatui::layout::Rect;
+use ratatui::{layout::Rect, style::Color, text::Line};
 use ratatui_textarea::{CursorMove, Input, TextArea};
 use rig::completion::Message as RigMessage;
 use std::{
@@ -10,15 +10,17 @@ use crate::{
     completion_request::estimated_history_context_tokens,
     config::ReasoningEffort,
     model_registry,
+    planning::{PlanningAgentConfig, default_planning_reasoning},
     stats::StatsTotals,
     tools::{MutationPreview, mutation_preview, write_approval_summary},
 };
 
-const COMMANDS: [SlashCommand; 5] = [
+const COMMANDS: [SlashCommand; 6] = [
     SlashCommand::NewSession,
     SlashCommand::Stats,
     SlashCommand::Model,
     SlashCommand::Effort,
+    SlashCommand::Plan,
     SlashCommand::Quit,
 ];
 const DEFAULT_COMMAND_HISTORY_LIMIT: usize = 20;
@@ -28,6 +30,7 @@ pub enum SlashCommand {
     Stats,
     Model,
     Effort,
+    Plan,
     Quit,
 }
 
@@ -38,6 +41,7 @@ impl SlashCommand {
             Self::Stats => "/stats",
             Self::Model => "/model",
             Self::Effort => "/effort",
+            Self::Plan => "/plan",
             Self::Quit => "/quit",
         }
     }
@@ -48,6 +52,7 @@ impl SlashCommand {
             Self::Stats => &["/status"],
             Self::Model => &["/models"],
             Self::Effort => &["/reasoning", "/thinking"],
+            Self::Plan => &[],
             Self::Quit => &["/exit"],
         }
     }
@@ -58,6 +63,7 @@ impl SlashCommand {
             Self::Stats => "Show session and historical usage stats",
             Self::Model => "Select the model and reasoning effort",
             Self::Effort => "Set reasoning effort for the current model",
+            Self::Plan => "Draft a planning brief and run planning agents",
             Self::Quit => "Exit the app",
         }
     }
@@ -66,6 +72,7 @@ impl SlashCommand {
         match self {
             Self::Model => Some("/model"),
             Self::Effort => Some("/effort <minimal|low|medium|high|xhigh>"),
+            Self::Plan => Some("/plan"),
             Self::NewSession | Self::Stats | Self::Quit => None,
         }
     }
@@ -109,12 +116,43 @@ impl SlashCommand {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModelPickerTab {
+    NormalAgent,
+    PlanningAgents,
+}
+
+impl ModelPickerTab {
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::NormalAgent => "Normal agent",
+            Self::PlanningAgents => "Planning agents",
+        }
+    }
+
+    fn toggle(&mut self, direction: isize) {
+        *self = match (*self, direction.is_negative()) {
+            (Self::NormalAgent, false) | (Self::PlanningAgents, true) => Self::PlanningAgents,
+            (Self::PlanningAgents, false) | (Self::NormalAgent, true) => Self::NormalAgent,
+        };
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReasoningPickerTarget {
+    NormalAgent,
+    PlanningAgent,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SelectionPicker {
     Model {
-        selected_index: usize,
+        active_tab: ModelPickerTab,
+        normal_selected_index: usize,
+        planning_selected_index: usize,
     },
     Reasoning {
+        target: ReasoningPickerTarget,
         model_name: String,
         options: Vec<ReasoningEffort>,
         selected_index: usize,
@@ -125,6 +163,13 @@ pub enum SelectionPicker {
 pub(super) enum PickerSelection {
     Model(String),
     Reasoning(ReasoningEffort),
+    PlanningAgent(PlanningAgentConfig),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SubagentStatusKind {
+    Subagent,
+    Planning,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -224,6 +269,8 @@ pub enum SubagentDisplayState {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SubagentStatusEntry {
     pub id: String,
+    pub kind: SubagentStatusKind,
+    pub display_label: String,
     pub state: SubagentDisplayState,
     pub status_text: String,
     pub latest_tool_name: Option<String>,
@@ -261,6 +308,14 @@ pub(super) struct HistoryViewState {
     selection_focus: Option<HistorySelectionPoint>,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct HistoryRenderCache {
+    pub(crate) width: usize,
+    pub(crate) accent: Color,
+    pub(crate) transcript_revision: u64,
+    pub(crate) lines: Vec<Line<'static>>,
+}
+
 #[derive(Debug)]
 struct CommandRecallState {
     entries: Vec<String>,
@@ -281,7 +336,9 @@ pub struct App {
     pub(super) should_quit: bool,
     pub(super) composer: TextArea<'static>,
     pub(super) entries: Vec<TranscriptEntry>,
+    pub(super) transcript_revision: u64,
     pub(super) session_history: Vec<RigMessage>,
+    pub(super) estimated_session_history_tokens: u64,
     pub(super) pending_reply: Option<PendingReply>,
     pub(super) next_reply_id: u64,
     pub(super) tick_count: usize,
@@ -289,9 +346,12 @@ pub struct App {
     pub(super) show_tool_output: bool,
     pub(super) model_name: String,
     pub(super) reasoning_effort: ReasoningEffort,
+    pub(super) planning_agents: Vec<PlanningAgentConfig>,
     pub(super) session_stats: StatsTotals,
     pub(super) selected_command: SlashCommand,
     pub(super) picker: Option<SelectionPicker>,
+    pub(super) planning_draft_mode: bool,
+    pub(super) history_render_cache: Option<HistoryRenderCache>,
     pub(super) history: HistoryViewState,
     command_history: CommandRecallState,
 }
@@ -308,6 +368,7 @@ impl App {
             show_tool_output,
             model_name,
             reasoning_effort,
+            Vec::new(),
             AccessMode::ReadOnly,
             ApprovalMode::Manual,
         )
@@ -318,6 +379,7 @@ impl App {
         show_tool_output: bool,
         model_name: impl Into<String>,
         reasoning_effort: ReasoningEffort,
+        planning_agents: Vec<PlanningAgentConfig>,
         initial_mode: AccessMode,
         initial_approval_mode: ApprovalMode,
     ) -> Self {
@@ -336,7 +398,9 @@ impl App {
                 text: welcome_message(&model_name, initial_mode),
                 style: MessageStyle::Plain,
             })],
+            transcript_revision: 0,
             session_history: Vec::new(),
+            estimated_session_history_tokens: 0,
             pending_reply: None,
             next_reply_id: 1,
             tick_count: 0,
@@ -344,9 +408,12 @@ impl App {
             show_tool_output,
             model_name,
             reasoning_effort,
+            planning_agents,
             session_stats: StatsTotals::default(),
             selected_command: SlashCommand::NewSession,
             picker: None,
+            planning_draft_mode: false,
+            history_render_cache: None,
             history: HistoryViewState::default(),
             command_history: CommandRecallState::default(),
         }
@@ -453,6 +520,14 @@ impl App {
         self.reasoning_effort
     }
 
+    pub fn planning_agents(&self) -> &[PlanningAgentConfig] {
+        &self.planning_agents
+    }
+
+    pub fn planning_draft_mode(&self) -> bool {
+        self.planning_draft_mode
+    }
+
     pub fn current_model_info(&self) -> Option<&'static model_registry::ModelInfo> {
         model_registry::find_model(&self.model_name)
     }
@@ -466,7 +541,7 @@ impl App {
     }
 
     pub fn estimated_next_request_context_tokens(&self) -> u64 {
-        estimated_history_context_tokens(&self.session_history)
+        self.estimated_session_history_tokens
     }
 
     pub fn next_request_context_percent(&self) -> u64 {
@@ -592,20 +667,24 @@ impl App {
             text: welcome_message(&self.model_name, self.initial_mode),
             style: MessageStyle::Plain,
         })];
+        self.bump_transcript_revision();
         self.tick_count = 0;
         self.mode = self.initial_mode;
         self.session_history.clear();
+        self.estimated_session_history_tokens = 0;
         self.pending_reply = None;
         self.pending_write_approvals.clear();
         self.approval_mode = self.initial_approval_mode;
         self.resume_history_follow();
         self.history.reset();
         self.picker = None;
+        self.planning_draft_mode = false;
         self.command_history.reset_navigation();
         self.clear_composer();
     }
 
     pub(super) fn replace_session_history(&mut self, history: Vec<RigMessage>) {
+        self.estimated_session_history_tokens = estimated_history_context_tokens(&history);
         self.session_history = history;
     }
 
@@ -619,6 +698,10 @@ impl App {
 
     pub(crate) fn set_model_name(&mut self, model_name: impl Into<String>) {
         self.model_name = model_name.into();
+    }
+
+    pub(crate) fn set_planning_agents(&mut self, planning_agents: Vec<PlanningAgentConfig>) {
+        self.planning_agents = planning_agents;
     }
 
     #[cfg(test)]
@@ -716,6 +799,10 @@ impl App {
         self.push_message(Speaker::Agent, text, MessageStyle::Plain);
     }
 
+    pub(crate) fn push_user_message(&mut self, text: impl Into<String>) {
+        self.push_message(Speaker::User, text, MessageStyle::Plain);
+    }
+
     pub fn push_error_message(&mut self, text: impl Into<String>) {
         self.push_message(Speaker::Agent, text, MessageStyle::Error);
     }
@@ -730,6 +817,7 @@ impl App {
             name,
             parameter,
         }));
+        self.bump_transcript_revision();
     }
 
     pub(super) fn push_tool_result(&mut self, name: String, output: String) {
@@ -738,29 +826,38 @@ impl App {
                 name,
                 output,
             }));
+        self.bump_transcript_revision();
     }
 
     pub(super) fn upsert_subagent_status(
         &mut self,
         id: String,
+        kind: SubagentStatusKind,
+        display_label: String,
         state: SubagentDisplayState,
         status_text: String,
     ) {
         if let Some(TranscriptEntry::SubagentStatus(entry)) = self.entries.iter_mut().find(
             |entry| matches!(entry, TranscriptEntry::SubagentStatus(status) if status.id == id),
         ) {
+            entry.kind = kind;
+            entry.display_label = display_label;
             entry.state = state;
             entry.status_text = status_text;
+            self.bump_transcript_revision();
             return;
         }
 
         self.entries
             .push(TranscriptEntry::SubagentStatus(SubagentStatusEntry {
                 id,
+                kind,
+                display_label,
                 state,
                 status_text,
                 latest_tool_name: None,
             }));
+        self.bump_transcript_revision();
     }
 
     pub(super) fn set_subagent_latest_tool(&mut self, id: String, latest_tool_name: String) {
@@ -768,16 +865,20 @@ impl App {
             |entry| matches!(entry, TranscriptEntry::SubagentStatus(status) if status.id == id),
         ) {
             entry.latest_tool_name = Some(latest_tool_name);
+            self.bump_transcript_revision();
             return;
         }
 
         self.entries
             .push(TranscriptEntry::SubagentStatus(SubagentStatusEntry {
+                display_label: id.clone(),
                 id,
+                kind: SubagentStatusKind::Subagent,
                 state: SubagentDisplayState::Running,
                 status_text: "running".into(),
                 latest_tool_name: Some(latest_tool_name),
             }));
+        self.bump_transcript_revision();
     }
 
     pub(super) fn append_pending_stream_message(&mut self, delta: &str, style: MessageStyle) {
@@ -807,6 +908,7 @@ impl App {
 
         if let Some(TranscriptEntry::Message(message)) = self.entries.get_mut(existing_index) {
             message.text.push_str(delta);
+            self.bump_transcript_revision();
         }
     }
 
@@ -816,6 +918,7 @@ impl App {
             text: text.into(),
             style,
         }));
+        self.bump_transcript_revision();
     }
 
     pub(super) fn move_command_selection_up(&mut self) {
@@ -827,25 +930,55 @@ impl App {
     }
 
     pub(crate) fn open_model_picker(&mut self) {
-        let selected_index = model_registry::models()
+        let normal_selected_index = model_registry::models()
             .iter()
             .position(|model| model.name == self.model_name)
             .unwrap_or(0);
-        self.picker = Some(SelectionPicker::Model { selected_index });
+        self.picker = Some(SelectionPicker::Model {
+            active_tab: ModelPickerTab::NormalAgent,
+            normal_selected_index,
+            planning_selected_index: 0,
+        });
     }
 
     pub(crate) fn open_reasoning_picker(&mut self) {
-        let Some(options) = model_registry::reasoning_levels_for_model(&self.model_name) else {
+        self.open_reasoning_picker_for(ReasoningPickerTarget::NormalAgent, self.model_name.clone());
+    }
+
+    pub(crate) fn open_reasoning_picker_for(
+        &mut self,
+        target: ReasoningPickerTarget,
+        model_name: String,
+    ) {
+        let Some(options) = model_registry::reasoning_levels_for_model(&model_name) else {
             self.picker = None;
             return;
         };
 
-        let selected_index = options
-            .iter()
-            .position(|level| *level == self.reasoning_effort)
-            .unwrap_or(0);
+        let selected_index = match target {
+            ReasoningPickerTarget::NormalAgent => options
+                .iter()
+                .position(|level| *level == self.reasoning_effort)
+                .unwrap_or(0),
+            ReasoningPickerTarget::PlanningAgent => options
+                .iter()
+                .position(|level| {
+                    self.planning_agents
+                        .iter()
+                        .find(|agent| agent.model_name == model_name)
+                        .map(|agent| *level == agent.reasoning_effort)
+                        .unwrap_or(false)
+                })
+                .unwrap_or_else(|| {
+                    options
+                        .iter()
+                        .position(|level| *level == default_planning_reasoning(&model_name))
+                        .unwrap_or(0)
+                }),
+        };
         self.picker = Some(SelectionPicker::Reasoning {
-            model_name: self.model_name.clone(),
+            target,
+            model_name,
             options: options.to_vec(),
             selected_index,
         });
@@ -863,20 +996,101 @@ impl App {
         self.move_picker_selection(1);
     }
 
+    pub(super) fn move_picker_tab_left(&mut self) {
+        self.move_picker_tab(-1);
+    }
+
+    pub(super) fn move_picker_tab_right(&mut self) {
+        self.move_picker_tab(1);
+    }
+
+    pub(super) fn toggle_picker_selection(&mut self) -> Option<Vec<PlanningAgentConfig>> {
+        let planning_selected_index = match self.picker.as_ref()? {
+            SelectionPicker::Model {
+                active_tab: ModelPickerTab::PlanningAgents,
+                planning_selected_index,
+                ..
+            } => *planning_selected_index,
+            _ => return None,
+        };
+        let model_name = match self.planning_models().get(planning_selected_index) {
+            Some(model) => model.name.to_string(),
+            None => return None,
+        };
+
+        if let Some(existing_index) = self
+            .planning_agents
+            .iter()
+            .position(|agent| agent.model_name == model_name)
+        {
+            self.planning_agents.remove(existing_index);
+        } else {
+            self.planning_agents.push(PlanningAgentConfig {
+                model_name,
+                reasoning_effort: default_planning_reasoning(
+                    self.planning_models()
+                        .get(planning_selected_index)
+                        .map(|model| model.name)
+                        .unwrap_or_default(),
+                ),
+            });
+        }
+
+        Some(self.planning_agents.clone())
+    }
+
     pub(super) fn apply_picker_selection(&mut self) -> Option<PickerSelection> {
         let picker = self.picker.take()?;
         match picker {
-            SelectionPicker::Model { selected_index } => model_registry::models()
-                .get(selected_index)
-                .map(|model| PickerSelection::Model(model.name.to_string())),
+            SelectionPicker::Model {
+                active_tab,
+                normal_selected_index,
+                planning_selected_index,
+            } => match active_tab {
+                ModelPickerTab::NormalAgent => model_registry::models()
+                    .get(normal_selected_index)
+                    .map(|model| PickerSelection::Model(model.name.to_string())),
+                ModelPickerTab::PlanningAgents => {
+                    let model_name = self
+                        .planning_models()
+                        .get(planning_selected_index)
+                        .map(|model| model.name.to_string())?;
+                    self.open_reasoning_picker_for(
+                        ReasoningPickerTarget::PlanningAgent,
+                        model_name,
+                    );
+                    None
+                }
+            },
             SelectionPicker::Reasoning {
+                target,
+                model_name,
                 options,
                 selected_index,
-                ..
             } => options
                 .get(selected_index)
                 .copied()
-                .map(PickerSelection::Reasoning),
+                .map(|reasoning_effort| match target {
+                    ReasoningPickerTarget::NormalAgent => {
+                        PickerSelection::Reasoning(reasoning_effort)
+                    }
+                    ReasoningPickerTarget::PlanningAgent => {
+                        let planning_agent = PlanningAgentConfig {
+                            model_name,
+                            reasoning_effort,
+                        };
+                        if let Some(existing) = self
+                            .planning_agents
+                            .iter_mut()
+                            .find(|agent| agent.model_name == planning_agent.model_name)
+                        {
+                            *existing = planning_agent.clone();
+                        } else {
+                            self.planning_agents.push(planning_agent.clone());
+                        }
+                        PickerSelection::PlanningAgent(planning_agent)
+                    }
+                }),
         }
     }
 
@@ -890,6 +1104,27 @@ impl App {
 
     pub(super) fn clear_composer(&mut self) {
         self.set_composer_text_internal("", true);
+    }
+
+    pub(crate) fn enter_planning_draft_mode(&mut self) {
+        self.planning_draft_mode = true;
+        self.clear_composer();
+    }
+
+    pub(crate) fn cancel_planning_draft_mode(&mut self) -> bool {
+        if !self.planning_draft_mode {
+            return false;
+        }
+
+        self.planning_draft_mode = false;
+        self.clear_composer();
+        true
+    }
+
+    pub(crate) fn consume_planning_draft_mode(&mut self) -> bool {
+        let was_active = self.planning_draft_mode;
+        self.planning_draft_mode = false;
+        was_active
     }
 
     pub(super) fn insert_composer_newline(&mut self) {
@@ -965,6 +1200,46 @@ impl App {
         self.history.update_snapshot(area, lines);
     }
 
+    pub(crate) fn history_cache_allowed(&self) -> bool {
+        !self.shows_startup_banner()
+            && !(self.has_pending_reply() && !self.has_visible_pending_content())
+    }
+
+    pub(crate) fn cached_history_lines(
+        &self,
+        width: usize,
+        accent: Color,
+    ) -> Option<&[Line<'static>]> {
+        let cache = self.history_render_cache.as_ref()?;
+        (cache.width == width
+            && cache.accent == accent
+            && cache.transcript_revision == self.transcript_revision)
+            .then_some(cache.lines.as_slice())
+    }
+
+    pub(crate) fn store_history_render_cache(
+        &mut self,
+        width: usize,
+        accent: Color,
+        lines: Vec<Line<'static>>,
+    ) {
+        self.history_render_cache = Some(HistoryRenderCache {
+            width,
+            accent,
+            transcript_revision: self.transcript_revision,
+            lines,
+        });
+    }
+
+    pub(crate) fn clear_history_render_cache(&mut self) {
+        self.history_render_cache = None;
+    }
+
+    fn bump_transcript_revision(&mut self) {
+        self.transcript_revision = self.transcript_revision.wrapping_add(1);
+        self.history_render_cache = None;
+    }
+
     pub(super) fn scroll_history_page_up(&mut self) {
         self.scroll_history_up(self.history.page_rows());
     }
@@ -1028,20 +1303,51 @@ impl App {
         }
     }
 
+    fn planning_models(&self) -> Vec<&'static model_registry::ModelInfo> {
+        model_registry::models()
+            .iter()
+            .filter(|model| model.name != self.model_name)
+            .collect()
+    }
+
+    fn move_picker_tab(&mut self, direction: isize) {
+        let Some(SelectionPicker::Model { active_tab, .. }) = self.picker.as_mut() else {
+            return;
+        };
+
+        active_tab.toggle(direction);
+    }
+
     fn move_picker_selection(&mut self, direction: isize) {
+        let planning_len = self.planning_models().len();
         let Some(picker) = self.picker.as_mut() else {
             return;
         };
 
         match picker {
-            SelectionPicker::Model { selected_index } => {
-                let len = model_registry::models().len();
-                if len == 0 {
-                    return;
+            SelectionPicker::Model {
+                active_tab,
+                normal_selected_index,
+                planning_selected_index,
+            } => match active_tab {
+                ModelPickerTab::NormalAgent => {
+                    let len = model_registry::models().len();
+                    if len == 0 {
+                        return;
+                    }
+                    *normal_selected_index = (*normal_selected_index as isize + direction)
+                        .rem_euclid(len as isize)
+                        as usize;
                 }
-                *selected_index =
-                    (*selected_index as isize + direction).rem_euclid(len as isize) as usize;
-            }
+                ModelPickerTab::PlanningAgents => {
+                    if planning_len == 0 {
+                        return;
+                    }
+                    *planning_selected_index = (*planning_selected_index as isize + direction)
+                        .rem_euclid(planning_len as isize)
+                        as usize;
+                }
+            },
             SelectionPicker::Reasoning {
                 options,
                 selected_index,
@@ -1350,7 +1656,7 @@ fn new_composer() -> TextArea<'static> {
 
 fn picker_height(picker: &SelectionPicker) -> u16 {
     let line_count = match picker {
-        SelectionPicker::Model { .. } => model_registry::models().len(),
+        SelectionPicker::Model { .. } => model_registry::models().len().max(1) + 1,
         SelectionPicker::Reasoning { options, .. } => options.len(),
     }
     .clamp(1, 4) as u16;
@@ -1396,6 +1702,7 @@ fn welcome_message(model_name: &str, mode: AccessMode) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::{style::Color, text::Line};
 
     #[test]
     fn access_mode_toggle_updates_mode_and_label() {
@@ -1532,9 +1839,13 @@ mod tests {
 
         assert_eq!(
             app.selection_picker(),
-            Some(&SelectionPicker::Model { selected_index: 1 })
+            Some(&SelectionPicker::Model {
+                active_tab: ModelPickerTab::NormalAgent,
+                normal_selected_index: 1,
+                planning_selected_index: 0,
+            })
         );
-        assert_eq!(app.overlay_height(), 5);
+        assert_eq!(app.overlay_height(), 6);
     }
 
     #[test]
@@ -1546,6 +1857,7 @@ mod tests {
         assert_eq!(
             app.selection_picker(),
             Some(&SelectionPicker::Reasoning {
+                target: ReasoningPickerTarget::NormalAgent,
                 model_name: "gpt-5.4".into(),
                 options: vec![
                     ReasoningEffort::Low,
@@ -1572,6 +1884,18 @@ mod tests {
     }
 
     #[test]
+    fn new_session_clears_cached_session_history_estimate() {
+        let mut app = App::new(true, false, "gpt-5.4-mini", ReasoningEffort::Medium);
+        app.replace_session_history(vec![RigMessage::assistant("token ".repeat(8_000))]);
+
+        assert!(app.estimated_next_request_context_tokens() > 0);
+
+        app.reset_session();
+
+        assert_eq!(app.estimated_next_request_context_tokens(), 0);
+    }
+
+    #[test]
     fn supported_reasoning_levels_fall_back_for_unknown_model() {
         let app = App::new(true, false, "custom-deployment", ReasoningEffort::Medium);
 
@@ -1585,6 +1909,18 @@ mod tests {
                 ReasoningEffort::XHigh,
             ]
         );
+    }
+
+    #[test]
+    fn transcript_mutation_invalidates_history_render_cache() {
+        let mut app = App::new(true, false, "gpt-5-mini", ReasoningEffort::Medium);
+        app.store_history_render_cache(80, Color::Cyan, vec![Line::from("cached transcript line")]);
+
+        assert!(app.cached_history_lines(80, Color::Cyan).is_some());
+
+        app.push_agent_message("new transcript line");
+
+        assert!(app.cached_history_lines(80, Color::Cyan).is_none());
     }
 
     #[test]
@@ -1623,6 +1959,7 @@ mod tests {
             false,
             "gpt-5-mini",
             ReasoningEffort::Medium,
+            Vec::new(),
             AccessMode::ReadWrite,
             ApprovalMode::Disabled,
         );

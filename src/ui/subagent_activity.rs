@@ -3,7 +3,7 @@ use ratatui::{
     text::{Line, Span},
 };
 
-use crate::app::{SubagentDisplayState, SubagentStatusEntry};
+use crate::app::{SubagentDisplayState, SubagentStatusEntry, SubagentStatusKind};
 
 use super::wrap::wrap_text;
 
@@ -12,8 +12,11 @@ pub(super) fn push_subagent_status_lines(
     entry: &SubagentStatusEntry,
     width: usize,
 ) {
-    let prefix = "● subagent";
-    let body = format!("{}  {}", entry.id, entry.status_text);
+    let prefix = match entry.kind {
+        SubagentStatusKind::Subagent => "● subagent",
+        SubagentStatusKind::Planning => "● planning",
+    };
+    let body = format!("{}  {}", entry.display_label, entry.status_text);
     let content_width = width.saturating_sub(prefix.chars().count() + 2).max(1);
     let wrapped = wrap_text(&body, content_width);
 
@@ -91,6 +94,8 @@ mod tests {
             &mut lines,
             &SubagentStatusEntry {
                 id: "subagent-1".into(),
+                kind: SubagentStatusKind::Subagent,
+                display_label: "subagent-1".into(),
                 state: SubagentDisplayState::Running,
                 status_text: "running in read-only mode".into(),
                 latest_tool_name: Some("VeryLongToolNameThatShouldBeTruncated".into()),
@@ -107,5 +112,27 @@ mod tests {
         assert_eq!(tool_lines.len(), 1);
         assert!(tool_lines[0].chars().count() <= 44);
         assert!(tool_lines[0].ends_with("..."));
+    }
+
+    #[test]
+    fn planning_entries_use_planning_label() {
+        let mut lines = Vec::new();
+        push_subagent_status_lines(
+            &mut lines,
+            &SubagentStatusEntry {
+                id: "subagent-2".into(),
+                kind: SubagentStatusKind::Planning,
+                display_label: "Planning with gpt-5.4".into(),
+                state: SubagentDisplayState::Running,
+                status_text: "running in read-only mode".into(),
+                latest_tool_name: None,
+            },
+            60,
+        );
+
+        let rendered = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
+
+        assert!(rendered.contains("planning"));
+        assert!(rendered.contains("Planning with gpt-5.4"));
     }
 }

@@ -2,13 +2,14 @@ use ratatui_textarea::Input;
 use rig::completion::Message as RigMessage;
 
 use super::state::{
-    App, ChatMessage, MessageStyle, PendingReply, PickerSelection, SlashCommand, Speaker,
-    SubagentDisplayState, TranscriptEntry, WriteApprovalDecision,
+    App, MessageStyle, PendingReply, PickerSelection, SlashCommand, SubagentDisplayState,
+    SubagentStatusKind, TranscriptEntry, WriteApprovalDecision,
 };
 use crate::config::ReasoningEffort;
 use crate::llm::StreamEvent;
 use crate::model_registry;
-use crate::subagents::SubagentUiEvent;
+use crate::planning::PlanningAgentConfig;
+use crate::subagents::{SubagentActivityKind, SubagentUiEvent};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
@@ -25,6 +26,9 @@ pub enum Action {
     ScrollHistoryDown { lines: usize },
     InsertComposerNewline,
     SubmitMessage,
+    TogglePickerSelection,
+    PickerTabLeft,
+    PickerTabRight,
     ApproveWriteOnce,
     ApproveWriteAllSession,
     DenyWrite,
@@ -52,6 +56,13 @@ pub enum Effect {
     },
     SetReasoningEffort {
         reasoning_effort: ReasoningEffort,
+    },
+    SetPlanningAgents {
+        planning_agents: Vec<PlanningAgentConfig>,
+    },
+    RunPlanningWorkflow {
+        reply_id: u64,
+        description: String,
     },
     RebuildLlm {
         access_mode: super::state::AccessMode,
@@ -86,6 +97,9 @@ impl App {
                     self.cancel_pending_reply();
                     Some(Effect::CancelPendingReply)
                 } else if self.cancel_picker() {
+                    None
+                } else if self.cancel_planning_draft_mode() {
+                    self.push_agent_message("Planning draft cancelled.");
                     None
                 } else {
                     None
@@ -151,6 +165,17 @@ impl App {
                 None
             }
             Action::SubmitMessage => submit_message(self),
+            Action::TogglePickerSelection => self
+                .toggle_picker_selection()
+                .map(|planning_agents| Effect::SetPlanningAgents { planning_agents }),
+            Action::PickerTabLeft => {
+                self.move_picker_tab_left();
+                None
+            }
+            Action::PickerTabRight => {
+                self.move_picker_tab_right();
+                None
+            }
             Action::ApproveWriteOnce => resolve_write_approval(
                 apply_write_approval(self, WriteApprovalDecision::AllowOnce),
                 WriteApprovalDecision::AllowOnce,
@@ -216,6 +241,10 @@ fn submit_message(app: &mut App) -> Option<Effect> {
     let submitted = app.composer.lines().join("\n");
     let submitted = submitted.trim().to_owned();
 
+    if app.planning_draft_mode() {
+        return submit_planning_draft(app, &submitted);
+    }
+
     if app.command_query().is_some() {
         let command_name = app.command_name().unwrap_or_default().to_owned();
         let arguments = app.command_arguments().unwrap_or_default().to_owned();
@@ -231,11 +260,7 @@ fn submit_message(app: &mut App) -> Option<Effect> {
     }
 
     app.record_submitted_input(&submitted);
-    app.entries.push(TranscriptEntry::Message(ChatMessage {
-        speaker: Speaker::User,
-        text: submitted.clone(),
-        style: MessageStyle::Plain,
-    }));
+    app.push_user_message(submitted.clone());
     app.resume_history_follow();
     app.clear_composer();
     let reply_id = app.next_reply_id();
@@ -252,10 +277,33 @@ fn submit_message(app: &mut App) -> Option<Effect> {
     })
 }
 
+fn submit_planning_draft(app: &mut App, submitted: &str) -> Option<Effect> {
+    if app.pending_reply.is_some() || submitted.is_empty() {
+        return None;
+    }
+
+    app.consume_planning_draft_mode();
+    app.record_submitted_input(submitted);
+    app.push_user_message(submitted.to_string());
+    app.resume_history_follow();
+    app.clear_composer();
+    let reply_id = app.next_reply_id();
+    app.pending_reply = Some(PendingReply {
+        id: reply_id,
+        reasoning_entry_index: None,
+        text_entry_index: None,
+    });
+
+    Some(Effect::RunPlanningWorkflow {
+        reply_id,
+        description: submitted.to_string(),
+    })
+}
+
 fn submit_command(app: &mut App, command_name: &str, arguments: &str) -> Option<Effect> {
     let Some(command) = app.selected_command() else {
         app.push_error_message(format!(
-            "Unknown command `{command_name}`. Try /new, /stats, /model, /quit, or /effort."
+            "Unknown command `{command_name}`. Try /new, /stats, /model, /plan, /quit, or /effort."
         ));
         return None;
     };
@@ -272,6 +320,7 @@ fn submit_command(app: &mut App, command_name: &str, arguments: &str) -> Option<
         }
         SlashCommand::Stats => submit_stats_command(app, arguments),
         SlashCommand::Model => submit_model_command(app, arguments),
+        SlashCommand::Plan => submit_plan_command(app, arguments),
         SlashCommand::Quit => {
             app.should_quit = true;
             None
@@ -286,6 +335,9 @@ fn submit_picker_selection(app: &mut App) -> Option<Effect> {
         PickerSelection::Reasoning(reasoning_effort) => {
             Some(Effect::SetReasoningEffort { reasoning_effort })
         }
+        PickerSelection::PlanningAgent(_) => Some(Effect::SetPlanningAgents {
+            planning_agents: app.planning_agents().to_vec(),
+        }),
     }
 }
 
@@ -307,6 +359,19 @@ fn submit_model_command(app: &mut App, arguments: &str) -> Option<Effect> {
 
     app.clear_composer();
     app.open_model_picker();
+    None
+}
+
+fn submit_plan_command(app: &mut App, arguments: &str) -> Option<Effect> {
+    if !arguments.trim().is_empty() {
+        app.push_error_message("Usage: /plan");
+        return None;
+    }
+
+    app.enter_planning_draft_mode();
+    app.push_agent_message(
+        "Describe what you want planned, then press Enter to run planning agents.",
+    );
     None
 }
 
@@ -420,9 +485,22 @@ fn on_stream_event(app: &mut App, reply_id: u64, event: StreamEvent) {
 
 fn on_subagent_event(app: &mut App, event: SubagentUiEvent) {
     match event {
-        SubagentUiEvent::Spawned { id, access_mode } => {
+        SubagentUiEvent::Spawned {
+            id,
+            access_mode,
+            activity_kind,
+        } => {
+            let (kind, display_label) = match activity_kind {
+                SubagentActivityKind::General => (SubagentStatusKind::Subagent, id.clone()),
+                SubagentActivityKind::Planning { model_name } => (
+                    SubagentStatusKind::Planning,
+                    format!("Planning with {model_name}"),
+                ),
+            };
             app.upsert_subagent_status(
                 id,
+                kind,
+                display_label,
                 SubagentDisplayState::Running,
                 format!(
                     "running in {} mode",
@@ -439,15 +517,43 @@ fn on_subagent_event(app: &mut App, event: SubagentUiEvent) {
             }
         }
         SubagentUiEvent::Completed { id } => {
-            app.upsert_subagent_status(id, SubagentDisplayState::Completed, "completed".into());
+            let existing = app
+                .entries()
+                .iter()
+                .find_map(|entry| match entry {
+                    TranscriptEntry::SubagentStatus(status) if status.id == id => {
+                        Some((status.kind, status.display_label.clone()))
+                    }
+                    _ => None,
+                })
+                .unwrap_or((SubagentStatusKind::Subagent, id.clone()));
+            app.upsert_subagent_status(
+                id,
+                existing.0,
+                existing.1,
+                SubagentDisplayState::Completed,
+                "completed".into(),
+            );
         }
         SubagentUiEvent::Failed {
             id,
             error,
             log_path,
         } => {
+            let existing = app
+                .entries()
+                .iter()
+                .find_map(|entry| match entry {
+                    TranscriptEntry::SubagentStatus(status) if status.id == id => {
+                        Some((status.kind, status.display_label.clone()))
+                    }
+                    _ => None,
+                })
+                .unwrap_or((SubagentStatusKind::Subagent, id.clone()));
             app.upsert_subagent_status(
                 id.clone(),
+                existing.0,
+                existing.1,
                 SubagentDisplayState::Failed,
                 format!("failed: {error}"),
             );
@@ -488,6 +594,7 @@ mod tests {
     use ratatui::layout::Rect;
 
     use super::*;
+    use crate::app::{ChatMessage, Speaker};
 
     fn new_app(show_thinking: bool) -> App {
         App::new(show_thinking, false, "gpt-5-mini", ReasoningEffort::Medium)
@@ -863,6 +970,7 @@ mod tests {
         app.apply(Action::SubagentEvent(SubagentUiEvent::Spawned {
             id: "subagent-1".into(),
             access_mode: crate::app::AccessMode::ReadOnly,
+            activity_kind: SubagentActivityKind::General,
         }));
 
         app.apply(Action::SubagentEvent(SubagentUiEvent::Updated {
@@ -904,6 +1012,36 @@ mod tests {
     }
 
     #[test]
+    fn plan_command_enters_planning_draft_mode() {
+        let mut app = registry_app(true);
+        app.composer.insert_str("/plan");
+        app.sync_command_selection();
+
+        let effect = app.apply(Action::SubmitMessage);
+
+        assert!(effect.is_none());
+        assert!(app.planning_draft_mode());
+    }
+
+    #[test]
+    fn planning_draft_submission_starts_planning_workflow() {
+        let mut app = registry_app(true);
+        app.enter_planning_draft_mode();
+        app.composer.insert_str("Add a planning workflow");
+
+        let effect = app.apply(Action::SubmitMessage);
+
+        assert_eq!(
+            effect,
+            Some(Effect::RunPlanningWorkflow {
+                reply_id: 1,
+                description: "Add a planning workflow".into(),
+            })
+        );
+        assert!(!app.planning_draft_mode());
+    }
+
+    #[test]
     fn submitting_model_picker_returns_model_selection_effect() {
         let mut app = registry_app(true);
         app.open_model_picker();
@@ -918,6 +1056,25 @@ mod tests {
             })
         );
         assert!(!app.selection_picker_visible());
+    }
+
+    #[test]
+    fn toggling_planning_picker_selection_persists_default_effort() {
+        let mut app = registry_app(true);
+        app.open_model_picker();
+        app.apply(Action::PickerTabRight);
+
+        let effect = app.apply(Action::TogglePickerSelection);
+
+        assert_eq!(
+            effect,
+            Some(Effect::SetPlanningAgents {
+                planning_agents: vec![PlanningAgentConfig {
+                    model_name: "gpt-5.4".into(),
+                    reasoning_effort: ReasoningEffort::Low,
+                }],
+            })
+        );
     }
 
     #[test]

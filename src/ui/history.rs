@@ -66,48 +66,44 @@ pub(super) fn render_history(
             .split(area)
     };
     let content_area = history_layout[0];
-    let mut lines = Vec::new();
-    if app.shows_startup_banner() {
-        push_startup_banner_lines(&mut lines, accent, app.tick_count());
-        lines.push(Line::default());
-    }
-    let visible_entries = visible_entries(app);
-    let mut index = 0;
-
-    while index < visible_entries.len() {
-        if visible_entries[index].is_tool_activity() {
-            let run_end = tool_activity_run_end(&visible_entries, index);
-            push_tool_activity_run_lines(
-                &mut lines,
-                &visible_entries[index..run_end],
-                content_area.width as usize,
-            );
-            index = run_end;
-            continue;
+    let content_width = content_area.width as usize;
+    let use_cache = app.history_cache_allowed();
+    let mut owned_lines = None;
+    let total_lines = if use_cache {
+        if app.cached_history_lines(content_width, accent).is_none() {
+            let lines = build_history_lines(app, content_width, accent, loading_frame);
+            app.store_history_render_cache(content_width, accent, lines);
         }
-
-        push_visible_entry_lines(
-            &mut lines,
-            visible_entries[index],
-            content_area.width as usize,
-            accent,
-        );
-        lines.push(Line::default());
-        index += 1;
-    }
-
-    if app.has_pending_reply() && !app.has_visible_pending_content() {
-        push_pending_lines(
-            &mut lines,
-            content_area.width as usize,
+        app.cached_history_lines(content_width, accent)
+            .expect("history cache should be populated")
+            .len()
+    } else {
+        app.clear_history_render_cache();
+        owned_lines = Some(build_history_lines(
+            app,
+            content_width,
             accent,
             loading_frame,
-        );
-    }
-
+        ));
+        owned_lines.as_ref().expect("owned history lines").len()
+    };
     let visible_count = content_area.height as usize;
-    let start = app.sync_history_viewport(lines.len(), visible_count);
-    let mut visible_lines = history_viewport_lines(lines, start, visible_count);
+    let start = app.sync_history_viewport(total_lines, visible_count);
+    let mut visible_lines = if use_cache {
+        let lines = app
+            .cached_history_lines(content_width, accent)
+            .expect("history cache should be populated");
+        history_viewport_lines(lines, start, visible_count)
+    } else {
+        history_viewport_lines(
+            owned_lines
+                .as_ref()
+                .expect("owned history lines")
+                .as_slice(),
+            start,
+            visible_count,
+        )
+    };
     let history_snapshot = visible_lines
         .iter()
         .map(rendered_line_text)
@@ -119,6 +115,40 @@ pub(super) fn render_history(
     if show_scrollbar && app.history_total_lines() > app.history_viewport_rows() {
         render_history_scrollbar(frame, history_layout[1], app, accent);
     }
+}
+
+fn build_history_lines(
+    app: &App,
+    width: usize,
+    accent: Color,
+    loading_frame: &str,
+) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    if app.shows_startup_banner() {
+        push_startup_banner_lines(&mut lines, accent, app.tick_count());
+        lines.push(Line::default());
+    }
+    let visible_entries = visible_entries(app);
+    let mut index = 0;
+
+    while index < visible_entries.len() {
+        if visible_entries[index].is_tool_activity() {
+            let run_end = tool_activity_run_end(&visible_entries, index);
+            push_tool_activity_run_lines(&mut lines, &visible_entries[index..run_end], width);
+            index = run_end;
+            continue;
+        }
+
+        push_visible_entry_lines(&mut lines, visible_entries[index], width, accent);
+        lines.push(Line::default());
+        index += 1;
+    }
+
+    if app.has_pending_reply() && !app.has_visible_pending_content() {
+        push_pending_lines(&mut lines, width, accent, loading_frame);
+    }
+
+    lines
 }
 
 pub(super) fn scrollbar_thumb_bounds(
@@ -150,7 +180,7 @@ pub(super) fn scrollbar_thumb_bounds(
 }
 
 fn history_viewport_lines(
-    lines: Vec<Line<'static>>,
+    lines: &[Line<'static>],
     start: usize,
     visible_count: usize,
 ) -> Vec<Line<'static>> {
@@ -158,7 +188,12 @@ fn history_viewport_lines(
         return Vec::new();
     }
 
-    lines.into_iter().skip(start).take(visible_count).collect()
+    lines
+        .iter()
+        .skip(start)
+        .take(visible_count)
+        .cloned()
+        .collect()
 }
 
 fn apply_history_selection_highlight(lines: &mut [Line<'static>], app: &App, accent: Color) {

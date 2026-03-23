@@ -148,6 +148,7 @@ impl Tool for SpawnSubagentTool {
             .spawn(SubagentSpawnRequest {
                 prompt: args.prompt,
                 access_mode,
+                activity_kind: crate::subagents::SubagentActivityKind::General,
                 model_name_override: None,
                 config: self.config.clone(),
                 approvals: self.approvals.clone(),
@@ -243,6 +244,7 @@ mod tests {
     use crate::{
         app::ApprovalMode,
         config::{AzureConfig, ReasoningEffort, SubagentConfig, ToolConfig, UiConfig},
+        planning::PlanningConfig,
         stats::StatsStore,
     };
 
@@ -257,6 +259,7 @@ mod tests {
             },
             ui: UiConfig::default(),
             subagents: SubagentConfig { max_concurrent: 4 },
+            planning: PlanningConfig::default(),
             tools: ToolConfig::default(),
         }
     }

@@ -607,6 +607,7 @@ mod tests {
     use crate::{
         agent::AgentContext,
         config::{AzureConfig, ReasoningEffort, SubagentConfig, ToolConfig, UiConfig},
+        planning::PlanningConfig,
     };
     use rig::{OneOrMany, completion::message::Text};
 
@@ -625,6 +626,7 @@ mod tests {
                 command_history_limit: 20,
             },
             subagents: SubagentConfig { max_concurrent: 4 },
+            planning: PlanningConfig::default(),
             tools: ToolConfig::default(),
         }
     }
