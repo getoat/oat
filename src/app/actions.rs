@@ -2,14 +2,18 @@ use ratatui_textarea::Input;
 use rig::completion::Message as RigMessage;
 
 use super::state::{
-    App, MessageStyle, PendingReply, PendingReplyKind, PickerSelection, ShellApprovalDecision,
-    SlashCommand, SubagentDisplayState, SubagentStatusKind, TranscriptEntry, WriteApprovalDecision,
+    App, MessageStyle, PendingReply, PendingReplyKind, PickerSelection, PlanningSessionStage,
+    ShellApprovalDecision, SlashCommand, SubagentDisplayState, SubagentStatusKind, TranscriptEntry,
+    WriteApprovalDecision,
 };
 use crate::ask_user::AskUserResponse;
 use crate::config::ReasoningEffort;
 use crate::llm::StreamEvent;
 use crate::model_registry;
-use crate::planning::PlanningAgentConfig;
+use crate::planning::{
+    PlanningAgentConfig, contains_proposed_plan, extract_planning_ready_brief,
+    planning_conversation_prompt,
+};
 use crate::subagents::{SubagentActivityKind, SubagentUiEvent};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -74,6 +78,7 @@ pub enum Effect {
     RunPlanningWorkflow {
         reply_id: u64,
         description: String,
+        history: Vec<RigMessage>,
     },
     RebuildLlm {
         access_mode: super::state::AccessMode,
@@ -300,10 +305,7 @@ impl App {
             Action::FinishHistorySelection { column, row } => self
                 .finish_history_selection(column, row)
                 .map(|text| Effect::CopyToClipboard { text }),
-            Action::StreamEvent { reply_id, event } => {
-                on_stream_event(self, reply_id, event);
-                None
-            }
+            Action::StreamEvent { reply_id, event } => on_stream_event(self, reply_id, event),
             Action::SubagentEvent(event) => {
                 on_subagent_event(self, event);
                 None
@@ -344,14 +346,21 @@ fn submit_message(app: &mut App) -> Option<Effect> {
         return submit_plan_revision_feedback(app, &submitted);
     }
 
-    if app.planning_draft_mode() {
-        return submit_planning_draft(app, &submitted);
-    }
-
     if app.command_query().is_some() {
         let command_name = app.command_name().unwrap_or_default().to_owned();
         let arguments = app.command_arguments().unwrap_or_default().to_owned();
         return submit_command(app, &command_name, &arguments);
+    }
+
+    if app.planning_draft_mode() {
+        return submit_planning_draft(app, &submitted);
+    }
+
+    if matches!(
+        app.planning_session_stage(),
+        Some(PlanningSessionStage::Conversation | PlanningSessionStage::Finalizing)
+    ) {
+        return submit_planning_turn(app, &submitted);
     }
 
     if app.pending_reply.is_some() {
@@ -462,9 +471,29 @@ fn submit_planning_draft(app: &mut App, submitted: &str) -> Option<Effect> {
     let reply_id = app.next_reply_id();
     app.pending_reply = Some(PendingReply::new(reply_id, PendingReplyKind::Planning));
 
-    Some(Effect::RunPlanningWorkflow {
+    Some(Effect::PromptModel {
         reply_id,
-        description: submitted.to_string(),
+        prompt: planning_conversation_prompt(submitted),
+        history: app.session_history().to_vec(),
+    })
+}
+
+fn submit_planning_turn(app: &mut App, submitted: &str) -> Option<Effect> {
+    if app.pending_reply.is_some() || submitted.is_empty() {
+        return None;
+    }
+
+    app.record_submitted_input(submitted);
+    app.push_user_message(submitted.to_string());
+    app.resume_history_follow();
+    app.clear_composer();
+    let reply_id = app.next_reply_id();
+    app.pending_reply = Some(PendingReply::new(reply_id, PendingReplyKind::Planning));
+
+    Some(Effect::PromptModel {
+        reply_id,
+        prompt: submitted.to_string(),
+        history: app.session_history().to_vec(),
     })
 }
 
@@ -545,7 +574,7 @@ fn submit_plan_command(app: &mut App, arguments: &str) -> Option<Effect> {
 
     app.enter_planning_draft_mode();
     app.push_agent_message(
-        "Describe what you want planned, then press Enter to run planning agents.",
+        "Describe what you want planned, then press Enter to start an interactive planning session.",
     );
     None
 }
@@ -622,27 +651,36 @@ pub(crate) fn compatible_reasoning_effort(
     }
 }
 
-fn on_stream_event(app: &mut App, reply_id: u64, event: StreamEvent) {
+fn on_stream_event(app: &mut App, reply_id: u64, event: StreamEvent) -> Option<Effect> {
     if app.active_reply_id() != Some(reply_id) {
-        return;
+        return None;
     }
 
     match event {
         StreamEvent::TextDelta(delta) => {
-            app.append_pending_stream_message(&delta, MessageStyle::Plain)
+            app.append_pending_stream_message(&delta, MessageStyle::Plain);
+            None
         }
         StreamEvent::ReasoningDelta(delta) => {
             if app.show_thinking() {
                 app.append_pending_stream_message(&delta, MessageStyle::Thinking);
             }
+            None
         }
-        StreamEvent::ToolCall { name, arguments } => app.push_tool_call(name, arguments),
-        StreamEvent::ToolResult { name, output } => app.push_tool_result(name, output),
+        StreamEvent::ToolCall { name, arguments } => {
+            app.push_tool_call(name, arguments);
+            None
+        }
+        StreamEvent::ToolResult { name, output } => {
+            app.push_tool_result(name, output);
+            None
+        }
         StreamEvent::AskUserRequested {
             request_id,
             request,
         } => {
             app.begin_ask_user(request_id, request);
+            None
         }
         StreamEvent::WriteApprovalRequested {
             request_id,
@@ -650,6 +688,7 @@ fn on_stream_event(app: &mut App, reply_id: u64, event: StreamEvent) {
             arguments,
         } => {
             app.begin_write_approval(request_id, tool_name, arguments);
+            None
         }
         StreamEvent::ShellApprovalRequested {
             request_id,
@@ -667,34 +706,57 @@ fn on_stream_event(app: &mut App, reply_id: u64, event: StreamEvent) {
                 working_directory,
                 reason,
             );
+            None
+        }
+        StreamEvent::PlanningFinalizationStarted => {
+            app.begin_planning_finalization();
+            None
         }
         StreamEvent::Finished { history } => {
-            let synthesized_plan = app
+            let pending_kind = app.pending_reply.as_ref().map(|pending| pending.kind);
+            let planning_stage = app.planning_session_stage();
+            let final_text = app
                 .pending_reply
                 .as_ref()
-                .filter(|pending| pending.kind == PendingReplyKind::Planning)
                 .and_then(|pending| pending.text_entry_index)
                 .and_then(|index| app.entries().get(index))
                 .and_then(|entry| match entry {
-                    TranscriptEntry::Message(message) if !message.text.trim().is_empty() => {
-                        Some(())
-                    }
+                    TranscriptEntry::Message(message) => Some(message.text.clone()),
                     _ => None,
                 })
-                .is_some();
+                .unwrap_or_default();
             if let Some(history) = history {
                 app.replace_session_history(history);
             }
             app.clear_pending_ask_user();
             app.pending_reply = None;
-            if synthesized_plan {
+            if planning_stage == Some(PlanningSessionStage::Conversation)
+                && let Some(description) = extract_planning_ready_brief(&final_text)
+            {
+                app.begin_planning_fanout();
+                let reply_id = app.next_reply_id();
+                app.pending_reply = Some(PendingReply::new(reply_id, PendingReplyKind::Planning));
+                return Some(Effect::RunPlanningWorkflow {
+                    reply_id,
+                    description,
+                    history: app.session_history().to_vec(),
+                });
+            }
+            if pending_kind == Some(PendingReplyKind::Planning)
+                && contains_proposed_plan(&final_text)
+            {
                 app.begin_plan_review();
             }
+            None
         }
         StreamEvent::Failed(error) => {
+            if app.planning_session_stage() == Some(PlanningSessionStage::RunningFanout) {
+                app.begin_planning_conversation();
+            }
             app.clear_pending_ask_user();
             app.pending_reply = None;
             app.push_agent_error(format!("Request failed: {error}"));
+            None
         }
     }
 }
@@ -1384,9 +1446,10 @@ mod tests {
 
         assert_eq!(
             effect,
-            Some(Effect::RunPlanningWorkflow {
+            Some(Effect::PromptModel {
                 reply_id: 1,
-                description: "Add a planning workflow".into(),
+                prompt: planning_conversation_prompt("Add a planning workflow"),
+                history: Vec::new(),
             })
         );
         assert!(!app.planning_draft_mode());
@@ -1404,7 +1467,9 @@ mod tests {
 
         app.apply(Action::StreamEvent {
             reply_id: 1,
-            event: StreamEvent::TextDelta("# Test Plan\n\nSummary".into()),
+            event: StreamEvent::TextDelta(
+                "<proposed_plan>\n# Test Plan\n\nSummary\n</proposed_plan>".into(),
+            ),
         });
         app.apply(Action::StreamEvent {
             reply_id: 1,
@@ -1855,6 +1920,42 @@ mod tests {
 
         assert!(app.pending_reply.is_none());
         assert!(!app.plan_active());
+    }
+
+    #[test]
+    fn planning_ready_response_starts_planner_fanout() {
+        let mut app = registry_app(true);
+        app.begin_planning_conversation();
+        app.pending_reply = Some(PendingReply::new(2, PendingReplyKind::Planning));
+        app.replace_session_history(vec![RigMessage::user("plan this")]);
+
+        app.apply(Action::StreamEvent {
+            reply_id: 2,
+            event: StreamEvent::TextDelta(
+                "<planning_ready>\n## Summary\nStable brief\n</planning_ready>".into(),
+            ),
+        });
+        let effect = app.apply(Action::StreamEvent {
+            reply_id: 2,
+            event: StreamEvent::Finished { history: None },
+        });
+
+        assert!(matches!(
+            effect,
+            Some(Effect::RunPlanningWorkflow {
+                description,
+                history,
+                ..
+            }) if description == "## Summary\nStable brief" && history == vec![RigMessage::user("plan this")]
+        ));
+        assert_eq!(
+            app.pending_reply.as_ref().map(|pending| pending.kind),
+            Some(PendingReplyKind::Planning)
+        );
+        assert_eq!(
+            app.planning_session_stage(),
+            Some(PlanningSessionStage::RunningFanout)
+        );
     }
 
     #[test]

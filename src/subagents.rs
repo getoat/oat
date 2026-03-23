@@ -390,6 +390,7 @@ impl SubagentManager {
             | StreamEvent::ReasoningDelta(_)
             | StreamEvent::ToolResult { .. }
             | StreamEvent::AskUserRequested { .. }
+            | StreamEvent::PlanningFinalizationStarted
             | StreamEvent::Finished { .. } => {
                 self.mark_activity(id);
             }

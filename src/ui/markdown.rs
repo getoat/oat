@@ -4,15 +4,15 @@ use ratatui::{
 };
 use tui_markdown::from_str as markdown_from_str;
 
-use crate::app::{App, ChatMessage, MessageStyle, Speaker};
+use crate::{
+    app::{App, ChatMessage, MessageStyle, Speaker},
+    planning::{PROPOSED_PLAN_END_TAG, PROPOSED_PLAN_START_TAG, strip_planning_ready_tags},
+};
 
 use super::wrap::{wrap_styled_lines, wrap_text};
 
 const CODE_BLOCK_HORIZONTAL_PADDING: usize = 1;
 const LOADING_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-const PROPOSED_PLAN_START_TAG: &str = "<proposed_plan>";
-const PROPOSED_PLAN_END_TAG: &str = "</proposed_plan>";
-
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum MarkdownSegment {
     Markdown(String),
@@ -170,7 +170,7 @@ fn push_markdown_message_lines(
     accent: Color,
 ) {
     let content_width = width.saturating_sub(prefix_width(message.speaker)).max(1);
-    let display_text = strip_proposed_plan_tags(&message.text);
+    let display_text = strip_planning_ready_tags(&strip_proposed_plan_tags(&message.text));
     let rendered = render_markdown_message_lines(&display_text, content_width);
     push_prefixed_styled_lines(lines, rendered, message.speaker, accent);
 }

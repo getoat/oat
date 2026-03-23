@@ -4,6 +4,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::{config::ReasoningEffort, model_registry};
 
+pub const PLANNING_READY_START_TAG: &str = "<planning_ready>";
+pub const PLANNING_READY_END_TAG: &str = "</planning_ready>";
+pub const PROPOSED_PLAN_START_TAG: &str = "<proposed_plan>";
+pub const PROPOSED_PLAN_END_TAG: &str = "</proposed_plan>";
+
+const MAIN_PLANNING_PROMPT: &str = include_str!("../prompts/plan.md");
+const SUBAGENT_PLANNING_PROMPT: &str = include_str!("../prompts/plan_subagent.md");
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct PlanningAgentConfig {
     pub model_name: String,
@@ -74,39 +82,47 @@ pub fn planning_jobs(
     jobs
 }
 
-pub fn planner_prompt(description: &str) -> String {
+pub fn planning_conversation_prompt(description: &str) -> String {
     format!(
         concat!(
-            "You are producing a planning-only response for a coding task.\n\n",
-            "Task description:\n",
-            "{description}\n\n",
-            "Before writing the plan, use the available read-only tools to explore the codebase deeply enough that the implementation details are already known.\n",
-            "Resolve concrete specifics such as file locations, symbols, existing patterns, interfaces, and likely touchpoints before finalizing the plan.\n",
-            "Do not leave discovery as future work.\n",
-            "Return a plan only. Do not claim to have made changes. Keep the high-level description to a few sentences.\n",
-            "Use exactly these sections and headings in this order:\n",
-            "1. High level description\n",
-            "2. Implementation plan\n",
-            "3. Assumptions\n",
-            "4. Acceptance criteria\n",
-            "5. Out of scope / caveats / bewares\n\n",
-            "Requirements:\n",
-            "- Focus on concrete implementation steps.\n",
-            "- Use bullet points for the implementation plan.\n",
-            "- Write the plan as a description of intended work, not as instructions to the implementer.\n",
-            "- Prefer wording like 'Will update...', 'Would add...', 'Will not change...', and 'Out of scope includes...'.\n",
-            "- Avoid imperative phrasing like 'Do not change...', 'Add...', 'Use...', or 'Implement...'.\n",
-            "- The implementation plan must be decision-complete and should not contain steps like 'find', 'investigate', 'look up', 'nail down', or 'determine' implementation specifics later.\n",
-            "- If a detail is important to implementation, discover it now and write the concrete result into the plan.\n",
-            "- Include minimal example code only if it is necessary to disambiguate the plan.\n",
-            "- Keep caveats specific and practical.\n",
-            "- Do not include any prose before the first heading.\n"
+            "{prompt}\n\n",
+            "## Runtime instructions\n\n",
+            "- You are starting this planning session before oat runs its automatic planning phase.\n",
+            "- Stay in PHASE 1 and PHASE 2 until intent is stable.\n",
+            "- If any high-impact ambiguity remains, use AskUser for clarifying questions whenever the ambiguity can be expressed as meaningful multiple-choice options, and do not output a final plan yet.\n",
+            "- You may use AskUser multiple times across the planning session. Do not switch to plain-text clarification questions just because you already used AskUser earlier.\n",
+            "- Do not output a {plan_start} block before oat has completed PHASE 3.\n",
+            "- Once intent is solidified, reply with a single {ready_start} block containing a normalized planning brief and no {plan_start} block.\n",
+            "- The normalized brief must include these headings in this order:\n",
+            "  1. Summary\n",
+            "  2. Success criteria\n",
+            "  3. In scope\n",
+            "  4. Out of scope\n",
+            "  5. Constraints\n",
+            "  6. Assumptions\n\n",
+            "## Initial task request\n\n",
+            "{description}\n"
         ),
-        description = description,
+        prompt = MAIN_PLANNING_PROMPT.trim(),
+        ready_start = PLANNING_READY_START_TAG,
+        plan_start = PROPOSED_PLAN_START_TAG,
+        description = description.trim(),
     )
 }
 
-pub fn synthesis_prompt(
+pub fn planner_prompt(description: &str) -> String {
+    format!(
+        concat!(
+            "{prompt}\n\n",
+            "## Stabilized task brief\n\n",
+            "{description}\n"
+        ),
+        prompt = SUBAGENT_PLANNING_PROMPT.trim(),
+        description = description.trim(),
+    )
+}
+
+pub fn planning_finalization_prompt(
     description: &str,
     successful_plans: &[(PlanningJob, String)],
     failed_models: &[String],
@@ -134,37 +150,66 @@ pub fn synthesis_prompt(
 
     format!(
         concat!(
-            "Synthesize a final planning-only answer for this task.\n\n",
-            "Task description:\n",
+            "{prompt}\n\n",
+            "## Runtime instructions\n\n",
+            "- oat has already completed PHASE 3 automatically.\n",
+            "- Continue in PHASE 4.\n",
+            "- Review the planner outputs, resolve conflicts using your judgment, and produce the final plan.\n",
+            "- If a single remaining high-impact ambiguity still blocks a decision-complete plan, use AskUser when the clarification can be represented as meaningful multiple-choice options; only ask in plain text when that is genuinely not practical.\n",
+            "- Do not emit {ready_start} again.\n",
+            "- When the spec is decision complete, wrap the final answer in a {plan_start} block.\n\n",
+            "## Stabilized brief\n\n",
             "{description}\n\n",
-            "Successful planner outputs:\n",
+            "## Successful planner outputs\n\n",
             "{successful_sections}\n",
-            "Planner failures:\n",
+            "## Planner failures\n\n",
             "{failure_note}\n\n",
-            "After reading the planner outputs, do a targeted read-only discovery pass to verify the references you need in order to understand and reconcile the plans.\n",
-            "Validate concrete things like file paths, symbol names, existing abstractions, and interface shapes when they matter to the final plan.\n",
-            "Do enough discovery to ground the merged plan, but do not redo the full exploration effort of each planner and do not delegate.\n",
-            "Produce a single merged plan.\n",
-            "Prefer ideas that appear in multiple planner outputs.\n",
-            "Retain unique steps only when they are concrete and improve the implementation.\n",
-            "Do not include discovery tasks as plan steps. The final plan should read as if the relevant specifics have already been established.\n",
-            "Write the final plan as a description of intended work, not as instructions.\n",
-            "Prefer phrasing like 'Will update...', 'Would add...', 'Will keep...', and 'Will not change...'.\n",
-            "Avoid imperative phrasing such as 'Do not change...', 'Add...', 'Use...', or 'Implement...'.\n",
-            "Do not mention vote counts or describe the synthesis process.\n",
-            "Keep the high-level description to a few sentences.\n",
-            "Wrap the entire final answer in a <proposed_plan> block.\n",
-            "Use exactly these sections and headings in this order:\n",
-            "1. High level description\n",
-            "2. Implementation plan\n",
-            "3. Assumptions\n",
-            "4. Acceptance criteria\n",
-            "5. Out of scope / caveats / bewares\n"
+            "Do a targeted read-only verification pass when concrete references matter, but do not redo the full exploration effort of each planner.\n"
         ),
-        description = description,
+        prompt = MAIN_PLANNING_PROMPT.trim(),
+        ready_start = PLANNING_READY_START_TAG,
+        plan_start = PROPOSED_PLAN_START_TAG,
+        description = description.trim(),
         successful_sections = successful_sections,
         failure_note = failure_note,
     )
+}
+
+pub fn extract_planning_ready_brief(text: &str) -> Option<String> {
+    extract_tagged_block(text, PLANNING_READY_START_TAG, PLANNING_READY_END_TAG)
+}
+
+pub fn contains_proposed_plan(text: &str) -> bool {
+    text.contains(PROPOSED_PLAN_START_TAG) && text.contains(PROPOSED_PLAN_END_TAG)
+}
+
+pub fn strip_planning_ready_tags(text: &str) -> String {
+    strip_tagged_block(text, PLANNING_READY_START_TAG, PLANNING_READY_END_TAG)
+}
+
+fn extract_tagged_block(text: &str, start_tag: &str, end_tag: &str) -> Option<String> {
+    let start = text.find(start_tag)?;
+    let content_start = start + start_tag.len();
+    let end = text[content_start..].find(end_tag)? + content_start;
+    Some(text[content_start..end].trim().to_string())
+}
+
+fn strip_tagged_block(text: &str, start_tag: &str, end_tag: &str) -> String {
+    let mut output = String::new();
+    let mut remaining = text;
+
+    while let Some(start) = remaining.find(start_tag) {
+        output.push_str(&remaining[..start]);
+        let after_start = &remaining[start + start_tag.len()..];
+        let Some(end) = after_start.find(end_tag) else {
+            output.push_str(&remaining[start..]);
+            return output;
+        };
+        remaining = &after_start[end + end_tag.len()..];
+    }
+
+    output.push_str(remaining);
+    output
 }
 
 #[cfg(test)]
@@ -231,20 +276,30 @@ mod tests {
     }
 
     #[test]
-    fn planner_prompt_requires_discovery_before_planning() {
-        let prompt = planner_prompt("Add a planning workflow");
+    fn planning_conversation_prompt_requires_planning_ready_block_before_final_plan() {
+        let prompt = planning_conversation_prompt("Add a planning workflow");
 
+        assert!(prompt.contains("Once intent is solidified"));
+        assert!(prompt.contains(PLANNING_READY_START_TAG));
+        assert!(prompt.contains("You may use AskUser multiple times across the planning session"));
         assert!(
-            prompt.contains("use the available read-only tools to explore the codebase deeply")
+            prompt
+                .contains("Do not output a <proposed_plan> block before oat has completed PHASE 3")
         );
-        assert!(prompt.contains("Do not leave discovery as future work"));
-        assert!(prompt.contains("should not contain steps like 'find'"));
-        assert!(prompt.contains("Write the plan as a description of intended work"));
     }
 
     #[test]
-    fn synthesis_prompt_requires_targeted_validation_without_redoing_planner_work() {
-        let prompt = synthesis_prompt(
+    fn planner_prompt_uses_subagent_markdown_asset() {
+        let prompt = planner_prompt("Add a planning workflow");
+
+        assert!(prompt.contains("already-stabilized brief"));
+        assert!(prompt.contains("Do not ask the user clarifying questions"));
+        assert!(prompt.contains("Do not discuss multi-agent orchestration"));
+    }
+
+    #[test]
+    fn planning_finalization_prompt_requires_targeted_validation_without_reemitting_ready() {
+        let prompt = planning_finalization_prompt(
             "Add a planning workflow",
             &[(
                 PlanningJob {
@@ -256,10 +311,36 @@ mod tests {
             &[],
         );
 
-        assert!(prompt.contains("do a targeted read-only discovery pass"));
-        assert!(prompt.contains("do not redo the full exploration effort of each planner"));
-        assert!(prompt.contains("Do not include discovery tasks as plan steps"));
-        assert!(prompt.contains("Write the final plan as a description of intended work"));
-        assert!(prompt.contains("Wrap the entire final answer in a <proposed_plan> block"));
+        assert!(prompt.contains("Continue in PHASE 4"));
+        assert!(prompt.contains("Do a targeted read-only verification pass"));
+        assert!(prompt.contains("Do not emit <planning_ready> again"));
+        assert!(prompt.contains("use AskUser when the clarification can be represented"));
+        assert!(prompt.contains("wrap the final answer in a <proposed_plan> block"));
+    }
+
+    #[test]
+    fn extract_planning_ready_brief_returns_inner_content() {
+        let text = "<planning_ready>\n# Brief\n\nDetails\n</planning_ready>";
+        assert_eq!(
+            extract_planning_ready_brief(text),
+            Some("# Brief\n\nDetails".into())
+        );
+    }
+
+    #[test]
+    fn strip_planning_ready_tags_removes_internal_block() {
+        let text = "Need one more thing.\n<planning_ready>\n# Brief\n</planning_ready>\nDone.";
+        assert_eq!(
+            strip_planning_ready_tags(text),
+            "Need one more thing.\n\nDone."
+        );
+    }
+
+    #[test]
+    fn contains_proposed_plan_detects_wrapped_plan() {
+        assert!(contains_proposed_plan(
+            "<proposed_plan>\n# Title\n</proposed_plan>"
+        ));
+        assert!(!contains_proposed_plan("# Title"));
     }
 }

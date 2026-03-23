@@ -69,7 +69,7 @@ impl SlashCommand {
             Self::Stats => "Show session and historical usage stats",
             Self::Model => "Select the model and reasoning effort",
             Self::Effort => "Set reasoning effort for the current model",
-            Self::Plan => "Draft a planning brief and run planning agents",
+            Self::Plan => "Start an interactive planning session",
             Self::Quit => "Exit the app",
         }
     }
@@ -367,6 +367,14 @@ pub(super) enum PendingReplyKind {
     Planning,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PlanningSessionStage {
+    Drafting,
+    Conversation,
+    RunningFanout,
+    Finalizing,
+}
+
 impl PendingReply {
     pub(super) fn new(id: u64, kind: PendingReplyKind) -> Self {
         Self {
@@ -478,7 +486,7 @@ pub struct App {
     pub(super) session_stats: StatsTotals,
     pub(super) selected_command: SlashCommand,
     pub(super) picker: Option<SelectionPicker>,
-    pub(super) planning_draft_mode: bool,
+    pub(super) planning_session: Option<PlanningSessionStage>,
     pub(super) pending_plan_review: Option<PendingPlanReview>,
     pub(super) pending_ask_user: Option<PendingAskUser>,
     pub(super) history_render_cache: Option<HistoryRenderCache>,
@@ -548,7 +556,7 @@ impl App {
             session_stats: StatsTotals::default(),
             selected_command: SlashCommand::NewSession,
             picker: None,
-            planning_draft_mode: false,
+            planning_session: None,
             pending_plan_review: None,
             pending_ask_user: None,
             history_render_cache: None,
@@ -643,6 +651,10 @@ impl App {
             .is_some_and(|review| review.mode == PendingPlanReviewMode::Feedback)
     }
 
+    pub fn planning_session_stage(&self) -> Option<PlanningSessionStage> {
+        self.planning_session
+    }
+
     pub fn should_quit(&self) -> bool {
         self.should_quit
     }
@@ -731,11 +743,11 @@ impl App {
     }
 
     pub fn planning_draft_mode(&self) -> bool {
-        self.planning_draft_mode
+        self.planning_session == Some(PlanningSessionStage::Drafting)
     }
 
     pub fn plan_active(&self) -> bool {
-        self.planning_draft_mode
+        self.planning_session.is_some()
             || self.pending_plan_review.is_some()
             || self
                 .pending_reply
@@ -928,7 +940,7 @@ impl App {
         self.resume_history_follow();
         self.history.reset();
         self.picker = None;
-        self.planning_draft_mode = false;
+        self.planning_session = None;
         self.command_history.reset_navigation();
         self.clear_composer();
     }
@@ -972,6 +984,9 @@ impl App {
         self.pending_write_approvals.clear();
         self.pending_shell_approvals.clear();
         self.pending_ask_user = None;
+        if self.planning_session == Some(PlanningSessionStage::RunningFanout) {
+            self.planning_session = Some(PlanningSessionStage::Conversation);
+        }
         self.push_error_message("Request cancelled.");
     }
 
@@ -984,6 +999,7 @@ impl App {
     }
 
     pub(crate) fn begin_plan_review(&mut self) {
+        self.clear_planning_session();
         self.pending_plan_review = Some(PendingPlanReview {
             mode: PendingPlanReviewMode::Selection,
             selected_index: 0,
@@ -1774,24 +1790,42 @@ impl App {
     }
 
     pub(crate) fn enter_planning_draft_mode(&mut self) {
-        self.planning_draft_mode = true;
+        self.planning_session = Some(PlanningSessionStage::Drafting);
         self.clear_composer();
     }
 
     pub(crate) fn cancel_planning_draft_mode(&mut self) -> bool {
-        if !self.planning_draft_mode {
+        if self.planning_session != Some(PlanningSessionStage::Drafting) {
             return false;
         }
 
-        self.planning_draft_mode = false;
+        self.planning_session = None;
         self.clear_composer();
         true
     }
 
     pub(crate) fn consume_planning_draft_mode(&mut self) -> bool {
-        let was_active = self.planning_draft_mode;
-        self.planning_draft_mode = false;
+        let was_active = self.planning_draft_mode();
+        if was_active {
+            self.planning_session = Some(PlanningSessionStage::Conversation);
+        }
         was_active
+    }
+
+    pub(crate) fn begin_planning_conversation(&mut self) {
+        self.planning_session = Some(PlanningSessionStage::Conversation);
+    }
+
+    pub(crate) fn begin_planning_fanout(&mut self) {
+        self.planning_session = Some(PlanningSessionStage::RunningFanout);
+    }
+
+    pub(crate) fn begin_planning_finalization(&mut self) {
+        self.planning_session = Some(PlanningSessionStage::Finalizing);
+    }
+
+    pub(crate) fn clear_planning_session(&mut self) {
+        self.planning_session = None;
     }
 
     pub(super) fn insert_composer_newline(&mut self) {

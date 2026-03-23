@@ -67,6 +67,7 @@ pub enum StreamEvent {
         working_directory: String,
         reason: String,
     },
+    PlanningFinalizationStarted,
     Finished {
         history: Option<Vec<RigMessage>>,
     },

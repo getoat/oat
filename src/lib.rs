@@ -34,6 +34,7 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
+use rig::completion::Message as RigMessage;
 use tokio::{runtime::Runtime, sync::mpsc, task::JoinHandle, time::sleep};
 
 use crate::{
@@ -42,7 +43,8 @@ use crate::{
     config::AppConfig,
     llm::{AskUserController, LlmService, StreamEvent, WriteApprovalController},
     planning::{
-        PlanningJob, planner_prompt, planning_jobs, sanitize_planning_agents, synthesis_prompt,
+        PlanningJob, planner_prompt, planning_finalization_prompt, planning_jobs,
+        sanitize_planning_agents,
     },
     stats::StatsStore,
     subagents::{SubagentActivityKind, SubagentManager, SubagentSpawnRequest, SubagentStatus},
@@ -134,7 +136,22 @@ pub fn run_with_options(
             {
                 active_reply_task = None;
             }
-            app.apply(Action::StreamEvent { reply_id, event });
+            if let Some(effect) = app.apply(Action::StreamEvent { reply_id, event }) {
+                let mut runner = EffectRunner {
+                    runtime: &runtime,
+                    terminal,
+                    active_reply_task: &mut active_reply_task,
+                    llm: &mut llm,
+                    config: &mut config,
+                    app: &mut app,
+                    stats: &stats,
+                    stream_tx: stream_tx.clone(),
+                    subagents: &subagents,
+                };
+                if let Err(error) = runner.run(effect) {
+                    app.push_error_message(format!("Command failed: {error}"));
+                }
+            }
             persist_command_history_if_needed(&mut app, &command_history);
         }
         while let Ok(event) = subagent_rx.try_recv() {
@@ -232,6 +249,7 @@ pub fn run_headless(
                     return Err(anyhow!("Request failed: {error}"));
                 }
                 llm::StreamEvent::ReasoningDelta(_)
+                | llm::StreamEvent::PlanningFinalizationStarted
                 | llm::StreamEvent::ToolCall { .. }
                 | llm::StreamEvent::ToolResult { .. }
                 | llm::StreamEvent::AskUserRequested { .. }
@@ -380,20 +398,24 @@ impl EffectRunner<'_> {
             Effect::RunPlanningWorkflow {
                 reply_id,
                 description,
+                history,
             } => {
                 self.cancel_active_reply();
                 let config = self.config.clone();
                 let stats = self.stats.clone();
                 let stream_tx = self.stream_tx.clone();
                 let subagents = self.subagents.clone();
+                let ask_user = self.llm.ask_user_controller();
                 let task = self.runtime.spawn(async move {
                     run_planning_workflow(
                         reply_id,
                         description,
+                        history,
                         config,
                         stats,
                         stream_tx,
                         subagents,
+                        ask_user,
                     )
                     .await;
                 });
@@ -494,10 +516,12 @@ fn persist_command_history_if_needed(app: &mut App, store: &CommandHistoryStore)
 async fn run_planning_workflow(
     reply_id: u64,
     description: String,
+    history: Vec<RigMessage>,
     config: AppConfig,
     stats: StatsStore,
     stream_tx: mpsc::UnboundedSender<(u64, StreamEvent)>,
     subagents: SubagentManager,
+    ask_user: Option<AskUserController>,
 ) {
     let emit: llm::EventCallback =
         Arc::new(move |reply_id, event| stream_tx.send((reply_id, event)).is_ok());
@@ -532,12 +556,14 @@ async fn run_planning_workflow(
         return;
     }
 
-    let synth_prompt = synthesis_prompt(&description, &successful_plans, &failed_models);
+    let _ = emit(reply_id, StreamEvent::PlanningFinalizationStarted);
+    let synth_prompt =
+        planning_finalization_prompt(&description, &successful_plans, &failed_models);
     let synth_service = match LlmService::from_config(
         &config,
         AgentContext::main(app::AccessMode::ReadOnly),
         WriteApprovalController::new(ApprovalMode::Manual),
-        None,
+        ask_user,
         None,
     ) {
         Ok(service) => service,
@@ -555,7 +581,7 @@ async fn run_planning_workflow(
         .run_prompt(
             reply_id,
             synth_prompt,
-            Vec::new(),
+            history,
             stats_hook,
             None,
             emit.clone(),

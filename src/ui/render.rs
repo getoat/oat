@@ -1691,7 +1691,7 @@ mod tests {
         app.enter_planning_draft_mode();
         app.composer_mut().insert_str("Make a roadmap");
         let effect = app.apply(Action::SubmitMessage);
-        assert!(matches!(effect, Some(Effect::RunPlanningWorkflow { .. })));
+        assert!(matches!(effect, Some(Effect::PromptModel { .. })));
 
         terminal
             .draw(|frame| render(frame, &mut app))
