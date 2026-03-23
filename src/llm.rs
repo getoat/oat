@@ -554,7 +554,7 @@ fn mode_preamble(context: &AgentContext) -> String {
     match context.role {
         AgentRole::Main => {
             preamble.push_str(
-                "\n\nYou can delegate bounded parallel tasks to subagents when that will help you cover more ground. Give them enough local context to work independently, then inspect or wait on them instead of assuming they completed.",
+                "\n\nYou can delegate bounded parallel tasks to subagents when that will help you cover more ground. Give them enough local context to work independently. While subagents are running, normally treat that as a handoff: do not continue doing the same delegated work in the main agent unless the user explicitly wants redundancy or there is a clear independent task you can do without overlap. Prefer to wait on the subagents or inspect their status/results instead of duplicating their work or assuming they completed.",
             );
         }
         AgentRole::Subagent => {
@@ -735,6 +735,11 @@ mod tests {
                 .contains("You are currently in write mode.")
         );
         assert!(service.preamble.contains("they usually mean to file"));
+        assert!(
+            service
+                .preamble
+                .contains("While subagents are running, normally treat that as a handoff")
+        );
         assert!(
             !service
                 .preamble

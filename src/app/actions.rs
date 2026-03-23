@@ -219,7 +219,7 @@ fn submit_message(app: &mut App) -> Option<Effect> {
     if app.command_query().is_some() {
         let command_name = app.command_name().unwrap_or_default().to_owned();
         let arguments = app.command_arguments().unwrap_or_default().to_owned();
-        return submit_command(app, &command_name, &arguments, &submitted);
+        return submit_command(app, &command_name, &arguments);
     }
 
     if app.pending_reply.is_some() {
@@ -252,14 +252,8 @@ fn submit_message(app: &mut App) -> Option<Effect> {
     })
 }
 
-fn submit_command(
-    app: &mut App,
-    command_name: &str,
-    arguments: &str,
-    submitted: &str,
-) -> Option<Effect> {
+fn submit_command(app: &mut App, command_name: &str, arguments: &str) -> Option<Effect> {
     let Some(command) = app.selected_command() else {
-        app.record_submitted_input(submitted);
         app.push_error_message(format!(
             "Unknown command `{command_name}`. Try /new, /stats, /model, /quit, or /effort."
         ));
@@ -271,7 +265,6 @@ fn submit_command(
         return None;
     }
 
-    app.record_submitted_input(submitted);
     match command {
         SlashCommand::NewSession => {
             app.reset_session();
@@ -691,6 +684,38 @@ mod tests {
 
         assert_eq!(app.composer.lines(), ["line one", "line two"]);
         assert_eq!(app.composer.cursor().0, 0);
+    }
+
+    #[test]
+    fn slash_commands_are_not_added_to_recall_history() {
+        let mut app = new_app(true);
+        app.composer.insert_str("/new");
+
+        let effect = app.apply(Action::SubmitMessage);
+
+        assert_eq!(effect, Some(Effect::RotateSession));
+        app.apply(Action::SelectPreviousCommand);
+        assert_eq!(app.composer.lines(), [""]);
+    }
+
+    #[test]
+    fn consecutive_duplicate_messages_are_collapsed_in_recall_history() {
+        let mut app = new_app(true);
+
+        app.composer.insert_str("boo");
+        let first = app.apply(Action::SubmitMessage);
+        assert!(matches!(first, Some(Effect::PromptModel { .. })));
+        app.pending_reply = None;
+
+        app.composer.insert_str("boo");
+        let second = app.apply(Action::SubmitMessage);
+        assert!(matches!(second, Some(Effect::PromptModel { .. })));
+        app.pending_reply = None;
+
+        app.apply(Action::SelectPreviousCommand);
+        assert_eq!(app.composer.lines(), ["boo"]);
+        app.apply(Action::SelectPreviousCommand);
+        assert_eq!(app.composer.lines(), ["boo"]);
     }
 
     #[test]

@@ -76,6 +76,7 @@ impl CommandHistoryStore {
 
 fn trim_entries(mut entries: Vec<String>, limit: usize) -> Vec<String> {
     entries.retain(|entry| !entry.trim().is_empty());
+    entries.dedup();
     if entries.len() > limit {
         entries.drain(..entries.len() - limit);
     }
@@ -144,6 +145,26 @@ mod tests {
 
         let loaded = store.load().expect("history loads");
         assert_eq!(loaded, vec!["keep"]);
+
+        fs::remove_file(path).expect("remove temp history");
+    }
+
+    #[test]
+    fn save_and_load_collapse_consecutive_duplicates() {
+        let path = unique_temp_path("dedup");
+        let store = CommandHistoryStore::with_path(&path, 5);
+        let entries = vec![
+            "alpha".to_string(),
+            "alpha".to_string(),
+            "beta".to_string(),
+            "beta".to_string(),
+            "alpha".to_string(),
+        ];
+
+        store.save(&entries).expect("history saves");
+
+        let loaded = store.load().expect("history loads");
+        assert_eq!(loaded, vec!["alpha", "beta", "alpha"]);
 
         fs::remove_file(path).expect("remove temp history");
     }

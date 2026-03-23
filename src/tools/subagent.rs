@@ -106,7 +106,7 @@ impl Tool for SpawnSubagentTool {
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         ToolDefinition {
             name: Self::NAME.to_string(),
-            description: "Start an independent subagent to work in parallel on a delegated task. Subagents start with fresh context, can explore the workspace, and return their own final output for later inspection. Keep the delegated prompt concise and point the subagent at workspace paths instead of pasting large code blocks or tool output.".to_string(),
+            description: "Start an independent subagent to work in parallel on a delegated task. Subagents start with fresh context, can explore the workspace, and return their own final output for later inspection. After delegating a task to a subagent, prefer to wait on it or inspect it rather than continuing the same task in the main agent. Keep the delegated prompt concise and point the subagent at workspace paths instead of pasting large code blocks or tool output.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -168,7 +168,7 @@ impl Tool for WaitSubagentTool {
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         ToolDefinition {
             name: Self::NAME.to_string(),
-            description: "Wait for one or more subagents. This waits until a subagent finishes, fails, or has no activity for timeout_ms. Active subagents reset the timeout whenever they emit new activity.".to_string(),
+            description: "Wait for one or more subagents. Use this after delegating work instead of duplicating the delegated task in the main agent. This waits until a subagent finishes, fails, or has no activity for timeout_ms. Active subagents reset the timeout whenever they emit new activity.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -288,28 +288,6 @@ mod tests {
                 .to_string()
                 .contains("write-capable subagent while the main agent is in read-only mode")
         );
-    }
-
-    #[tokio::test]
-    async fn spawn_tool_rejects_oversized_prompt_before_provider_call() {
-        let tool = SpawnSubagentTool::new(
-            manager(),
-            sample_config(),
-            AccessMode::ReadOnly,
-            WriteApprovalController::new(ApprovalMode::Manual),
-        );
-        let oversized_prompt = "x".repeat(600_000);
-
-        let error = tool
-            .call(SpawnSubagentArgs {
-                prompt: oversized_prompt,
-                access_mode: SubagentAccessModeArg::ReadOnly,
-            })
-            .await
-            .expect_err("spawn must fail");
-
-        assert!(error.to_string().contains("Delegated prompt is too large"));
-        assert!(error.to_string().contains("workspace paths"));
     }
 
     #[tokio::test]

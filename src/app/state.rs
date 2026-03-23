@@ -1277,6 +1277,12 @@ impl CommandRecallState {
             return;
         }
 
+        if self.entries.last().is_some_and(|entry| entry == text) {
+            self.browsing_index = None;
+            self.draft = None;
+            return;
+        }
+
         self.entries.push(text.to_string());
         self.trim_to_limit();
         self.browsing_index = None;
@@ -1331,6 +1337,7 @@ impl CommandRecallState {
 
     fn trim_to_limit(&mut self) {
         self.entries.retain(|entry| !entry.trim().is_empty());
+        self.entries.dedup();
         if self.entries.len() > self.limit {
             self.entries.drain(..self.entries.len() - self.limit);
         }
@@ -1630,5 +1637,19 @@ mod tests {
         assert_eq!(app.tick_count(), 0);
         assert_eq!(app.entries().len(), 1);
         assert!(app.shows_startup_banner());
+    }
+
+    #[test]
+    fn restoring_command_history_collapses_consecutive_duplicates() {
+        let mut app = App::new(true, false, "gpt-5-mini", ReasoningEffort::Medium);
+        app.restore_command_history(
+            vec!["alpha".into(), "alpha".into(), "beta".into(), "beta".into()],
+            20,
+        );
+
+        app.apply(crate::app::actions::Action::SelectPreviousCommand);
+        assert_eq!(app.composer.lines(), ["beta"]);
+        app.apply(crate::app::actions::Action::SelectPreviousCommand);
+        assert_eq!(app.composer.lines(), ["alpha"]);
     }
 }
