@@ -114,7 +114,9 @@ impl App {
                 })
             }
             Action::SelectPreviousCommand => {
-                if self.selection_picker_visible() {
+                if self.plan_review_selection_active() {
+                    self.move_plan_review_selection(-1);
+                } else if self.selection_picker_visible() {
                     self.move_picker_selection_up();
                 } else if self.command_palette_visible() {
                     self.move_command_selection_up();
@@ -125,7 +127,9 @@ impl App {
                 None
             }
             Action::SelectNextCommand => {
-                if self.selection_picker_visible() {
+                if self.plan_review_selection_active() {
+                    self.move_plan_review_selection(1);
+                } else if self.selection_picker_visible() {
                     self.move_picker_selection_down();
                 } else if self.command_palette_visible() {
                     self.move_command_selection_down();
@@ -244,7 +248,7 @@ fn submit_message(app: &mut App) -> Option<Effect> {
     }
 
     if app.plan_review_selection_active() {
-        return None;
+        return submit_plan_review_selection(app);
     }
 
     if app.selection_picker_visible() {
@@ -310,6 +314,17 @@ fn submit_plan_acceptance(app: &mut App) -> Option<Effect> {
         prompt,
         history: app.session_history().to_vec(),
     })
+}
+
+fn submit_plan_review_selection(app: &mut App) -> Option<Effect> {
+    match app.selected_plan_review_index().unwrap_or(0) {
+        0 => submit_plan_acceptance(app),
+        1 => {
+            app.begin_plan_review_feedback();
+            None
+        }
+        _ => None,
+    }
 }
 
 fn submit_plan_revision_feedback(app: &mut App, submitted: &str) -> Option<Effect> {
@@ -529,11 +544,12 @@ fn on_stream_event(app: &mut App, reply_id: u64, event: StreamEvent) {
             let synthesized_plan = app
                 .pending_reply
                 .as_ref()
+                .filter(|pending| pending.kind == PendingReplyKind::Planning)
                 .and_then(|pending| pending.text_entry_index)
                 .and_then(|index| app.entries().get(index))
                 .and_then(|entry| match entry {
-                    TranscriptEntry::Message(message) => {
-                        extract_proposed_plan(&message.text).map(|_| ())
+                    TranscriptEntry::Message(message) if !message.text.trim().is_empty() => {
+                        Some(())
                     }
                     _ => None,
                 })
@@ -680,15 +696,6 @@ fn resolve_write_approval(
 
 fn accepted_plan_prompt() -> &'static str {
     "I accept this plan. Begin implementation now."
-}
-
-fn extract_proposed_plan(text: &str) -> Option<&str> {
-    const START: &str = "<proposed_plan>";
-    const END: &str = "</proposed_plan>";
-
-    let start = text.find(START)?;
-    let end = text[start + START.len()..].find(END)?;
-    Some(&text[start..start + START.len() + end + END.len()])
 }
 
 #[cfg(test)]
@@ -1123,9 +1130,7 @@ mod tests {
 
         app.apply(Action::StreamEvent {
             reply_id: 1,
-            event: StreamEvent::TextDelta(
-                "<proposed_plan>\n# Test Plan\n\nSummary\n</proposed_plan>".into(),
-            ),
+            event: StreamEvent::TextDelta("# Test Plan\n\nSummary".into()),
         });
         app.apply(Action::StreamEvent {
             reply_id: 1,
@@ -1169,6 +1174,32 @@ mod tests {
         assert!(effect.is_none());
         assert!(app.plan_review_feedback_active());
         assert!(!app.plan_review_selection_active());
+    }
+
+    #[test]
+    fn plan_review_arrow_selection_and_enter_can_choose_feedback() {
+        let mut app = registry_app(true);
+        app.begin_plan_review();
+
+        let move_effect = app.apply(Action::SelectNextCommand);
+        assert!(move_effect.is_none());
+        assert_eq!(app.selected_plan_review_index(), Some(1));
+
+        let submit_effect = app.apply(Action::SubmitMessage);
+        assert!(submit_effect.is_none());
+        assert!(app.plan_review_feedback_active());
+    }
+
+    #[test]
+    fn plan_review_selection_wraps_with_arrow_keys() {
+        let mut app = registry_app(true);
+        app.begin_plan_review();
+
+        app.apply(Action::SelectPreviousCommand);
+        assert_eq!(app.selected_plan_review_index(), Some(1));
+
+        app.apply(Action::SelectNextCommand);
+        assert_eq!(app.selected_plan_review_index(), Some(0));
     }
 
     #[test]

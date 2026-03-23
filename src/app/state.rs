@@ -319,6 +319,7 @@ pub(super) enum PendingPlanReviewMode {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct PendingPlanReview {
     pub(super) mode: PendingPlanReviewMode,
+    pub(super) selected_index: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -574,6 +575,7 @@ impl App {
 
     pub fn plan_active(&self) -> bool {
         self.planning_draft_mode
+            || self.pending_plan_review.is_some()
             || self
                 .pending_reply
                 .as_ref()
@@ -771,6 +773,7 @@ impl App {
     pub(crate) fn begin_plan_review(&mut self) {
         self.pending_plan_review = Some(PendingPlanReview {
             mode: PendingPlanReviewMode::Selection,
+            selected_index: 0,
         });
         self.clear_composer();
     }
@@ -778,12 +781,31 @@ impl App {
     pub(crate) fn begin_plan_review_feedback(&mut self) {
         self.pending_plan_review = Some(PendingPlanReview {
             mode: PendingPlanReviewMode::Feedback,
+            selected_index: 0,
         });
         self.clear_composer();
     }
 
     pub(crate) fn clear_plan_review(&mut self) {
         self.pending_plan_review = None;
+    }
+
+    pub(crate) fn selected_plan_review_index(&self) -> Option<usize> {
+        self.pending_plan_review
+            .as_ref()
+            .filter(|review| review.mode == PendingPlanReviewMode::Selection)
+            .map(|review| review.selected_index)
+    }
+
+    pub(crate) fn move_plan_review_selection(&mut self, direction: isize) {
+        let Some(review) = self.pending_plan_review.as_mut() else {
+            return;
+        };
+        if review.mode != PendingPlanReviewMode::Selection {
+            return;
+        }
+
+        review.selected_index = (review.selected_index as isize + direction).rem_euclid(2) as usize;
     }
 
     pub(super) fn begin_write_approval(

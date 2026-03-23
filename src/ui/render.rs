@@ -53,7 +53,7 @@ fn render_input(frame: &mut Frame, app: &mut App, area: Rect, accent: Color) {
     }
 
     if app.plan_review_selection_active() {
-        render_plan_review_prompt(frame, area, accent);
+        render_plan_review_prompt(frame, app, area, accent);
         return;
     }
 
@@ -126,7 +126,10 @@ fn render_write_approval_prompt(
     frame.render_widget(prompt, area);
 }
 
-fn render_plan_review_prompt(frame: &mut Frame, area: Rect, accent: Color) {
+fn render_plan_review_prompt(frame: &mut Frame, app: &App, area: Rect, accent: Color) {
+    let selected_index = app.selected_plan_review_index().unwrap_or(0);
+    let selected_style = Style::default().fg(accent).add_modifier(Modifier::BOLD);
+    let unselected_style = Style::default().fg(Color::Gray);
     let lines = vec![
         Line::from(Span::styled(
             "A proposed plan is ready.",
@@ -134,17 +137,47 @@ fn render_plan_review_prompt(frame: &mut Frame, area: Rect, accent: Color) {
         )),
         Line::from(vec![
             Span::styled(
-                "[1]",
-                Style::default().fg(accent).add_modifier(Modifier::BOLD),
+                if selected_index == 0 {
+                    "› [1]"
+                } else {
+                    "  [1]"
+                },
+                if selected_index == 0 {
+                    selected_style
+                } else {
+                    unselected_style
+                },
             ),
-            Span::raw(" Accept this plan and begin implementation"),
+            Span::styled(
+                " Accept this plan and begin implementation",
+                if selected_index == 0 {
+                    selected_style
+                } else {
+                    Style::default()
+                },
+            ),
         ]),
         Line::from(vec![
             Span::styled(
-                "[2]",
-                Style::default().fg(accent).add_modifier(Modifier::BOLD),
+                if selected_index == 1 {
+                    "› [2]"
+                } else {
+                    "  [2]"
+                },
+                if selected_index == 1 {
+                    selected_style
+                } else {
+                    unselected_style
+                },
             ),
-            Span::raw(" Suggest changes to the plan"),
+            Span::styled(
+                " Suggest changes to the plan",
+                if selected_index == 1 {
+                    selected_style
+                } else {
+                    Style::default()
+                },
+            ),
         ]),
     ];
 
@@ -883,6 +916,23 @@ mod tests {
         assert!(rendered.contains("Plan Ready"));
         assert!(rendered.contains("Accept this plan and begin implementation"));
         assert!(rendered.contains("Suggest changes to the plan"));
+        assert!(rendered.contains("› [1]"));
+    }
+
+    #[test]
+    fn render_highlights_selected_plan_review_option() {
+        let backend = TestBackend::new(120, 12);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut app = App::new(true, false, "gpt-5.4-mini", ReasoningEffort::Medium);
+        app.begin_plan_review();
+        app.apply(Action::SelectNextCommand);
+
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render succeeds");
+
+        let rendered = buffer_string(terminal.backend());
+        assert!(rendered.contains("› [2]"));
     }
 
     #[test]
@@ -900,6 +950,13 @@ mod tests {
         let rendered = buffer_string(terminal.backend());
         assert!(rendered.contains("revise this"));
         assert!(!rendered.contains("Plan Ready"));
+        assert!(rendered.contains("Plan"));
+        assert!(app.plan_active());
+        assert!(word_has_foreground(
+            terminal.backend().buffer(),
+            "Plan",
+            accent_color(app.mode(), true),
+        ));
     }
 
     #[test]
@@ -1455,6 +1512,31 @@ mod tests {
         assert!(!rendered.contains("```"));
         assert!(rendered.contains("rust"));
         assert!(rendered.contains("let value = 1;"));
+    }
+
+    #[test]
+    fn render_hides_proposed_plan_wrapper_tags() {
+        let backend = TestBackend::new(100, 16);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut app = App::new(true, false, "gpt-5-mini", ReasoningEffort::Medium);
+        app.composer_mut().insert_str("render plan");
+        app.apply(Action::SubmitMessage);
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: crate::llm::StreamEvent::TextDelta(
+                "<proposed_plan>\n# Plan\n\n- step one\n</proposed_plan>".into(),
+            ),
+        });
+
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render succeeds");
+
+        let rendered = buffer_string(terminal.backend());
+        assert!(!rendered.contains("<proposed_plan>"));
+        assert!(!rendered.contains("</proposed_plan>"));
+        assert!(rendered.contains("Plan"));
+        assert!(rendered.contains("step one"));
     }
 
     #[test]

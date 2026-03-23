@@ -10,6 +10,8 @@ use super::wrap::{wrap_styled_lines, wrap_text};
 
 const CODE_BLOCK_HORIZONTAL_PADDING: usize = 1;
 const LOADING_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const PROPOSED_PLAN_START_TAG: &str = "<proposed_plan>";
+const PROPOSED_PLAN_END_TAG: &str = "</proposed_plan>";
 
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum MarkdownSegment {
@@ -168,7 +170,8 @@ fn push_markdown_message_lines(
     accent: Color,
 ) {
     let content_width = width.saturating_sub(prefix_width(message.speaker)).max(1);
-    let rendered = render_markdown_message_lines(&message.text, content_width);
+    let display_text = strip_proposed_plan_tags(&message.text);
+    let rendered = render_markdown_message_lines(&display_text, content_width);
     push_prefixed_styled_lines(lines, rendered, message.speaker, accent);
 }
 
@@ -213,6 +216,31 @@ fn render_markdown_message_lines(text: &str, content_width: usize) -> Vec<Line<'
     }
 
     rendered
+}
+
+fn strip_proposed_plan_tags(text: &str) -> String {
+    if let Some(inner) = text
+        .trim()
+        .strip_prefix(PROPOSED_PLAN_START_TAG)
+        .and_then(|rest| rest.strip_suffix(PROPOSED_PLAN_END_TAG))
+    {
+        return inner.trim_matches('\n').to_string();
+    }
+
+    let mut stripped = String::new();
+    for raw_line in text.split_inclusive('\n') {
+        let line = raw_line.trim();
+        if line == PROPOSED_PLAN_START_TAG || line == PROPOSED_PLAN_END_TAG {
+            continue;
+        }
+        stripped.push_str(raw_line);
+    }
+
+    if stripped.is_empty() && !text.is_empty() {
+        text.to_string()
+    } else {
+        stripped
+    }
 }
 
 fn opening_code_fence_language(line: &str) -> Option<Option<String>> {

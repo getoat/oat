@@ -153,6 +153,7 @@ pub fn synthesis_prompt(
             "Avoid imperative phrasing such as 'Do not change...', 'Add...', 'Use...', or 'Implement...'.\n",
             "Do not mention vote counts or describe the synthesis process.\n",
             "Keep the high-level description to a few sentences.\n",
+            "Wrap the entire final answer in a <proposed_plan> block.\n",
             "Use exactly these sections and headings in this order:\n",
             "1. High level description\n",
             "2. Implementation plan\n",
@@ -259,5 +260,6 @@ mod tests {
         assert!(prompt.contains("do not redo the full exploration effort of each planner"));
         assert!(prompt.contains("Do not include discovery tasks as plan steps"));
         assert!(prompt.contains("Write the final plan as a description of intended work"));
+        assert!(prompt.contains("Wrap the entire final answer in a <proposed_plan> block"));
     }
 }

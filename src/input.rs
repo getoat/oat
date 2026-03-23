@@ -59,6 +59,9 @@ fn map_key_event(
         return match (key.code, key.modifiers) {
             (KeyCode::Char('1'), KeyModifiers::NONE) => Action::AcceptPlanAndImplement,
             (KeyCode::Char('2'), KeyModifiers::NONE) => Action::SuggestPlanChanges,
+            (KeyCode::Up, KeyModifiers::NONE) => Action::SelectPreviousCommand,
+            (KeyCode::Down, KeyModifiers::NONE) => Action::SelectNextCommand,
+            (KeyCode::Enter, _) => Action::SubmitMessage,
             (KeyCode::PageUp, _) => Action::ScrollHistoryPageUp,
             (KeyCode::PageDown, _) => Action::ScrollHistoryPageDown,
             (KeyCode::Home, _) => Action::ScrollHistoryToTop,
@@ -300,6 +303,33 @@ mod tests {
                 true,
             ),
             Some(Action::SuggestPlanChanges)
+        );
+        assert_eq!(
+            map_event_with_state(
+                Event::Key(key(KeyCode::Up, KeyModifiers::NONE)),
+                false,
+                false,
+                true,
+            ),
+            Some(Action::SelectPreviousCommand)
+        );
+        assert_eq!(
+            map_event_with_state(
+                Event::Key(key(KeyCode::Down, KeyModifiers::NONE)),
+                false,
+                false,
+                true,
+            ),
+            Some(Action::SelectNextCommand)
+        );
+        assert_eq!(
+            map_event_with_state(
+                Event::Key(key(KeyCode::Enter, KeyModifiers::NONE)),
+                false,
+                false,
+                true,
+            ),
+            Some(Action::SubmitMessage)
         );
     }
 
