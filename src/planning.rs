@@ -184,7 +184,22 @@ pub fn contains_proposed_plan(text: &str) -> bool {
 }
 
 pub fn strip_planning_ready_tags(text: &str) -> String {
-    strip_tagged_block(text, PLANNING_READY_START_TAG, PLANNING_READY_END_TAG)
+    strip_tag_lines(
+        &strip_tagged_block(text, PLANNING_READY_START_TAG, PLANNING_READY_END_TAG),
+        &[PLANNING_READY_START_TAG, PLANNING_READY_END_TAG],
+    )
+}
+
+pub fn strip_proposed_plan_tags(text: &str) -> String {
+    if let Some(inner) = text
+        .trim()
+        .strip_prefix(PROPOSED_PLAN_START_TAG)
+        .and_then(|rest| rest.strip_suffix(PROPOSED_PLAN_END_TAG))
+    {
+        return inner.trim_matches('\n').to_string();
+    }
+
+    strip_tag_lines(text, &[PROPOSED_PLAN_START_TAG, PROPOSED_PLAN_END_TAG])
 }
 
 fn extract_tagged_block(text: &str, start_tag: &str, end_tag: &str) -> Option<String> {
@@ -210,6 +225,18 @@ fn strip_tagged_block(text: &str, start_tag: &str, end_tag: &str) -> String {
 
     output.push_str(remaining);
     output
+}
+
+fn strip_tag_lines(text: &str, tags: &[&str]) -> String {
+    let mut stripped = String::new();
+    for raw_line in text.split_inclusive('\n') {
+        let line = raw_line.trim();
+        if tags.contains(&line) {
+            continue;
+        }
+        stripped.push_str(raw_line);
+    }
+    stripped
 }
 
 #[cfg(test)]
@@ -334,6 +361,22 @@ mod tests {
             strip_planning_ready_tags(text),
             "Need one more thing.\n\nDone."
         );
+    }
+
+    #[test]
+    fn strip_planning_ready_tags_drops_lone_wrapper_lines() {
+        assert_eq!(strip_planning_ready_tags("<planning_ready>\n"), "");
+    }
+
+    #[test]
+    fn strip_proposed_plan_tags_removes_wrapper_lines() {
+        let text = "<proposed_plan>\n# Plan\n\nDetails\n</proposed_plan>";
+        assert_eq!(strip_proposed_plan_tags(text), "# Plan\n\nDetails");
+    }
+
+    #[test]
+    fn strip_proposed_plan_tags_drops_lone_wrapper_lines() {
+        assert_eq!(strip_proposed_plan_tags("<proposed_plan>\n"), "");
     }
 
     #[test]

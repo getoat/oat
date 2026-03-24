@@ -6,7 +6,7 @@ use tui_markdown::from_str as markdown_from_str;
 
 use crate::{
     app::{App, ChatMessage, MessageStyle, Speaker},
-    planning::{PROPOSED_PLAN_END_TAG, PROPOSED_PLAN_START_TAG, strip_planning_ready_tags},
+    planning::{strip_planning_ready_tags, strip_proposed_plan_tags},
 };
 
 use super::wrap::{wrap_styled_lines, wrap_text};
@@ -41,8 +41,9 @@ pub(super) fn push_pending_lines(
     width: usize,
     accent: Color,
     frame_text: &str,
+    status_text: &str,
 ) {
-    let pending = format!("{frame_text} thinking");
+    let pending = format!("{frame_text} {status_text}");
     let message = ChatMessage {
         speaker: Speaker::Agent,
         text: pending,
@@ -219,31 +220,6 @@ fn render_markdown_message_lines(text: &str, content_width: usize) -> Vec<Line<'
     }
 
     rendered
-}
-
-fn strip_proposed_plan_tags(text: &str) -> String {
-    if let Some(inner) = text
-        .trim()
-        .strip_prefix(PROPOSED_PLAN_START_TAG)
-        .and_then(|rest| rest.strip_suffix(PROPOSED_PLAN_END_TAG))
-    {
-        return inner.trim_matches('\n').to_string();
-    }
-
-    let mut stripped = String::new();
-    for raw_line in text.split_inclusive('\n') {
-        let line = raw_line.trim();
-        if line == PROPOSED_PLAN_START_TAG || line == PROPOSED_PLAN_END_TAG {
-            continue;
-        }
-        stripped.push_str(raw_line);
-    }
-
-    if stripped.is_empty() && !text.is_empty() {
-        text.to_string()
-    } else {
-        stripped
-    }
 }
 
 fn opening_code_fence_language(line: &str) -> Option<Option<String>> {

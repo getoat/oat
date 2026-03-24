@@ -1248,6 +1248,81 @@ mod tests {
     }
 
     #[test]
+    fn whitespace_only_text_delta_stays_pending_without_visible_content() {
+        let mut app = new_app(true);
+        app.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
+
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: StreamEvent::TextDelta("\n  ".into()),
+        });
+
+        assert_eq!(app.entries.len(), 1);
+        assert!(!app.has_visible_pending_content());
+        assert_eq!(
+            app.pending_reply
+                .as_ref()
+                .expect("pending reply")
+                .plain_text,
+            "\n  "
+        );
+    }
+
+    #[test]
+    fn proposed_plan_wrapper_prefix_stays_pending_until_visible_text_arrives() {
+        let mut app = registry_app(true);
+        app.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Planning));
+
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: StreamEvent::TextDelta("<proposed_plan>\n".into()),
+        });
+
+        assert_eq!(app.entries.len(), 1);
+        assert!(!app.has_visible_pending_content());
+
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: StreamEvent::TextDelta("# Test Plan\n".into()),
+        });
+
+        assert!(app.has_visible_pending_content());
+        assert!(matches!(
+            &app.entries[1],
+            TranscriptEntry::Message(message)
+                if message.style == MessageStyle::Plain
+                    && message.text == "<proposed_plan>\n# Test Plan\n"
+        ));
+    }
+
+    #[test]
+    fn planning_ready_wrapper_prefix_stays_pending_until_visible_text_arrives() {
+        let mut app = registry_app(true);
+        app.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Planning));
+
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: StreamEvent::TextDelta("<planning_ready>\n".into()),
+        });
+
+        assert_eq!(app.entries.len(), 1);
+        assert!(!app.has_visible_pending_content());
+
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: StreamEvent::TextDelta("## Summary\n".into()),
+        });
+
+        assert!(app.has_visible_pending_content());
+        assert!(matches!(
+            &app.entries[1],
+            TranscriptEntry::Message(message)
+                if message.style == MessageStyle::Plain
+                    && message.text == "<planning_ready>\n## Summary\n"
+        ));
+    }
+
+    #[test]
     fn stream_reasoning_is_hidden_when_config_disables_it() {
         let mut app = new_app(false);
         app.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));

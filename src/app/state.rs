@@ -15,7 +15,10 @@ use crate::{
     composer::{ComposerLayout, slice_line},
     config::ReasoningEffort,
     model_registry,
-    planning::{PlanningAgentConfig, contains_proposed_plan, default_planning_reasoning},
+    planning::{
+        PlanningAgentConfig, contains_proposed_plan, default_planning_reasoning,
+        strip_planning_ready_tags, strip_proposed_plan_tags,
+    },
     stats::StatsTotals,
     tools::{MutationPreview, mutation_preview, write_approval_summary},
 };
@@ -360,6 +363,8 @@ pub(super) struct PendingReply {
     pub(super) kind: PendingReplyKind,
     pub(super) reasoning_entry_index: Option<usize>,
     pub(super) text_entry_index: Option<usize>,
+    pub(super) staged_reasoning_text: String,
+    pub(super) staged_plain_text: String,
     pub(super) plain_text: String,
     pub(super) has_visible_content: bool,
 }
@@ -385,6 +390,8 @@ impl PendingReply {
             kind,
             reasoning_entry_index: None,
             text_entry_index: None,
+            staged_reasoning_text: String::new(),
+            staged_plain_text: String::new(),
             plain_text: String::new(),
             has_visible_content: false,
         }
@@ -393,6 +400,19 @@ impl PendingReply {
     fn reset_active_stream_segment(&mut self) {
         self.reasoning_entry_index = None;
         self.text_entry_index = None;
+        self.staged_reasoning_text.clear();
+        self.staged_plain_text.clear();
+    }
+}
+
+fn pending_stream_text_is_visible(style: MessageStyle, text: &str) -> bool {
+    match style {
+        MessageStyle::Plain => {
+            let visible_text = strip_planning_ready_tags(&strip_proposed_plan_tags(text));
+            !visible_text.trim().is_empty()
+        }
+        MessageStyle::Commentary | MessageStyle::Thinking => !text.trim().is_empty(),
+        MessageStyle::Error => false,
     }
 }
 
@@ -717,6 +737,20 @@ impl App {
         self.pending_reply
             .as_ref()
             .is_some_and(|pending| pending.has_visible_content)
+    }
+
+    pub fn should_show_history_busy_indicator(&self) -> bool {
+        self.pending_reply.as_ref().is_some_and(|pending| {
+            pending.text_entry_index.is_none() && pending.reasoning_entry_index.is_none()
+        })
+    }
+
+    pub fn history_pending_status_label(&self) -> &'static str {
+        if self.has_pending_write_approval() || self.has_pending_shell_approval() {
+            "Waiting"
+        } else {
+            "thinking"
+        }
     }
 
     pub fn composer_height(&mut self) -> u16 {
@@ -1457,7 +1491,38 @@ impl App {
         };
 
         let Some(existing_index) = existing_index else {
-            self.push_message(Speaker::Agent, delta.to_string(), style);
+            let mut pending_text = delta.to_string();
+            {
+                let pending = self
+                    .pending_reply
+                    .as_mut()
+                    .expect("pending reply checked above");
+                match style {
+                    MessageStyle::Plain => {
+                        pending.plain_text.push_str(delta);
+                        pending.staged_plain_text.push_str(delta);
+                        if !pending_stream_text_is_visible(style, &pending.staged_plain_text) {
+                            return;
+                        }
+                        pending_text = std::mem::take(&mut pending.staged_plain_text);
+                    }
+                    MessageStyle::Thinking => {
+                        pending.staged_reasoning_text.push_str(delta);
+                        if !pending_stream_text_is_visible(style, &pending.staged_reasoning_text) {
+                            return;
+                        }
+                        pending_text = std::mem::take(&mut pending.staged_reasoning_text);
+                    }
+                    MessageStyle::Commentary => {
+                        if !pending_stream_text_is_visible(style, delta) {
+                            return;
+                        }
+                    }
+                    MessageStyle::Error => return,
+                }
+            }
+
+            self.push_message(Speaker::Agent, pending_text, style);
             let index = self.entries.len() - 1;
             let pending = self
                 .pending_reply
@@ -1465,10 +1530,7 @@ impl App {
                 .expect("pending reply checked above");
             pending.has_visible_content = true;
             match style {
-                MessageStyle::Plain => {
-                    pending.text_entry_index = Some(index);
-                    pending.plain_text.push_str(delta);
-                }
+                MessageStyle::Plain => pending.text_entry_index = Some(index),
                 MessageStyle::Commentary => {}
                 MessageStyle::Thinking => pending.reasoning_entry_index = Some(index),
                 MessageStyle::Error => {}
@@ -1982,8 +2044,7 @@ impl App {
     }
 
     pub(crate) fn history_cache_allowed(&self) -> bool {
-        !self.shows_startup_banner()
-            && !(self.has_pending_reply() && !self.has_visible_pending_content())
+        !self.shows_startup_banner() && !self.should_show_history_busy_indicator()
     }
 
     pub(crate) fn cached_history_lines(

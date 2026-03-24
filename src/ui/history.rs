@@ -144,8 +144,14 @@ fn build_history_lines(
         index += 1;
     }
 
-    if app.has_pending_reply() && !app.has_visible_pending_content() {
-        push_pending_lines(&mut lines, width, accent, loading_frame);
+    if app.should_show_history_busy_indicator() {
+        push_pending_lines(
+            &mut lines,
+            width,
+            accent,
+            loading_frame,
+            app.history_pending_status_label(),
+        );
     }
 
     lines

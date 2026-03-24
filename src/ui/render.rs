@@ -1051,21 +1051,25 @@ fn render_mode(frame: &mut Frame, app: &App, area: Rect, accent: Color) {
     let session_stats = app.session_stats();
     let context_percent = app.next_request_context_percent();
 
-    let mut spans = vec![
-        Span::styled(
-            mode_label,
-            Style::default().fg(accent).add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(format!(
-            "  {} • {}  in {}  out {}  ctx {}  ${:.6}",
-            app.model_name(),
-            app.reasoning_effort().as_str(),
-            format_compact_tokens(session_stats.input_tokens),
-            format_compact_tokens(session_stats.output_tokens),
-            format!("{context_percent}%"),
-            session_stats.estimated_cost_usd(),
-        )),
-    ];
+    let mut spans = vec![Span::styled(
+        mode_label,
+        Style::default().fg(accent).add_modifier(Modifier::BOLD),
+    )];
+    if app.pending_write_approval().is_none() && app.pending_shell_approval().is_none() {
+        if app.history_is_pinned() {
+            spans.push(Span::raw("  "));
+            spans.push(Span::styled("Pinned", Style::default().fg(Color::Gray)));
+        }
+    }
+    spans.push(Span::raw(format!(
+        "  {} • {}  in {}  out {}  ctx {}  ${:.6}",
+        app.model_name(),
+        app.reasoning_effort().as_str(),
+        format_compact_tokens(session_stats.input_tokens),
+        format_compact_tokens(session_stats.output_tokens),
+        format!("{context_percent}%"),
+        session_stats.estimated_cost_usd(),
+    )));
 
     if let Some(pending) = app.pending_write_approval() {
         spans.push(Span::raw("  "));
@@ -1833,6 +1837,152 @@ mod tests {
             "Plan",
             accent_color(app.mode(), true),
         ));
+    }
+
+    #[test]
+    fn render_keeps_thinking_visible_for_whitespace_only_pending_text() {
+        let backend = TestBackend::new(120, 12);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut app = App::new(true, false, "gpt-5.4-mini", ReasoningEffort::Medium);
+        app.composer_mut().insert_str("hello");
+        let effect = app.apply(Action::SubmitMessage);
+        assert!(matches!(effect, Some(Effect::PromptModel { .. })));
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: crate::llm::StreamEvent::TextDelta("\n ".into()),
+        });
+
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render succeeds");
+
+        let rendered = buffer_string(terminal.backend());
+        assert!(rendered.contains("thinking"));
+    }
+
+    #[test]
+    fn render_keeps_thinking_visible_for_plan_wrapper_prefix() {
+        let backend = TestBackend::new(120, 12);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut app = App::new(true, false, "gpt-5.4-mini", ReasoningEffort::Medium);
+        app.enter_planning_draft_mode();
+        app.composer_mut().insert_str("Make a roadmap");
+        let effect = app.apply(Action::SubmitMessage);
+        assert!(matches!(effect, Some(Effect::PromptModel { .. })));
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: crate::llm::StreamEvent::TextDelta("<proposed_plan>\n".into()),
+        });
+
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render succeeds");
+
+        let rendered = buffer_string(terminal.backend());
+        assert!(rendered.contains("thinking"));
+    }
+
+    #[test]
+    fn render_pinned_history_shows_pinned_state_without_footer_busy_indicator() {
+        let backend = TestBackend::new(120, 10);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut app = App::new(true, false, "gpt-5.4-mini", ReasoningEffort::Medium);
+        for index in 0..8 {
+            app.push_agent_message(format!("history line {index}"));
+        }
+        app.composer_mut().insert_str("hello");
+        let effect = app.apply(Action::SubmitMessage);
+        assert!(matches!(effect, Some(Effect::PromptModel { .. })));
+        app.apply(Action::ScrollHistoryToTop);
+
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render succeeds");
+
+        let rendered = buffer_string(terminal.backend());
+        assert!(rendered.contains("Pinned"));
+        assert!(!rendered.contains(" Busy"));
+    }
+
+    #[test]
+    fn render_shows_chat_busy_indicator_after_tool_call_starts() {
+        let backend = TestBackend::new(120, 12);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut app = App::new(true, false, "gpt-5.4-mini", ReasoningEffort::Medium);
+        app.composer_mut().insert_str("git status");
+        let effect = app.apply(Action::SubmitMessage);
+        assert!(matches!(effect, Some(Effect::PromptModel { .. })));
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: crate::llm::StreamEvent::ToolCall {
+                name: "RunShellScript".into(),
+                arguments: "{\"command\":\"git status\"}".into(),
+            },
+        });
+
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render succeeds");
+
+        let rendered = buffer_string(terminal.backend());
+        assert!(rendered.contains("RunShellScript"));
+        assert!(rendered.contains("thinking"));
+    }
+
+    #[test]
+    fn render_shows_waiting_in_chat_when_write_approval_is_pending() {
+        let backend = TestBackend::new(120, 12);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut app = App::new(true, false, "gpt-5.4-mini", ReasoningEffort::Medium);
+        app.composer_mut().insert_str("edit this");
+        let effect = app.apply(Action::SubmitMessage);
+        assert!(matches!(effect, Some(Effect::PromptModel { .. })));
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: crate::llm::StreamEvent::WriteApprovalRequested {
+                request_id: "call-1".into(),
+                tool_name: "WriteFile".into(),
+                arguments:
+                    "{\"filename\":\"src/new.rs\",\"content\":\"hi\",\"intent\":\"Add helper\"}"
+                        .into(),
+            },
+        });
+
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render succeeds");
+
+        let rendered = buffer_string(terminal.backend());
+        assert!(rendered.contains("Waiting"));
+        assert!(!rendered.contains("thinking"));
+    }
+
+    #[test]
+    fn render_approval_pending_takes_precedence_over_pinned_history_busy_indicator() {
+        let backend = TestBackend::new(120, 12);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut app = App::new(true, false, "gpt-5.4-mini", ReasoningEffort::Medium);
+        for index in 0..8 {
+            app.push_agent_message(format!("history line {index}"));
+        }
+        app.apply(Action::SubagentEvent(
+            crate::subagents::SubagentUiEvent::WriteApprovalRequested {
+                id: "subagent-2".into(),
+                request_id: "call-2".into(),
+                tool_name: "WriteFile".into(),
+                arguments:
+                    "{\"filename\":\"src/new.rs\",\"content\":\"hi\",\"intent\":\"Add helper\"}"
+                        .into(),
+            },
+        ));
+        app.apply(Action::ScrollHistoryToTop);
+
+        terminal
+            .draw(|frame| render(frame, &mut app))
+            .expect("render succeeds");
+
+        let rendered = buffer_string(terminal.backend());
+        assert!(rendered.contains("Approval pending: WriteFile from subagent-2"));
     }
 
     #[test]
