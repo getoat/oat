@@ -15,3 +15,7 @@ This file applies to everything under `/root/oat`.
 - Keep tests proportional to the logic. Thin glue code and brittle terminal rendering details do not need exhaustive unit coverage unless they hide meaningful behavior.
 - Prefer colocated `#[cfg(test)]` modules near the code they validate.
 - When fixing a bug, add or update a test when practical so the failure mode stays covered.
+
+## Git operations
+
+- Always use scoped conventional commit messages, as this is required for the automated versioning system to work properly.
