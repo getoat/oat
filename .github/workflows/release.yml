@@ -1,0 +1,132 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - development
+      - production
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  compute-version:
+    name: Compute Release Version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.compute.outputs.version }}
+      tag: ${{ steps.compute.outputs.tag }}
+      prerelease: ${{ steps.compute.outputs.prerelease }}
+      cargo_args: ${{ steps.compute.outputs.cargo_args }}
+      profile_dir: ${{ steps.compute.outputs.profile_dir }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch tags
+        run: git fetch --force --tags --prune
+
+      - name: Compute version
+        id: compute
+        shell: bash
+        env:
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+        run: ./.github/scripts/compute-version.sh
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: compute-version
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            binary_suffix: ""
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            binary_suffix: ".exe"
+          - os: macos-13
+            target: x86_64-apple-darwin
+            binary_suffix: ""
+          - os: macos-14
+            target: aarch64-apple-darwin
+            binary_suffix: ""
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Apply release version to Cargo manifest
+        shell: bash
+        run: ./.github/scripts/set-cargo-version.sh "${{ needs.compute-version.outputs.version }}"
+
+      - name: Build binary
+        shell: bash
+        run: cargo build --locked ${{ needs.compute-version.outputs.cargo_args }} --target ${{ matrix.target }}
+
+      - name: Package Unix binary
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          binary_path="target/${{ matrix.target }}/${{ needs.compute-version.outputs.profile_dir }}/oat${{ matrix.binary_suffix }}"
+          archive_path="dist/oat-${{ needs.compute-version.outputs.version }}-${{ matrix.target }}.tar.gz"
+          tar -czf "$archive_path" -C "$(dirname "$binary_path")" "$(basename "$binary_path")"
+
+      - name: Package Windows binary
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $distDir = Join-Path $PWD "dist"
+          New-Item -ItemType Directory -Force -Path $distDir | Out-Null
+          $binaryPath = Join-Path $PWD "target\${{ matrix.target }}\${{ needs.compute-version.outputs.profile_dir }}\oat${{ matrix.binary_suffix }}"
+          $archivePath = Join-Path $distDir "oat-${{ needs.compute-version.outputs.version }}-${{ matrix.target }}.zip"
+          Compress-Archive -Path $binaryPath -DestinationPath $archivePath -Force
+
+      - name: Upload packaged artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs:
+      - compute-version
+      - build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download packaged artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.compute-version.outputs.tag }}
+          name: ${{ needs.compute-version.outputs.tag }}
+          prerelease: ${{ needs.compute-version.outputs.prerelease == 'true' }}
+          generate_release_notes: true
+          files: dist/*
