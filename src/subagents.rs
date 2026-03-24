@@ -369,6 +369,7 @@ impl SubagentManager {
                 1,
                 request.prompt,
                 Vec::new(),
+                None,
                 stats_hook,
                 Some(capture.clone()),
                 callback,
@@ -392,6 +393,7 @@ impl SubagentManager {
             | StreamEvent::ToolResult { .. }
             | StreamEvent::AskUserRequested { .. }
             | StreamEvent::PlanningFinalizationStarted
+            | StreamEvent::CompactionFinished { .. }
             | StreamEvent::Finished { .. } => {
                 self.mark_activity(id);
             }

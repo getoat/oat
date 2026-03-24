@@ -129,7 +129,9 @@ pub fn run_with_options(
         while let Ok((reply_id, event)) = stream_rx.try_recv() {
             if matches!(
                 event,
-                llm::StreamEvent::Finished { .. } | llm::StreamEvent::Failed(_)
+                llm::StreamEvent::Finished { .. }
+                    | llm::StreamEvent::CompactionFinished { .. }
+                    | llm::StreamEvent::Failed(_)
             ) && active_reply_task
                 .as_ref()
                 .is_some_and(|(active_reply_id, _)| *active_reply_id == reply_id)
@@ -229,7 +231,7 @@ pub fn run_headless(
     let task = runtime.spawn({
         let llm = llm.clone();
         async move {
-            llm.stream_prompt(1, prompt, Vec::new(), stats_hook, stream_tx)
+            llm.stream_prompt(1, prompt, Vec::new(), None, stats_hook, stream_tx)
                 .await;
         }
     });
@@ -245,6 +247,7 @@ pub fn run_headless(
             match event {
                 llm::StreamEvent::TextDelta(delta) => output.push_str(&delta),
                 llm::StreamEvent::Finished { .. } => return Ok(output),
+                llm::StreamEvent::CompactionFinished { .. } => {}
                 llm::StreamEvent::Failed(error) => {
                     return Err(anyhow!("Request failed: {error}"));
                 }
@@ -300,14 +303,48 @@ impl EffectRunner<'_> {
                 reply_id,
                 prompt,
                 history,
+                history_model_name,
             } => {
                 self.cancel_active_reply();
                 let llm = self.llm.clone();
                 let stats_hook = self.stats.hook_for_model(self.app.model_name().to_string());
                 let stream_tx = self.stream_tx.clone();
                 let task = self.runtime.spawn(async move {
-                    llm.stream_prompt(reply_id, prompt, history, stats_hook, stream_tx)
-                        .await;
+                    llm.stream_prompt(
+                        reply_id,
+                        prompt,
+                        history,
+                        history_model_name,
+                        stats_hook,
+                        stream_tx,
+                    )
+                    .await;
+                });
+                *self.active_reply_task = Some((reply_id, task));
+                Ok(())
+            }
+            Effect::CompactHistory => {
+                self.cancel_active_reply();
+                let llm = self.llm.clone();
+                let history = self.app.session_history().to_vec();
+                let history_model_name = self.app.last_history_model_name().map(str::to_string);
+                let stream_tx = self.stream_tx.clone();
+                let reply_id = self
+                    .app
+                    .active_reply_id()
+                    .ok_or_else(|| anyhow!("Compaction requires an active pending reply."))?;
+                let task = self.runtime.spawn(async move {
+                    let event = match llm
+                        .compact_history_for_session(history, history_model_name)
+                        .await
+                    {
+                        Ok(result) => llm::StreamEvent::CompactionFinished {
+                            history: result.history,
+                            model_name: result.model_name,
+                        },
+                        Err(error) => llm::StreamEvent::Failed(error.to_string()),
+                    };
+                    let _ = stream_tx.send((reply_id, event));
                 });
                 *self.active_reply_task = Some((reply_id, task));
                 Ok(())
@@ -400,6 +437,7 @@ impl EffectRunner<'_> {
                 reply_id,
                 description,
                 history,
+                history_model_name,
             } => {
                 self.cancel_active_reply();
                 let config = self.config.clone();
@@ -412,6 +450,7 @@ impl EffectRunner<'_> {
                         reply_id,
                         description,
                         history,
+                        history_model_name,
                         config,
                         stats,
                         stream_tx,
@@ -518,6 +557,7 @@ async fn run_planning_workflow(
     reply_id: u64,
     description: String,
     history: Vec<RigMessage>,
+    history_model_name: Option<String>,
     config: AppConfig,
     stats: StatsStore,
     stream_tx: mpsc::UnboundedSender<(u64, StreamEvent)>,
@@ -583,6 +623,7 @@ async fn run_planning_workflow(
             reply_id,
             synth_prompt,
             history,
+            history_model_name,
             stats_hook,
             None,
             emit.clone(),

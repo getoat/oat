@@ -8,11 +8,11 @@ use anyhow::{Context, Result};
 use futures_util::StreamExt;
 use globset::Glob;
 use rig::{
-    agent::{HookAction, MultiTurnStreamItem, PromptHook, ToolCallHookAction},
+    agent::{HookAction, MultiTurnStreamItem, PromptHook, StreamingError, ToolCallHookAction},
     client::CompletionClient,
     completion::{
-        CompletionModel, Message as RigMessage, TypedPrompt,
-        message::{ToolResult, ToolResultContent},
+        CompletionModel, Message as RigMessage, PromptError, TypedPrompt,
+        message::{AssistantContent, ToolResult, ToolResultContent, UserContent},
     },
     providers::openai,
     streaming::{
@@ -29,8 +29,11 @@ use crate::{
     agent::{AgentContext, AgentRole},
     app::{AccessMode, ApprovalMode, CommandRisk, ShellApprovalDecision, WriteApprovalDecision},
     ask_user::{AskUserRequest, AskUserResponse, validate_request},
-    completion_request::CompletionRequestSnapshot,
+    completion_request::{
+        CompletionRequestSnapshot, estimated_history_context_tokens, estimated_message_tokens,
+    },
     config::{AppConfig, ReasoningEffort},
+    model_registry,
     stats::StatsHook,
     subagents::SubagentManager,
     tools::{
@@ -42,6 +45,12 @@ use crate::{
 
 const MAX_TOOL_STEPS_PER_TURN: usize = 64;
 const SYSTEM_PROMPT: &str = include_str!("../prompts/system.md");
+const COMPACTION_PROMPT: &str = "You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM that will resume the task.\n\nInclude:\n- Current progress and key decisions made\n- Important context, constraints, or user preferences\n- What remains to be done (clear next steps)\n- Any critical data, examples, or references needed to continue\n- Decision complete plan, if using\n\nBe concise, structured, and focused on helping the next LLM seamlessly continue the work.";
+const COMPACTION_SUMMARY_PREFIX: &str = "Another language model started to solve this problem and produced a summary of its thinking process. You have access to the state of the last few tools that were used by that language model, and the last few tokens of user messages to contextualise. Use this to build on the work that has already been done and avoid duplicating work. Here is the summary produced by the other language model; use the information in the summary to assist with your own analysis:\n";
+const COMPACTION_USER_TOKEN_BUDGET: usize = 10_000;
+const COMPACTION_TOOL_TOKEN_BUDGET: usize = 10_000;
+const STEP_BOUNDARY_REASON: &str = "__oat_step_boundary__";
+const COMPACTION_NOTICE: &str = "Context compacted.";
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum StreamEvent {
@@ -74,6 +83,10 @@ pub enum StreamEvent {
         reason: String,
     },
     PlanningFinalizationStarted,
+    CompactionFinished {
+        history: Vec<RigMessage>,
+        model_name: String,
+    },
     Finished {
         history: Option<Vec<RigMessage>>,
     },
@@ -193,6 +206,11 @@ struct CombinedHook<H1, H2> {
 }
 
 #[derive(Clone)]
+struct StepBoundaryHook {
+    capture: StepBoundaryCapture,
+}
+
+#[derive(Clone)]
 struct SafetyClassifier {
     agent: LlmAgent,
 }
@@ -231,7 +249,11 @@ struct SafetyClassifierOutput {
 #[derive(Clone)]
 pub struct LlmService {
     agent: LlmAgent,
+    client: openai::CompletionsClient,
+    model_name: String,
+    reasoning_effort: ReasoningEffort,
     access_mode: AccessMode,
+    role: AgentRole,
     approvals: WriteApprovalController,
     shell_approvals: ShellApprovalController,
     safety: SafetyClassifier,
@@ -247,9 +269,31 @@ pub struct PromptRunResult {
     pub history: Option<Vec<RigMessage>>,
 }
 
+#[derive(Clone, Debug)]
+pub struct HistoryCompactionResult {
+    pub history: Vec<RigMessage>,
+    pub model_name: String,
+}
+
 #[derive(Clone, Default)]
 pub struct CompletionCapture {
     inner: Arc<Mutex<Option<CompletionRequestSnapshot>>>,
+}
+
+#[derive(Clone, Default)]
+struct StepBoundaryCapture {
+    inner: Arc<Mutex<Option<StepBoundaryState>>>,
+}
+
+#[derive(Clone)]
+struct StepBoundaryState {
+    next_prompt: RigMessage,
+    history: Vec<RigMessage>,
+}
+
+enum PromptStepOutcome {
+    Finished(PromptRunResult),
+    Continue(StepBoundaryState),
 }
 
 impl LlmService {
@@ -279,22 +323,26 @@ impl LlmService {
         };
         let tool_names = tool_names_for_context(&tool_context);
         let approval_mode = approvals.mode();
-        let agent = client
-            .agent(
-                context
-                    .model_name_override
-                    .clone()
-                    .unwrap_or_else(|| config.azure.model_name.clone()),
-            )
-            .preamble(&preamble)
-            .additional_params(reasoning_params(config.azure.reasoning_effort))
-            .tools(tools_for_context(tool_context))
-            .build();
+        let model_name = context
+            .model_name_override
+            .clone()
+            .unwrap_or_else(|| config.azure.model_name.clone());
+        let agent = build_agent(
+            &client,
+            &model_name,
+            &preamble,
+            config.azure.reasoning_effort,
+            Some(tool_context),
+        );
         let safety = SafetyClassifier::from_client(&client, config);
 
         Ok(Self {
             agent,
+            client,
+            model_name,
+            reasoning_effort: config.azure.reasoning_effort,
             access_mode: context.access_mode,
+            role: context.role,
             approvals,
             shell_approvals: ShellApprovalController::new(approval_mode),
             safety,
@@ -352,13 +400,22 @@ impl LlmService {
         reply_id: u64,
         prompt: String,
         history: Vec<RigMessage>,
+        history_model_name: Option<String>,
         stats_hook: StatsHook,
         events: UnboundedSender<(u64, StreamEvent)>,
     ) {
         let emit: EventCallback =
             Arc::new(move |reply_id, event| events.send((reply_id, event)).is_ok());
         let _ = self
-            .run_prompt(reply_id, prompt, history, stats_hook, None, emit)
+            .run_prompt(
+                reply_id,
+                prompt,
+                history,
+                history_model_name,
+                stats_hook,
+                None,
+                emit,
+            )
             .await;
     }
 
@@ -367,10 +424,139 @@ impl LlmService {
         reply_id: u64,
         prompt: String,
         history: Vec<RigMessage>,
+        history_model_name: Option<String>,
         stats_hook: StatsHook,
         capture: Option<CompletionCapture>,
         emit: EventCallback,
     ) -> Result<PromptRunResult> {
+        let mut prompt = RigMessage::user(prompt);
+        let mut history = history;
+        let mut steps = 0;
+
+        if let Some(compaction_model_name) =
+            self.compaction_model_for_pre_turn(&history, history_model_name.as_deref(), &prompt)
+        {
+            let result = self
+                .compact_history(
+                    history.clone(),
+                    &compaction_model_name,
+                    reply_id,
+                    emit.clone(),
+                    self.role == AgentRole::Main,
+                )
+                .await?;
+            history = result.history;
+        }
+
+        loop {
+            steps += 1;
+            if steps > MAX_TOOL_STEPS_PER_TURN {
+                let message =
+                    format!("Request exceeded the turn step limit ({MAX_TOOL_STEPS_PER_TURN}).");
+                let _ = (emit)(reply_id, StreamEvent::Failed(message.clone()));
+                return Err(anyhow::anyhow!(message));
+            }
+
+            match self
+                .run_prompt_step(
+                    reply_id,
+                    prompt,
+                    history,
+                    stats_hook.clone(),
+                    capture.clone(),
+                    emit.clone(),
+                )
+                .await?
+            {
+                PromptStepOutcome::Finished(result) => {
+                    return Ok(result);
+                }
+                PromptStepOutcome::Continue(next) => {
+                    prompt = next.next_prompt;
+                    history = next.history;
+                    if self.should_compact_before_follow_up(&history, &prompt) {
+                        let result = self
+                            .compact_history(
+                                history.clone(),
+                                &self.model_name,
+                                reply_id,
+                                emit.clone(),
+                                self.role == AgentRole::Main,
+                            )
+                            .await?;
+                        history = result.history;
+                    }
+                }
+            }
+        }
+    }
+
+    pub async fn compact_history_for_session(
+        &self,
+        history: Vec<RigMessage>,
+        history_model_name: Option<String>,
+    ) -> Result<HistoryCompactionResult> {
+        let model_name = history_model_name.unwrap_or_else(|| self.model_name.clone());
+        self.compact_history(history, &model_name, 0, Arc::new(|_, _| true), false)
+            .await
+    }
+
+    fn compaction_model_for_pre_turn(
+        &self,
+        history: &[RigMessage],
+        history_model_name: Option<&str>,
+        prompt: &RigMessage,
+    ) -> Option<String> {
+        if !self.should_compact_request_for_model(&self.model_name, history, prompt) {
+            return None;
+        }
+
+        let Some(previous_model_name) = history_model_name else {
+            return Some(self.model_name.clone());
+        };
+        let Some(previous_model) = model_registry::find_model(previous_model_name) else {
+            return Some(self.model_name.clone());
+        };
+        let Some(current_model) = model_registry::find_model(&self.model_name) else {
+            return Some(self.model_name.clone());
+        };
+        if previous_model.context_length > current_model.context_length
+            && self.should_compact_request_for_model(
+                &self.model_name,
+                history,
+                &RigMessage::user(""),
+            )
+        {
+            Some(previous_model_name.to_string())
+        } else {
+            Some(self.model_name.clone())
+        }
+    }
+
+    fn should_compact_before_follow_up(&self, history: &[RigMessage], prompt: &RigMessage) -> bool {
+        self.should_compact_request_for_model(&self.model_name, history, prompt)
+    }
+
+    fn should_compact_request_for_model(
+        &self,
+        model_name: &str,
+        history: &[RigMessage],
+        prompt: &RigMessage,
+    ) -> bool {
+        model_registry::find_model(model_name).is_some_and(|model| {
+            model.should_compact_for_input_tokens(estimated_request_tokens(history, prompt))
+        })
+    }
+
+    async fn run_prompt_step(
+        &self,
+        reply_id: u64,
+        prompt: RigMessage,
+        history: Vec<RigMessage>,
+        stats_hook: StatsHook,
+        capture: Option<CompletionCapture>,
+        emit: EventCallback,
+    ) -> Result<PromptStepOutcome> {
         let write_approval_hook = WriteApprovalHook {
             reply_id,
             emit: emit.clone(),
@@ -388,15 +574,21 @@ impl LlmService {
             emit: emit.clone(),
             controller: self.ask_user.clone(),
         };
+        let step_boundary = StepBoundaryCapture::default();
         let hook = CombinedHook {
-            first: stats_hook,
+            first: StepBoundaryHook {
+                capture: step_boundary.clone(),
+            },
             second: CombinedHook {
-                first: CompletionCaptureHook { capture },
+                first: stats_hook,
                 second: CombinedHook {
-                    first: shell_approval_hook,
+                    first: CompletionCaptureHook { capture },
                     second: CombinedHook {
-                        first: write_approval_hook,
-                        second: ask_user_hook,
+                        first: shell_approval_hook,
+                        second: CombinedHook {
+                            first: write_approval_hook,
+                            second: ask_user_hook,
+                        },
                     },
                 },
             },
@@ -520,10 +712,18 @@ impl LlmService {
                     if !(emit)(reply_id, event) {
                         return Err(anyhow::anyhow!("event sink unavailable"));
                     }
-                    return Ok(PromptRunResult { output, history });
+                    return Ok(PromptStepOutcome::Finished(PromptRunResult {
+                        output,
+                        history,
+                    }));
                 }
                 Ok(_) => None,
                 Err(error) => {
+                    if let Some(boundary) = step_boundary.take()
+                        && is_step_boundary_error(&error)
+                    {
+                        return Ok(PromptStepOutcome::Continue(boundary));
+                    }
                     let message = error.to_string();
                     let _ = (emit)(reply_id, StreamEvent::Failed(message.clone()));
                     return Err(error.into());
@@ -540,6 +740,100 @@ impl LlmService {
         let message = "Request ended before response completed.".to_string();
         let _ = (emit)(reply_id, StreamEvent::Failed(message.clone()));
         Err(anyhow::anyhow!(message))
+    }
+
+    async fn compact_history(
+        &self,
+        history: Vec<RigMessage>,
+        model_name: &str,
+        reply_id: u64,
+        emit: EventCallback,
+        emit_notice: bool,
+    ) -> Result<HistoryCompactionResult> {
+        let compact_agent = build_agent(
+            &self.client,
+            model_name,
+            &self.preamble,
+            self.reasoning_effort,
+            None,
+        );
+        let mut candidate_history = history;
+
+        loop {
+            let request_tokens =
+                estimated_request_tokens(&candidate_history, &RigMessage::user(COMPACTION_PROMPT));
+            if model_registry::find_model(model_name)
+                .is_some_and(|model| request_tokens > model.context_length)
+            {
+                if !drop_oldest_compaction_source_message(&mut candidate_history) {
+                    return Err(anyhow::anyhow!(
+                        "Compaction request exceeded the model context and could not be reduced further."
+                    ));
+                }
+                continue;
+            }
+
+            let summary = match run_plain_prompt(
+                &compact_agent,
+                COMPACTION_PROMPT.to_string(),
+                candidate_history.clone(),
+            )
+            .await
+            {
+                Ok(summary) => summary,
+                Err(error) if is_retryable_compaction_error(&error.to_string()) => {
+                    if !drop_oldest_compaction_source_message(&mut candidate_history) {
+                        return Err(error);
+                    }
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+
+            let rebuilt = rebuild_compacted_history(&candidate_history, &summary);
+            if emit_notice && !(emit)(reply_id, StreamEvent::Commentary(COMPACTION_NOTICE.into())) {
+                return Err(anyhow::anyhow!("event sink unavailable"));
+            }
+            return Ok(HistoryCompactionResult {
+                history: rebuilt,
+                model_name: model_name.to_string(),
+            });
+        }
+    }
+}
+
+impl StepBoundaryCapture {
+    fn set(&self, next_prompt: &RigMessage, history: &[RigMessage]) {
+        let mut slot = self.inner.lock().expect("step boundary lock");
+        *slot = Some(StepBoundaryState {
+            next_prompt: next_prompt.clone(),
+            history: history.to_vec(),
+        });
+    }
+
+    fn take(&self) -> Option<StepBoundaryState> {
+        self.inner.lock().expect("step boundary lock").take()
+    }
+}
+
+impl<M> PromptHook<M> for StepBoundaryHook
+where
+    M: CompletionModel,
+{
+    async fn on_completion_call(
+        &self,
+        prompt: &rig::completion::Message,
+        history: &[rig::completion::Message],
+    ) -> HookAction {
+        if self.capture.take().is_some() {
+            self.capture.set(prompt, history);
+            HookAction::Terminate {
+                reason: STEP_BOUNDARY_REASON.to_string(),
+            }
+        } else {
+            self.capture.set(prompt, history);
+            HookAction::Continue
+        }
     }
 }
 
@@ -1246,6 +1540,155 @@ fn shell_pattern_matches(pattern: &str, command: &str) -> bool {
     }
 }
 
+fn build_agent(
+    client: &openai::CompletionsClient,
+    model_name: &str,
+    preamble: &str,
+    reasoning_effort: ReasoningEffort,
+    tool_context: Option<ToolContext>,
+) -> LlmAgent {
+    let builder = client
+        .agent(model_name.to_string())
+        .preamble(preamble)
+        .additional_params(reasoning_params(reasoning_effort));
+    match tool_context {
+        Some(tool_context) => builder.tools(tools_for_context(tool_context)).build(),
+        None => builder.build(),
+    }
+}
+
+async fn run_plain_prompt(
+    agent: &LlmAgent,
+    prompt: String,
+    history: Vec<RigMessage>,
+) -> Result<String> {
+    let mut stream = agent.stream_chat(prompt, history).multi_turn(0).await;
+    let mut output = String::new();
+
+    while let Some(chunk) = stream.next().await {
+        match chunk {
+            Ok(MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(text))) => {
+                output.push_str(&text.text);
+            }
+            Ok(MultiTurnStreamItem::FinalResponse(response)) => {
+                if !response.response().is_empty() {
+                    return Ok(response.response().to_string());
+                }
+                return Ok(output);
+            }
+            Ok(_) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+
+    Err(anyhow::anyhow!("Request ended before response completed."))
+}
+
+fn estimated_request_tokens(history: &[RigMessage], prompt: &RigMessage) -> usize {
+    (estimated_history_context_tokens(history) + estimated_message_tokens(prompt)) as usize
+}
+
+fn is_step_boundary_error(error: &StreamingError) -> bool {
+    matches!(
+        error,
+        StreamingError::Prompt(prompt_error)
+            if matches!(prompt_error.as_ref(), PromptError::PromptCancelled { reason, .. } if reason == STEP_BOUNDARY_REASON)
+    )
+}
+
+fn is_retryable_compaction_error(error: &str) -> bool {
+    let normalized = error.to_ascii_lowercase();
+    [
+        "context_length_exceeded",
+        "input tokens exceed",
+        "maximum context",
+        "too large",
+        "max_output_tokens",
+    ]
+    .iter()
+    .any(|marker| normalized.contains(marker))
+}
+
+fn drop_oldest_compaction_source_message(history: &mut Vec<RigMessage>) -> bool {
+    if history.is_empty() {
+        false
+    } else {
+        history.remove(0);
+        true
+    }
+}
+
+fn rebuild_compacted_history(history: &[RigMessage], summary: &str) -> Vec<RigMessage> {
+    let user_indexes = retain_tail_indexes(
+        history,
+        COMPACTION_USER_TOKEN_BUDGET,
+        |message| matches!(message, RigMessage::User { content } if content.iter().any(is_regular_user_content)),
+    );
+    let tool_indexes = retain_tail_indexes(history, COMPACTION_TOOL_TOKEN_BUDGET, |message| {
+        message_contains_tool_state(message)
+    });
+
+    let mut retained = user_indexes
+        .into_iter()
+        .chain(tool_indexes)
+        .collect::<Vec<_>>();
+    retained.sort_unstable();
+    retained.dedup();
+
+    let mut rebuilt = retained
+        .into_iter()
+        .map(|index| history[index].clone())
+        .collect::<Vec<_>>();
+    rebuilt.push(RigMessage::user(format!(
+        "{COMPACTION_SUMMARY_PREFIX}{summary}"
+    )));
+    rebuilt
+}
+
+fn retain_tail_indexes(
+    history: &[RigMessage],
+    token_budget: usize,
+    predicate: impl Fn(&RigMessage) -> bool,
+) -> Vec<usize> {
+    let mut kept = Vec::new();
+    let mut used_tokens = 0usize;
+
+    for (index, message) in history.iter().enumerate().rev() {
+        if !predicate(message) {
+            continue;
+        }
+
+        let message_tokens = estimated_message_tokens(message) as usize;
+        if !kept.is_empty() && used_tokens + message_tokens > token_budget {
+            break;
+        }
+        kept.push(index);
+        used_tokens += message_tokens;
+        if used_tokens >= token_budget {
+            break;
+        }
+    }
+
+    kept.reverse();
+    kept
+}
+
+fn is_regular_user_content(content: &UserContent) -> bool {
+    !matches!(content, UserContent::ToolResult(_))
+}
+
+fn message_contains_tool_state(message: &RigMessage) -> bool {
+    match message {
+        RigMessage::Assistant { content, .. } => content
+            .iter()
+            .any(|content| matches!(content, AssistantContent::ToolCall(_))),
+        RigMessage::User { content } => content
+            .iter()
+            .any(|content| matches!(content, UserContent::ToolResult(_))),
+        RigMessage::System { .. } => false,
+    }
+}
+
 fn azure_openai_base_url(config: &AppConfig) -> String {
     format!(
         "{}/openai/v1",
@@ -1611,6 +2054,68 @@ mod tests {
         assert_eq!(snapshot.history, second_history);
         assert_eq!(snapshot.prompt, second_prompt);
         assert_eq!(snapshot.message_count, 2);
+    }
+
+    #[test]
+    fn rebuild_compacted_history_keeps_recent_user_and_tool_state_plus_summary() {
+        let history = vec![
+            RigMessage::user("first user"),
+            RigMessage::assistant("plain assistant"),
+            RigMessage::Assistant {
+                id: None,
+                content: rig::OneOrMany::one(AssistantContent::tool_call(
+                    "tool-1",
+                    "List",
+                    json!({"path":"src"}),
+                )),
+            },
+            RigMessage::User {
+                content: rig::OneOrMany::one(UserContent::tool_result(
+                    "tool-1",
+                    rig::OneOrMany::one(ToolResultContent::text("tool output")),
+                )),
+            },
+            RigMessage::user("latest user"),
+        ];
+
+        let rebuilt = rebuild_compacted_history(&history, "summary text");
+
+        assert_eq!(rebuilt.len(), 5);
+        assert!(
+            matches!(&rebuilt[0], RigMessage::User { content } if content.iter().any(|item| matches!(item, UserContent::Text(text) if text.text() == "first user")))
+        );
+        assert!(matches!(&rebuilt[1], RigMessage::Assistant { .. }));
+        assert!(matches!(&rebuilt[2], RigMessage::User { .. }));
+        assert!(
+            matches!(&rebuilt[3], RigMessage::User { content } if content.iter().any(|item| matches!(item, UserContent::Text(text) if text.text() == "latest user")))
+        );
+        assert!(
+            matches!(&rebuilt[4], RigMessage::User { content } if content.iter().any(|item| matches!(item, UserContent::Text(text) if text.text().contains(COMPACTION_SUMMARY_PREFIX) && text.text().contains("summary text"))))
+        );
+    }
+
+    #[test]
+    fn message_contains_tool_state_distinguishes_plain_and_tool_messages() {
+        assert!(!message_contains_tool_state(&RigMessage::user(
+            "plain user"
+        )));
+        assert!(!message_contains_tool_state(&RigMessage::assistant(
+            "plain assistant"
+        )));
+        assert!(message_contains_tool_state(&RigMessage::Assistant {
+            id: None,
+            content: rig::OneOrMany::one(AssistantContent::tool_call(
+                "tool-1",
+                "List",
+                json!({"path":"src"}),
+            )),
+        }));
+        assert!(message_contains_tool_state(&RigMessage::User {
+            content: rig::OneOrMany::one(UserContent::tool_result(
+                "tool-1",
+                rig::OneOrMany::one(ToolResultContent::text("tool output")),
+            )),
+        }));
     }
 
     #[test]

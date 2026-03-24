@@ -23,8 +23,9 @@ use crate::{
     tools::{MutationPreview, mutation_preview, write_approval_summary},
 };
 
-const COMMANDS: [SlashCommand; 6] = [
+const COMMANDS: [SlashCommand; 7] = [
     SlashCommand::NewSession,
+    SlashCommand::Compact,
     SlashCommand::Stats,
     SlashCommand::Model,
     SlashCommand::Effort,
@@ -36,6 +37,7 @@ const DEFAULT_COMPOSER_WRAP_WIDTH: usize = 80;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SlashCommand {
     NewSession,
+    Compact,
     Stats,
     Model,
     Effort,
@@ -47,6 +49,7 @@ impl SlashCommand {
     pub fn canonical_name(self) -> &'static str {
         match self {
             Self::NewSession => "/new",
+            Self::Compact => "/compact",
             Self::Stats => "/stats",
             Self::Model => "/model",
             Self::Effort => "/effort",
@@ -58,6 +61,7 @@ impl SlashCommand {
     pub fn aliases(self) -> &'static [&'static str] {
         match self {
             Self::NewSession => &["/clear"],
+            Self::Compact => &[],
             Self::Stats => &["/status"],
             Self::Model => &["/models"],
             Self::Effort => &["/reasoning", "/thinking"],
@@ -69,6 +73,7 @@ impl SlashCommand {
     pub fn description(self) -> &'static str {
         match self {
             Self::NewSession => "Start a new session",
+            Self::Compact => "Compact the internal model history",
             Self::Stats => "Show session and historical usage stats",
             Self::Model => "Select the model and reasoning effort",
             Self::Effort => "Set reasoning effort for the current model",
@@ -80,6 +85,7 @@ impl SlashCommand {
     pub fn usage(self) -> Option<&'static str> {
         match self {
             Self::Model => Some("/model"),
+            Self::Compact => Some("/compact"),
             Self::Effort => Some("/effort <minimal|low|medium|high|xhigh>"),
             Self::Plan => Some("/plan"),
             Self::NewSession | Self::Stats | Self::Quit => None,
@@ -373,6 +379,7 @@ pub(super) struct PendingReply {
 pub(super) enum PendingReplyKind {
     Normal,
     Planning,
+    Compacting,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -509,6 +516,7 @@ pub struct App {
     pub(super) show_thinking: bool,
     pub(super) show_tool_output: bool,
     pub(super) model_name: String,
+    pub(super) last_history_model_name: Option<String>,
     pub(super) reasoning_effort: ReasoningEffort,
     pub(super) safety_model_name: String,
     pub(super) safety_reasoning_effort: ReasoningEffort,
@@ -580,6 +588,7 @@ impl App {
             show_tool_output,
             safety_model_name: model_name.clone(),
             model_name,
+            last_history_model_name: None,
             reasoning_effort,
             safety_reasoning_effort: reasoning_effort,
             planning_agents,
@@ -748,6 +757,12 @@ impl App {
     pub fn history_pending_status_label(&self) -> &'static str {
         if self.has_pending_write_approval() || self.has_pending_shell_approval() {
             "Waiting"
+        } else if self
+            .pending_reply
+            .as_ref()
+            .is_some_and(|pending| pending.kind == PendingReplyKind::Compacting)
+        {
+            "Compacting context..."
         } else {
             "thinking"
         }
@@ -788,6 +803,10 @@ impl App {
 
     pub fn reasoning_effort(&self) -> ReasoningEffort {
         self.reasoning_effort
+    }
+
+    pub fn last_history_model_name(&self) -> Option<&str> {
+        self.last_history_model_name.as_deref()
     }
 
     pub fn planning_agents(&self) -> &[PlanningAgentConfig] {
@@ -908,7 +927,7 @@ impl App {
             })
     }
 
-    pub(super) fn active_reply_id(&self) -> Option<u64> {
+    pub(crate) fn active_reply_id(&self) -> Option<u64> {
         self.pending_reply.as_ref().map(|pending| pending.id)
     }
 
@@ -983,6 +1002,7 @@ impl App {
         self.mode = self.initial_mode;
         self.session_history.clear();
         self.estimated_session_history_tokens = 0;
+        self.last_history_model_name = None;
         self.pending_reply = None;
         self.pending_write_approvals.clear();
         self.pending_shell_approvals.clear();
@@ -997,9 +1017,13 @@ impl App {
         self.clear_composer();
     }
 
-    pub(super) fn replace_session_history(&mut self, history: Vec<RigMessage>) {
+    pub(crate) fn replace_session_history(&mut self, history: Vec<RigMessage>) {
         self.estimated_session_history_tokens = estimated_history_context_tokens(&history);
         self.session_history = history;
+    }
+
+    pub(crate) fn set_last_history_model_name(&mut self, model_name: Option<impl Into<String>>) {
+        self.last_history_model_name = model_name.map(Into::into);
     }
 
     pub(crate) fn set_reasoning_effort(&mut self, reasoning_effort: ReasoningEffort) {

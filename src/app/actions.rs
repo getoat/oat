@@ -59,7 +59,9 @@ pub enum Effect {
         reply_id: u64,
         prompt: String,
         history: Vec<RigMessage>,
+        history_model_name: Option<String>,
     },
+    CompactHistory,
     ShowStats,
     RotateSession,
     SetModelSelection {
@@ -79,6 +81,7 @@ pub enum Effect {
         reply_id: u64,
         description: String,
         history: Vec<RigMessage>,
+        history_model_name: Option<String>,
     },
     RebuildLlm {
         access_mode: super::state::AccessMode,
@@ -383,6 +386,7 @@ fn submit_message(app: &mut App) -> Option<Effect> {
         reply_id,
         prompt: submitted,
         history: app.session_history().to_vec(),
+        history_model_name: app.last_history_model_name().map(str::to_string),
     })
 }
 
@@ -421,6 +425,7 @@ fn submit_plan_acceptance(app: &mut App) -> Option<Effect> {
         reply_id,
         prompt,
         history: Vec::new(),
+        history_model_name: None,
     })
 }
 
@@ -456,6 +461,7 @@ fn submit_plan_revision_feedback(app: &mut App, submitted: &str) -> Option<Effec
         reply_id,
         prompt,
         history: app.session_history().to_vec(),
+        history_model_name: app.last_history_model_name().map(str::to_string),
     })
 }
 
@@ -476,6 +482,7 @@ fn submit_planning_draft(app: &mut App, submitted: &str) -> Option<Effect> {
         reply_id,
         prompt: planning_conversation_prompt(submitted),
         history: app.session_history().to_vec(),
+        history_model_name: app.last_history_model_name().map(str::to_string),
     })
 }
 
@@ -495,6 +502,7 @@ fn submit_planning_turn(app: &mut App, submitted: &str) -> Option<Effect> {
         reply_id,
         prompt: submitted.to_string(),
         history: app.session_history().to_vec(),
+        history_model_name: app.last_history_model_name().map(str::to_string),
     })
 }
 
@@ -516,6 +524,7 @@ fn submit_command(app: &mut App, command_name: &str, arguments: &str) -> Option<
             app.reset_session();
             Some(Effect::RotateSession)
         }
+        SlashCommand::Compact => submit_compact_command(app, arguments),
         SlashCommand::Stats => submit_stats_command(app, arguments),
         SlashCommand::Model => submit_model_command(app, arguments),
         SlashCommand::Plan => submit_plan_command(app, arguments),
@@ -554,6 +563,28 @@ fn submit_stats_command(app: &mut App, arguments: &str) -> Option<Effect> {
 
     app.clear_composer();
     Some(Effect::ShowStats)
+}
+
+fn submit_compact_command(app: &mut App, arguments: &str) -> Option<Effect> {
+    if !arguments.trim().is_empty() {
+        app.push_error_message("Usage: /compact");
+        return None;
+    }
+
+    if app.has_pending_reply() {
+        return None;
+    }
+
+    if app.session_history().is_empty() {
+        app.clear_composer();
+        app.push_agent_message("Nothing to compact.");
+        return None;
+    }
+
+    app.clear_composer();
+    let reply_id = app.next_reply_id();
+    app.pending_reply = Some(PendingReply::new(reply_id, PendingReplyKind::Compacting));
+    Some(Effect::CompactHistory)
 }
 
 fn submit_model_command(app: &mut App, arguments: &str) -> Option<Effect> {
@@ -717,6 +748,17 @@ fn on_stream_event(app: &mut App, reply_id: u64, event: StreamEvent) -> Option<E
             app.begin_planning_finalization();
             None
         }
+        StreamEvent::CompactionFinished {
+            history,
+            model_name,
+        } => {
+            app.replace_session_history(history);
+            app.set_last_history_model_name(Some(model_name));
+            app.clear_pending_ask_user();
+            app.pending_reply = None;
+            app.push_agent_message("Context compacted.");
+            None
+        }
         StreamEvent::Finished { history } => {
             let pending_kind = app.pending_reply.as_ref().map(|pending| pending.kind);
             let planning_stage = app.planning_session_stage();
@@ -727,6 +769,7 @@ fn on_stream_event(app: &mut App, reply_id: u64, event: StreamEvent) -> Option<E
                 .unwrap_or_default();
             if let Some(history) = history {
                 app.replace_session_history(history);
+                app.set_last_history_model_name(Some(app.model_name().to_string()));
             }
             app.clear_pending_ask_user();
             app.pending_reply = None;
@@ -740,6 +783,7 @@ fn on_stream_event(app: &mut App, reply_id: u64, event: StreamEvent) -> Option<E
                     reply_id,
                     description,
                     history: app.session_history().to_vec(),
+                    history_model_name: app.last_history_model_name().map(str::to_string),
                 });
             }
             if pending_kind == Some(PendingReplyKind::Planning)
@@ -1046,6 +1090,7 @@ mod tests {
                 reply_id: 1,
                 prompt: "hello\nworld".into(),
                 history: Vec::new(),
+                history_model_name: None,
             })
         );
         assert_eq!(app.entries.len(), 2);
@@ -1098,6 +1143,7 @@ mod tests {
                 reply_id: 1,
                 prompt: "next".into(),
                 history: vec![RigMessage::assistant("previous")],
+                history_model_name: None,
             })
         );
     }
@@ -1735,6 +1781,7 @@ mod tests {
                 reply_id: 1,
                 prompt: planning_conversation_prompt("Add a planning workflow"),
                 history: Vec::new(),
+                history_model_name: None,
             })
         );
         assert!(!app.planning_draft_mode());
@@ -1779,6 +1826,7 @@ mod tests {
                 reply_id: 1,
                 history,
                 prompt,
+                ..
             }) if history.is_empty()
                 && prompt.contains("You are no longer in Plan Mode")
                 && prompt.contains("# Test Plan")
@@ -1844,6 +1892,7 @@ mod tests {
                 reply_id: 1,
                 prompt: "Revise the proposed plan based on these comments. Respond with an updated <proposed_plan> block and do not begin implementation yet. Do not use subagents for this revision.\n\nCover rollback and tests.".into(),
                 history: Vec::new(),
+                history_model_name: None,
             })
         );
         assert!(app.pending_reply.is_some());
@@ -1940,6 +1989,37 @@ mod tests {
 
         assert_eq!(effect, Some(Effect::ShowStats));
         assert!(!app.composer_has_content());
+    }
+
+    #[test]
+    fn compact_command_returns_effect() {
+        let mut app = new_app(true);
+        app.replace_session_history(vec![RigMessage::assistant("previous")]);
+        app.composer.insert_str("/compact");
+        app.sync_command_selection();
+
+        let effect = app.apply(Action::SubmitMessage);
+
+        assert_eq!(effect, Some(Effect::CompactHistory));
+        assert!(!app.composer_has_content());
+        assert!(app.has_pending_reply());
+        assert_eq!(app.history_pending_status_label(), "Compacting context...");
+    }
+
+    #[test]
+    fn compact_command_without_history_reports_noop() {
+        let mut app = new_app(true);
+        app.composer.insert_str("/compact");
+        app.sync_command_selection();
+
+        let effect = app.apply(Action::SubmitMessage);
+
+        assert!(effect.is_none());
+        assert!(!app.has_pending_reply());
+        let TranscriptEntry::Message(message) = app.entries.last().expect("message entry") else {
+            panic!("expected message entry");
+        };
+        assert_eq!(message.text, "Nothing to compact.");
     }
 
     #[test]

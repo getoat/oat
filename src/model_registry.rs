@@ -37,6 +37,7 @@ pub struct ModelInfo {
     pub name: &'static str,
     pub provider: ModelProvider,
     pub context_length: usize,
+    pub compaction_trigger_percent_used: u8,
     pub pricing: ModelPricing,
     pub long_context_pricing: Option<LongContextPricing>,
     pub supported_reasoning_levels: &'static [ReasoningEffort],
@@ -54,6 +55,18 @@ impl ModelInfo {
             .unwrap_or(self.pricing)
     }
 
+    pub fn compaction_trigger_percent_used(self) -> u8 {
+        self.compaction_trigger_percent_used.min(90)
+    }
+
+    pub fn compaction_trigger_tokens(self) -> usize {
+        self.context_length * self.compaction_trigger_percent_used() as usize / 100
+    }
+
+    pub fn should_compact_for_input_tokens(self, input_tokens: usize) -> bool {
+        input_tokens >= self.compaction_trigger_tokens()
+    }
+
     pub fn recommended_prompt_token_budget(self) -> usize {
         let base_limit = self
             .long_context_pricing
@@ -68,6 +81,7 @@ const MODELS: [ModelInfo; 3] = [
         name: "gpt-5.4",
         provider: ModelProvider::AzureOpenAi,
         context_length: 272_000,
+        compaction_trigger_percent_used: 90,
         pricing: ModelPricing {
             input_per_million_tokens: 2.50,
             cache_read_per_million_tokens: 0.25,
@@ -80,6 +94,7 @@ const MODELS: [ModelInfo; 3] = [
         name: "gpt-5.4-mini",
         provider: ModelProvider::AzureOpenAi,
         context_length: 272_000,
+        compaction_trigger_percent_used: 90,
         pricing: ModelPricing {
             input_per_million_tokens: 0.75,
             cache_read_per_million_tokens: 0.075,
@@ -92,6 +107,7 @@ const MODELS: [ModelInfo; 3] = [
         name: "gpt-5.4-nano",
         provider: ModelProvider::AzureOpenAi,
         context_length: 272_000,
+        compaction_trigger_percent_used: 90,
         pricing: ModelPricing {
             input_per_million_tokens: 0.20,
             cache_read_per_million_tokens: 0.02,
@@ -120,6 +136,10 @@ pub fn default_reasoning_for_model(name: &str) -> Option<ReasoningEffort> {
 
 pub fn recommended_prompt_token_budget(name: &str) -> Option<usize> {
     find_model(name).map(|model| model.recommended_prompt_token_budget())
+}
+
+pub fn compaction_trigger_percent_used(name: &str) -> Option<u8> {
+    find_model(name).map(|model| model.compaction_trigger_percent_used())
 }
 
 #[cfg(test)]
@@ -156,6 +176,7 @@ mod tests {
             name: "synthetic-tiered-model",
             provider: ModelProvider::AzureOpenAi,
             context_length: 272_000,
+            compaction_trigger_percent_used: 95,
             pricing: ModelPricing {
                 input_per_million_tokens: 1.0,
                 cache_read_per_million_tokens: 0.1,
@@ -188,5 +209,27 @@ mod tests {
         assert_eq!(gpt_54.recommended_prompt_token_budget(), 104_000);
         assert_eq!(gpt_54_mini.recommended_prompt_token_budget(), 104_000);
         assert_eq!(gpt_54_nano.recommended_prompt_token_budget(), 104_000);
+    }
+
+    #[test]
+    fn compaction_trigger_never_compacts_later_than_ninety_percent() {
+        let model = ModelInfo {
+            name: "synthetic-late-model",
+            provider: ModelProvider::AzureOpenAi,
+            context_length: 100,
+            compaction_trigger_percent_used: 99,
+            pricing: ModelPricing {
+                input_per_million_tokens: 1.0,
+                cache_read_per_million_tokens: 0.1,
+                output_per_million_tokens: 2.0,
+            },
+            long_context_pricing: None,
+            supported_reasoning_levels: &GPT_5_4_REASONING_LEVELS,
+        };
+
+        assert_eq!(model.compaction_trigger_percent_used(), 90);
+        assert_eq!(model.compaction_trigger_tokens(), 90);
+        assert!(model.should_compact_for_input_tokens(90));
+        assert!(!model.should_compact_for_input_tokens(89));
     }
 }
