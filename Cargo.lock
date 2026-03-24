@@ -1362,6 +1362,7 @@ dependencies = [
  "ratatui-textarea",
  "regex",
  "rig-core",
+ "schemars",
  "serde",
  "serde_json",
  "tiktoken-rs",

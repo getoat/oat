@@ -11,7 +11,7 @@ use rig::{
     agent::{HookAction, MultiTurnStreamItem, PromptHook, ToolCallHookAction},
     client::CompletionClient,
     completion::{
-        Chat, CompletionModel, Message as RigMessage,
+        CompletionModel, Message as RigMessage, TypedPrompt,
         message::{ToolResult, ToolResultContent},
     },
     providers::openai,
@@ -20,6 +20,8 @@ use rig::{
     },
     tool::Tool,
 };
+use schemars::JsonSchema;
+use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::{mpsc::UnboundedSender, oneshot};
 
@@ -200,6 +202,30 @@ struct SafetyClassification {
     risk: CommandRisk,
     risk_explanation: String,
     reason: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+enum SafetyClassifierRiskOutput {
+    Low,
+    Medium,
+    High,
+}
+
+impl From<SafetyClassifierRiskOutput> for CommandRisk {
+    fn from(value: SafetyClassifierRiskOutput) -> Self {
+        match value {
+            SafetyClassifierRiskOutput::Low => Self::Low,
+            SafetyClassifierRiskOutput::Medium => Self::Medium,
+            SafetyClassifierRiskOutput::High => Self::High,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct SafetyClassifierOutput {
+    risk: SafetyClassifierRiskOutput,
+    explanation: String,
 }
 
 #[derive(Clone)]
@@ -571,15 +597,27 @@ impl SafetyClassifier {
         let working_directory = display_requested_shell_cwd(args.cwd.as_deref());
         let prompt =
             safety_classifier_prompt(access_mode, &command, &working_directory, args, heuristic);
-        let model_risk = match self.agent.chat(prompt, Vec::<RigMessage>::new()).await {
-            Ok(output) => parse_command_risk(&output).unwrap_or(CommandRisk::High),
-            Err(_) => CommandRisk::High,
-        };
+        let model_output = self
+            .agent
+            .prompt_typed::<SafetyClassifierOutput>(prompt)
+            .await
+            .ok();
+        let model_risk = model_output
+            .as_ref()
+            .map(|output| CommandRisk::from(output.risk))
+            .unwrap_or(CommandRisk::High);
         let risk = max_command_risk(model_risk, heuristic.unwrap_or(CommandRisk::Low));
+        let risk_explanation = match model_output {
+            Some(output) if risk == model_risk => output.explanation,
+            Some(_) if risk != model_risk => {
+                "Local safety heuristic raised the final risk above the model response.".into()
+            }
+            _ => "Safety classifier did not provide a usable explanation.".into(),
+        };
 
         SafetyClassification {
             risk,
-            risk_explanation: shell_risk_explanation(risk, &command, &args.script),
+            risk_explanation,
             reason,
         }
     }
@@ -1111,11 +1149,15 @@ fn reasoning_params(reasoning_effort: ReasoningEffort) -> serde_json::Value {
 fn safety_classifier_preamble() -> &'static str {
     concat!(
         "You classify shell commands for execution safety.\n",
-        "Return exactly one word: Low, Medium, or High.\n",
+        "Respond using the structured output schema.\n",
+        "Set `risk` to Low, Medium, or High.\n",
+        "Set `explanation` to a concise justification.\n",
+        "Keep `explanation` to 10 words or fewer when possible.\n",
         "Low: clearly read-only and non-destructive inspection commands.\n",
         "Medium: changes are possible but local, non-destructive, and reversible.\n",
         "High: destructive, irreversible, repository-changing, system-changing, network-changing, package-installing, or otherwise risky commands.\n",
-        "Git commands are not automatically High. Read-only git inspection commands such as status, diff, log, and show can be Low. Git commands that modify repository state, contact remotes, or may discard work are usually High.\n",
+        "Classify based on side effects, not whether the command touches a remote or the network.\n",
+        "Git commands are not automatically High. Read-only git inspection commands such as status, diff, log, show, and ls-remote can be Low, including when they inspect remote refs or metadata. Git commands that modify repository state, update refs, transfer objects into the repo, or may discard work are usually High.\n",
         "If unsure, return High."
     )
 }
@@ -1134,7 +1176,11 @@ fn safety_classifier_prompt(
             "Working directory: {}\n",
             "Intent: {}\n",
             "Heuristic minimum risk: {}\n",
-            "Script:\n{}\n"
+            "Script:\n{}\n\n",
+            "Return a structured response with `risk` and `explanation`.\n",
+            "`risk` must be Low, Medium, or High.\n",
+            "`explanation` should be concise: 10 words or fewer when possible.\n",
+            "Do not set `risk` below the heuristic minimum risk when one is provided.\n"
         ),
         access_mode.label(),
         command,
@@ -1145,56 +1191,12 @@ fn safety_classifier_prompt(
     )
 }
 
-fn parse_command_risk(output: &str) -> Option<CommandRisk> {
-    let label = output.trim().lines().next()?.trim().to_ascii_lowercase();
-    match label.as_str() {
-        "low" => Some(CommandRisk::Low),
-        "medium" => Some(CommandRisk::Medium),
-        "high" => Some(CommandRisk::High),
-        _ => None,
-    }
-}
-
 fn normalize_summary(summary: &str) -> String {
     let normalized = summary.split_whitespace().collect::<Vec<_>>().join(" ");
     if normalized.is_empty() {
         "No reason provided for this shell command".into()
     } else {
         normalized
-    }
-}
-
-fn shell_risk_explanation(risk: CommandRisk, command: &str, script: &str) -> String {
-    let normalized = format!("{command}\n{script}").to_ascii_lowercase();
-    match risk {
-        CommandRisk::Low => {
-            if normalized.contains("cat ")
-                || normalized.contains("ls ")
-                || normalized.contains("pwd")
-                || normalized.contains("rg ")
-                || normalized.contains("find ")
-            {
-                "read-only inspection command with no obvious mutation".into()
-            } else {
-                "no obvious file, repository, or system mutation".into()
-            }
-        }
-        CommandRisk::Medium => {
-            if normalized.contains("mkdir ") || normalized.contains("touch ") {
-                "may create workspace files or directories, but appears local and reversible".into()
-            } else if normalized.contains("cp ") || normalized.contains("mv ") {
-                "may change workspace files, but appears limited and reversible".into()
-            } else {
-                "may modify local state, but does not look destructive".into()
-            }
-        }
-        CommandRisk::High => {
-            if normalized.contains("rm ") || normalized.contains("rm -") {
-                "includes removal commands that can destroy data".into()
-            } else {
-                "could irreversibly change repository, filesystem, or system state".into()
-            }
-        }
     }
 }
 
@@ -1736,8 +1738,13 @@ mod tests {
     #[test]
     fn safety_preamble_allows_read_only_git_commands_to_be_low() {
         let preamble = safety_classifier_preamble();
+        assert!(preamble.contains("structured output schema"));
+        assert!(preamble.contains("Set `risk` to Low, Medium, or High."));
+        assert!(preamble.contains("Set `explanation` to a concise justification."));
+        assert!(preamble.contains("10 words or fewer when possible"));
+        assert!(preamble.contains("side effects"));
         assert!(preamble.contains("Git commands are not automatically High."));
-        assert!(preamble.contains("status, diff, log, and show can be Low"));
+        assert!(preamble.contains("status, diff, log, show, and ls-remote can be Low"));
     }
 
     #[test]
@@ -1750,6 +1757,22 @@ mod tests {
         assert_eq!(
             minimum_shell_risk("rm -rf target", "rm -rf target"),
             Some(CommandRisk::High)
+        );
+    }
+
+    #[test]
+    fn safety_classifier_risk_output_converts_to_command_risk() {
+        assert_eq!(
+            CommandRisk::from(SafetyClassifierRiskOutput::Low),
+            CommandRisk::Low
+        );
+        assert_eq!(
+            CommandRisk::from(SafetyClassifierRiskOutput::Medium),
+            CommandRisk::Medium
+        );
+        assert_eq!(
+            CommandRisk::from(SafetyClassifierRiskOutput::High),
+            CommandRisk::High
         );
     }
 }
