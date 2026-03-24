@@ -1689,6 +1689,21 @@ mod tests {
     }
 
     #[test]
+    fn stream_failure_while_waiting_for_interaction_clears_pending_reply_at_app_layer() {
+        let mut app = new_app(true);
+        app.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
+        app.begin_ask_user("call-1".into(), ask_user_request());
+
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: StreamEvent::Failed("boom".into()),
+        });
+
+        assert!(app.pending_reply.is_none());
+        assert!(!app.has_pending_ask_user());
+    }
+
+    #[test]
     fn subagent_failure_message_includes_log_path_when_available() {
         let mut app = new_app(true);
 

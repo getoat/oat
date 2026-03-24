@@ -372,11 +372,20 @@ pub(super) struct PendingReply {
     pub(super) staged_reasoning_text: String,
     pub(super) staged_plain_text: String,
     pub(super) plain_text: String,
+    pub(super) reasoning_text: String,
+    pub(super) commentary_messages: Vec<String>,
     pub(super) has_visible_content: bool,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PendingReplyReplaySeed {
+    pub plain_text: String,
+    pub reasoning_text: String,
+    pub commentary_messages: Vec<String>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum PendingReplyKind {
+pub enum PendingReplyKind {
     Normal,
     Planning,
     Compacting,
@@ -400,6 +409,8 @@ impl PendingReply {
             staged_reasoning_text: String::new(),
             staged_plain_text: String::new(),
             plain_text: String::new(),
+            reasoning_text: String::new(),
+            commentary_messages: Vec::new(),
             has_visible_content: false,
         }
     }
@@ -631,12 +642,26 @@ impl App {
         self.pending_write_approvals.front()
     }
 
+    pub fn main_pending_write_approval_request_id(&self) -> Option<&str> {
+        self.pending_write_approvals
+            .iter()
+            .find(|pending| pending.source_label.is_none())
+            .map(|pending| pending.request_id.as_str())
+    }
+
     pub fn has_pending_write_approval(&self) -> bool {
         !self.pending_write_approvals.is_empty()
     }
 
     pub fn pending_shell_approval(&self) -> Option<&PendingShellApproval> {
         self.pending_shell_approvals.front()
+    }
+
+    pub fn main_pending_shell_approval_request_id(&self) -> Option<&str> {
+        self.pending_shell_approvals
+            .iter()
+            .find(|pending| pending.source_label.is_none())
+            .map(|pending| pending.request_id.as_str())
     }
 
     pub fn has_pending_shell_approval(&self) -> bool {
@@ -929,6 +954,30 @@ impl App {
 
     pub(crate) fn active_reply_id(&self) -> Option<u64> {
         self.pending_reply.as_ref().map(|pending| pending.id)
+    }
+
+    pub(crate) fn active_reply_kind(&self) -> Option<PendingReplyKind> {
+        self.pending_reply.as_ref().map(|pending| pending.kind)
+    }
+
+    pub(crate) fn pending_reply_replay_seed(&self) -> Option<PendingReplyReplaySeed> {
+        self.pending_reply
+            .as_ref()
+            .map(|pending| PendingReplyReplaySeed {
+                plain_text: pending.plain_text.clone(),
+                reasoning_text: pending.reasoning_text.clone(),
+                commentary_messages: pending.commentary_messages.clone(),
+            })
+    }
+
+    pub(crate) fn ensure_pending_reply(&mut self, kind: PendingReplyKind) -> u64 {
+        if let Some(pending) = self.pending_reply.as_ref() {
+            return pending.id;
+        }
+
+        let reply_id = self.next_reply_id();
+        self.pending_reply = Some(PendingReply::new(reply_id, kind));
+        reply_id
     }
 
     pub(super) fn next_reply_id(&mut self) -> u64 {
@@ -1396,8 +1445,10 @@ impl App {
     }
 
     pub(super) fn push_agent_commentary(&mut self, text: impl Into<String>) {
+        let text = text.into();
         if let Some(pending) = self.pending_reply.as_mut() {
             pending.reset_active_stream_segment();
+            pending.commentary_messages.push(text.clone());
             pending.has_visible_content = true;
         }
         self.push_message(Speaker::Agent, text, MessageStyle::Commentary);
@@ -1531,6 +1582,7 @@ impl App {
                         pending_text = std::mem::take(&mut pending.staged_plain_text);
                     }
                     MessageStyle::Thinking => {
+                        pending.reasoning_text.push_str(delta);
                         pending.staged_reasoning_text.push_str(delta);
                         if !pending_stream_text_is_visible(style, &pending.staged_reasoning_text) {
                             return;
@@ -3247,6 +3299,45 @@ mod tests {
     }
 
     #[test]
+    fn main_pending_approval_request_ids_skip_subagent_entries() {
+        let mut app = App::new(true, false, "gpt-5-mini", ReasoningEffort::Medium);
+
+        app.begin_subagent_write_approval(
+            "subagent-1".into(),
+            "sub-write".into(),
+            "WriteFile".into(),
+            "{}".into(),
+        );
+        app.begin_write_approval("main-write".into(), "WriteFile".into(), "{}".into());
+        app.begin_subagent_shell_approval(
+            "subagent-2".into(),
+            "sub-shell".into(),
+            CommandRisk::Medium,
+            "explanation".into(),
+            "git status".into(),
+            "workspace root".into(),
+            "reason".into(),
+        );
+        app.begin_shell_approval(
+            "main-shell".into(),
+            CommandRisk::Low,
+            "explanation".into(),
+            "pwd".into(),
+            "workspace root".into(),
+            "reason".into(),
+        );
+
+        assert_eq!(
+            app.main_pending_write_approval_request_id(),
+            Some("main-write")
+        );
+        assert_eq!(
+            app.main_pending_shell_approval_request_id(),
+            Some("main-shell")
+        );
+    }
+
+    #[test]
     fn allow_all_session_updates_policy_and_clears_pending_request() {
         let mut app = App::new(true, false, "gpt-5-mini", ReasoningEffort::Medium);
         app.begin_write_approval("call-1".into(), "WriteFile".into(), "{}".into());
@@ -3350,6 +3441,23 @@ mod tests {
         assert_eq!(message.speaker, Speaker::User);
         assert!(message.text.contains("Which scope?: Something else"));
         assert!(!app.has_pending_ask_user());
+    }
+
+    #[test]
+    fn pending_reply_replay_seed_tracks_plain_reasoning_and_commentary() {
+        let mut app = App::new(true, false, "gpt-5-mini", ReasoningEffort::Medium);
+        app.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
+
+        app.append_pending_stream_message("plain", MessageStyle::Plain);
+        app.append_pending_stream_message("thought", MessageStyle::Thinking);
+        app.push_agent_commentary("note");
+
+        let seed = app
+            .pending_reply_replay_seed()
+            .expect("pending reply replay seed");
+        assert_eq!(seed.plain_text, "plain");
+        assert_eq!(seed.reasoning_text, "thought");
+        assert_eq!(seed.commentary_messages, vec!["note"]);
     }
 
     #[test]

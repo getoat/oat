@@ -24,7 +24,7 @@ use std::{
 };
 
 use anyhow::anyhow;
-use app::{Action, App, ApprovalMode, Effect};
+use app::{Action, App, ApprovalMode, Effect, PendingReplyKind};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use crossterm::{
     event::{
@@ -41,7 +41,10 @@ use crate::{
     agent::AgentContext,
     command_history::CommandHistoryStore,
     config::AppConfig,
-    llm::{AskUserController, LlmService, StreamEvent, WriteApprovalController},
+    llm::{
+        AskUserController, InteractionResolveResult, LlmService, ResumeRequest, StreamEvent,
+        WriteApprovalController,
+    },
     planning::{
         PlanningJob, planner_prompt, planning_finalization_prompt, planning_jobs,
         sanitize_planning_agents,
@@ -137,6 +140,11 @@ pub fn run_with_options(
                 .is_some_and(|(active_reply_id, _)| *active_reply_id == reply_id)
             {
                 active_reply_task = None;
+            }
+            if matches!(&event, llm::StreamEvent::Failed(_))
+                && should_defer_failed_stream_event(&app, &llm, reply_id)
+            {
+                continue;
             }
             if let Some(effect) = app.apply(Action::StreamEvent { reply_id, event }) {
                 let mut runner = EffectRunner {
@@ -471,9 +479,15 @@ impl EffectRunner<'_> {
                 request_id,
                 decision,
             } => {
-                if !self.llm.resolve_write_approval(&request_id, decision) {
-                    self.app
-                        .push_error_message("Write approval request is no longer active.");
+                match self.llm.resolve_write_approval(&request_id, decision) {
+                    InteractionResolveResult::Resolved => {}
+                    InteractionResolveResult::Resume(request) => {
+                        self.resume_interrupted_reply(request)?;
+                    }
+                    InteractionResolveResult::Missing => {
+                        self.app
+                            .push_error_message("Write approval request is no longer active.");
+                    }
                 }
                 Ok(())
             }
@@ -481,9 +495,15 @@ impl EffectRunner<'_> {
                 request_id,
                 decision,
             } => {
-                if !self.llm.resolve_shell_approval(&request_id, decision) {
-                    self.app
-                        .push_error_message("Shell approval request is no longer active.");
+                match self.llm.resolve_shell_approval(&request_id, decision) {
+                    InteractionResolveResult::Resolved => {}
+                    InteractionResolveResult::Resume(request) => {
+                        self.resume_interrupted_reply(request)?;
+                    }
+                    InteractionResolveResult::Missing => {
+                        self.app
+                            .push_error_message("Shell approval request is no longer active.");
+                    }
                 }
                 Ok(())
             }
@@ -491,9 +511,15 @@ impl EffectRunner<'_> {
                 request_id,
                 response,
             } => {
-                if !self.llm.resolve_ask_user(&request_id, response) {
-                    self.app
-                        .push_error_message("AskUser request is no longer active.");
+                match self.llm.resolve_ask_user(&request_id, response) {
+                    InteractionResolveResult::Resolved => {}
+                    InteractionResolveResult::Resume(request) => {
+                        self.resume_interrupted_reply(request)?;
+                    }
+                    InteractionResolveResult::Missing => {
+                        self.app
+                            .push_error_message("AskUser request is no longer active.");
+                    }
                 }
                 Ok(())
             }
@@ -541,6 +567,36 @@ impl EffectRunner<'_> {
         }
         self.llm.cancel_pending_interactions();
     }
+
+    fn resume_interrupted_reply(&mut self, request: ResumeRequest) -> anyhow::Result<()> {
+        if let Some((_, task)) = self.active_reply_task.take() {
+            task.abort();
+        }
+
+        let reply_kind = self
+            .app
+            .active_reply_kind()
+            .unwrap_or(PendingReplyKind::Normal);
+        let reply_id = self.app.ensure_pending_reply(reply_kind);
+        let replay_seed = self.app.pending_reply_replay_seed();
+        let llm = self.llm.clone();
+        let stats_hook = self.stats.hook_for_model(self.app.model_name().to_string());
+        let stream_tx = self.stream_tx.clone();
+
+        let task = self.runtime.spawn(async move {
+            llm.stream_resumed_prompt(
+                reply_id,
+                request.snapshot,
+                stats_hook,
+                stream_tx,
+                request.override_action,
+                replay_seed,
+            )
+            .await;
+        });
+        *self.active_reply_task = Some((reply_id, task));
+        Ok(())
+    }
 }
 
 fn persist_command_history_if_needed(app: &mut App, store: &CommandHistoryStore) {
@@ -551,6 +607,21 @@ fn persist_command_history_if_needed(app: &mut App, store: &CommandHistoryStore)
     if let Err(error) = store.save(&entries) {
         app.push_error_message(format!("Failed to save input history: {error}"));
     }
+}
+
+fn should_defer_failed_stream_event(app: &App, llm: &LlmService, reply_id: u64) -> bool {
+    if app.active_reply_id() != Some(reply_id) {
+        return false;
+    }
+
+    app.main_pending_write_approval_request_id()
+        .is_some_and(|request_id| llm.can_resolve_write_approval(request_id))
+        || app
+            .main_pending_shell_approval_request_id()
+            .is_some_and(|request_id| llm.can_resolve_shell_approval(request_id))
+        || app
+            .pending_ask_user()
+            .is_some_and(|pending| llm.can_resolve_ask_user(&pending.request_id))
 }
 
 async fn run_planning_workflow(

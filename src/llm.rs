@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     env,
     sync::{Arc, Mutex},
 };
@@ -27,7 +27,10 @@ use tokio::sync::{mpsc::UnboundedSender, oneshot};
 
 use crate::{
     agent::{AgentContext, AgentRole},
-    app::{AccessMode, ApprovalMode, CommandRisk, ShellApprovalDecision, WriteApprovalDecision},
+    app::{
+        AccessMode, ApprovalMode, CommandRisk, PendingReplyReplaySeed, ShellApprovalDecision,
+        WriteApprovalDecision,
+    },
     ask_user::{AskUserRequest, AskUserResponse, validate_request},
     completion_request::{
         CompletionRequestSnapshot, estimated_history_context_tokens, estimated_message_tokens,
@@ -93,6 +96,38 @@ pub enum StreamEvent {
     Failed(String),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResumeOverride {
+    WriteApproval {
+        tool_name: String,
+        arguments: String,
+        decision: WriteApprovalDecision,
+    },
+    ShellApproval {
+        risk: CommandRisk,
+        command: String,
+        working_directory: String,
+        decision: ShellApprovalDecision,
+    },
+    AskUser {
+        request: AskUserRequest,
+        response: AskUserResponse,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResumeRequest {
+    pub snapshot: CompletionRequestSnapshot,
+    pub override_action: ResumeOverride,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum InteractionResolveResult {
+    Resolved,
+    Resume(ResumeRequest),
+    Missing,
+}
+
 type LlmAgent = rig::agent::Agent<openai::CompletionModel>;
 pub type EventCallback = Arc<dyn Fn(u64, StreamEvent) -> bool + Send + Sync>;
 
@@ -104,7 +139,14 @@ pub struct WriteApprovalController {
 struct WriteApprovalState {
     default_mode: ApprovalMode,
     mode: ApprovalMode,
-    pending: HashMap<String, oneshot::Sender<WriteApprovalDecision>>,
+    pending: HashMap<String, PendingWriteApprovalEntry>,
+}
+
+struct PendingWriteApprovalEntry {
+    sender: oneshot::Sender<WriteApprovalDecision>,
+    snapshot: Option<CompletionRequestSnapshot>,
+    tool_name: String,
+    arguments: String,
 }
 
 #[derive(Clone)]
@@ -123,6 +165,9 @@ struct ShellApprovalState {
 struct PendingShellApprovalEntry {
     risk: CommandRisk,
     sender: oneshot::Sender<ShellApprovalDecision>,
+    snapshot: Option<CompletionRequestSnapshot>,
+    command: String,
+    working_directory: String,
 }
 
 #[derive(Clone)]
@@ -147,7 +192,13 @@ pub struct AskUserController {
 }
 
 struct AskUserState {
-    pending: HashMap<String, oneshot::Sender<AskUserResponse>>,
+    pending: HashMap<String, PendingAskUserEntry>,
+}
+
+struct PendingAskUserEntry {
+    sender: oneshot::Sender<AskUserResponse>,
+    snapshot: Option<CompletionRequestSnapshot>,
+    request: AskUserRequest,
 }
 
 #[derive(Clone)]
@@ -157,6 +208,8 @@ struct ShellApprovalHook {
     access_mode: AccessMode,
     approvals: ShellApprovalController,
     safety: SafetyClassifier,
+    capture: Option<CompletionCapture>,
+    resume: Option<ResumeOverrideController>,
 }
 
 #[derive(Clone)]
@@ -164,6 +217,8 @@ struct WriteApprovalHook {
     reply_id: u64,
     emit: EventCallback,
     approvals: WriteApprovalController,
+    capture: Option<CompletionCapture>,
+    resume: Option<ResumeOverrideController>,
 }
 
 #[derive(Clone)]
@@ -171,6 +226,8 @@ struct AskUserHook {
     reply_id: u64,
     emit: EventCallback,
     controller: Option<AskUserController>,
+    capture: Option<CompletionCapture>,
+    resume: Option<ResumeOverrideController>,
 }
 
 #[derive(Clone, Default)]
@@ -190,12 +247,117 @@ struct ReplayProbe {
     buffered: String,
 }
 
+#[derive(Clone, Default)]
+struct ResumeOverrideController {
+    inner: Arc<Mutex<Option<ResumeOverrideState>>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResumeOverrideState {
+    override_action: ResumeOverride,
+    tool_call_suppressed: bool,
+}
+
 impl ReplayProbe {
     fn new(expected: &str) -> Self {
         Self {
             expected: expected.to_string(),
             buffered: String::new(),
         }
+    }
+}
+
+impl ResumeOverrideController {
+    fn new(override_action: ResumeOverride) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(Some(ResumeOverrideState {
+                override_action,
+                tool_call_suppressed: false,
+            }))),
+        }
+    }
+
+    fn consume_write(&self, tool_name: &str, arguments: &str) -> Option<WriteApprovalDecision> {
+        let mut state = self.inner.lock().expect("resume override lock");
+        let ResumeOverride::WriteApproval {
+            tool_name: expected_tool_name,
+            arguments: expected_arguments,
+            decision: _,
+        } = &state.as_ref()?.override_action
+        else {
+            return None;
+        };
+        if expected_tool_name != tool_name || expected_arguments != arguments {
+            return None;
+        }
+        let state = state.take()?;
+        let ResumeOverride::WriteApproval { decision, .. } = state.override_action else {
+            unreachable!("matched write override");
+        };
+        Some(decision)
+    }
+
+    fn consume_shell(
+        &self,
+        risk: CommandRisk,
+        command: &str,
+        working_directory: &str,
+    ) -> Option<ShellApprovalDecision> {
+        let mut state = self.inner.lock().expect("resume override lock");
+        let ResumeOverride::ShellApproval {
+            risk: expected_risk,
+            command: expected_command,
+            working_directory: expected_working_directory,
+            ..
+        } = &state.as_ref()?.override_action
+        else {
+            return None;
+        };
+        if *expected_risk != risk
+            || expected_command != command
+            || expected_working_directory != working_directory
+        {
+            return None;
+        }
+        let state = state.take()?;
+        let ResumeOverride::ShellApproval { decision, .. } = state.override_action else {
+            unreachable!("matched shell override");
+        };
+        Some(decision)
+    }
+
+    fn consume_ask_user(&self, request: &AskUserRequest) -> Option<AskUserResponse> {
+        let mut state = self.inner.lock().expect("resume override lock");
+        let ResumeOverride::AskUser {
+            request: expected_request,
+            ..
+        } = &state.as_ref()?.override_action
+        else {
+            return None;
+        };
+        if expected_request != request {
+            return None;
+        }
+        let state = state.take()?;
+        let ResumeOverride::AskUser { response, .. } = state.override_action else {
+            unreachable!("matched ask user override");
+        };
+        Some(response)
+    }
+
+    fn suppress_matching_tool_call(&self, name: &str, arguments: &str) -> bool {
+        let mut state = self.inner.lock().expect("resume override lock");
+        let Some(state) = state.as_mut() else {
+            return false;
+        };
+        if state.tool_call_suppressed {
+            return false;
+        }
+        if !resume_override_matches_tool_call(&state.override_action, name, arguments) {
+            return false;
+        }
+        state.tool_call_suppressed = true;
+        true
     }
 }
 
@@ -364,7 +526,7 @@ impl LlmService {
         &self,
         request_id: &str,
         decision: WriteApprovalDecision,
-    ) -> bool {
+    ) -> InteractionResolveResult {
         self.approvals.resolve(request_id, decision)
     }
 
@@ -372,14 +534,33 @@ impl LlmService {
         &self,
         request_id: &str,
         decision: ShellApprovalDecision,
-    ) -> bool {
+    ) -> InteractionResolveResult {
         self.shell_approvals.resolve(request_id, decision)
     }
 
-    pub fn resolve_ask_user(&self, request_id: &str, response: AskUserResponse) -> bool {
+    pub fn resolve_ask_user(
+        &self,
+        request_id: &str,
+        response: AskUserResponse,
+    ) -> InteractionResolveResult {
         self.ask_user
             .as_ref()
-            .is_some_and(|controller| controller.resolve(request_id, response))
+            .map(|controller| controller.resolve(request_id, response))
+            .unwrap_or(InteractionResolveResult::Missing)
+    }
+
+    pub fn can_resolve_write_approval(&self, request_id: &str) -> bool {
+        self.approvals.can_resolve(request_id)
+    }
+
+    pub fn can_resolve_shell_approval(&self, request_id: &str) -> bool {
+        self.shell_approvals.can_resolve(request_id)
+    }
+
+    pub fn can_resolve_ask_user(&self, request_id: &str) -> bool {
+        self.ask_user
+            .as_ref()
+            .is_some_and(|controller| controller.can_resolve(request_id))
     }
 
     pub fn reset_write_approvals(&self) {
@@ -419,6 +600,31 @@ impl LlmService {
             .await;
     }
 
+    pub async fn stream_resumed_prompt(
+        &self,
+        reply_id: u64,
+        snapshot: CompletionRequestSnapshot,
+        stats_hook: StatsHook,
+        events: UnboundedSender<(u64, StreamEvent)>,
+        override_action: ResumeOverride,
+        replay_seed: Option<PendingReplyReplaySeed>,
+    ) {
+        let emit: EventCallback =
+            Arc::new(move |reply_id, event| events.send((reply_id, event)).is_ok());
+        let _ = self
+            .run_prompt_from_state(
+                reply_id,
+                snapshot.prompt,
+                snapshot.history,
+                stats_hook,
+                None,
+                emit,
+                Some(ResumeOverrideController::new(override_action)),
+                replay_seed,
+            )
+            .await;
+    }
+
     pub async fn run_prompt(
         &self,
         reply_id: u64,
@@ -429,9 +635,8 @@ impl LlmService {
         capture: Option<CompletionCapture>,
         emit: EventCallback,
     ) -> Result<PromptRunResult> {
-        let mut prompt = RigMessage::user(prompt);
+        let prompt = RigMessage::user(prompt);
         let mut history = history;
-        let mut steps = 0;
 
         if let Some(compaction_model_name) =
             self.compaction_model_for_pre_turn(&history, history_model_name.as_deref(), &prompt)
@@ -447,6 +652,25 @@ impl LlmService {
                 .await?;
             history = result.history;
         }
+
+        self.run_prompt_from_state(
+            reply_id, prompt, history, stats_hook, capture, emit, None, None,
+        )
+        .await
+    }
+
+    async fn run_prompt_from_state(
+        &self,
+        reply_id: u64,
+        mut prompt: RigMessage,
+        mut history: Vec<RigMessage>,
+        stats_hook: StatsHook,
+        capture: Option<CompletionCapture>,
+        emit: EventCallback,
+        resume: Option<ResumeOverrideController>,
+        mut replay_seed: Option<PendingReplyReplaySeed>,
+    ) -> Result<PromptRunResult> {
+        let mut steps = 0;
 
         loop {
             steps += 1;
@@ -465,6 +689,8 @@ impl LlmService {
                     stats_hook.clone(),
                     capture.clone(),
                     emit.clone(),
+                    resume.clone(),
+                    replay_seed.take(),
                 )
                 .await?
             {
@@ -556,11 +782,15 @@ impl LlmService {
         stats_hook: StatsHook,
         capture: Option<CompletionCapture>,
         emit: EventCallback,
+        resume: Option<ResumeOverrideController>,
+        replay_seed: Option<PendingReplyReplaySeed>,
     ) -> Result<PromptStepOutcome> {
         let write_approval_hook = WriteApprovalHook {
             reply_id,
             emit: emit.clone(),
             approvals: self.approvals.clone(),
+            capture: capture.clone(),
+            resume: resume.clone(),
         };
         let shell_approval_hook = ShellApprovalHook {
             reply_id,
@@ -568,11 +798,15 @@ impl LlmService {
             access_mode: self.access_mode,
             approvals: self.shell_approvals.clone(),
             safety: self.safety.clone(),
+            capture: capture.clone(),
+            resume: resume.clone(),
         };
         let ask_user_hook = AskUserHook {
             reply_id,
             emit: emit.clone(),
             controller: self.ask_user.clone(),
+            capture: capture.clone(),
+            resume: resume.clone(),
         };
         let step_boundary = StepBoundaryCapture::default();
         let hook = CombinedHook {
@@ -603,14 +837,27 @@ impl LlmService {
         let mut commentary_calls = HashSet::<String>::new();
         let mut partial_tool_calls = HashMap::<String, PartialToolCall>::new();
         let mut output = String::new();
-        let mut replay_probe = None;
+        let mut reasoning_output = String::new();
+        let mut plain_replay_probe = replay_seed
+            .as_ref()
+            .map(|seed| seed.plain_text.clone())
+            .filter(|text| !text.is_empty())
+            .map(|text| ReplayProbe::new(&text));
+        let mut reasoning_replay_probe = replay_seed
+            .as_ref()
+            .map(|seed| seed.reasoning_text.clone())
+            .filter(|text| !text.is_empty())
+            .map(|text| ReplayProbe::new(&text));
+        let mut commentary_replay_messages = replay_seed
+            .map(|seed| seed.commentary_messages.into())
+            .filter(|messages: &VecDeque<String>| !messages.is_empty());
 
         while let Some(chunk) = stream.next().await {
             let event = match chunk {
                 Ok(MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(
                     text,
                 ))) => {
-                    let delta = reconcile_stream_text(&text.text, &mut replay_probe);
+                    let delta = reconcile_stream_text(&text.text, &mut plain_replay_probe);
                     if delta.is_empty() {
                         None
                     } else {
@@ -621,14 +868,29 @@ impl LlmService {
                 Ok(MultiTurnStreamItem::StreamAssistantItem(
                     StreamedAssistantContent::Reasoning(reasoning),
                 )) => {
-                    replay_probe = (!output.is_empty()).then(|| ReplayProbe::new(&output));
-                    Some(StreamEvent::ReasoningDelta(reasoning.display_text()))
+                    plain_replay_probe = (!output.is_empty()).then(|| ReplayProbe::new(&output));
+                    let delta = reconcile_stream_text(
+                        &reasoning.display_text(),
+                        &mut reasoning_replay_probe,
+                    );
+                    if delta.is_empty() {
+                        None
+                    } else {
+                        reasoning_output.push_str(&delta);
+                        Some(StreamEvent::ReasoningDelta(delta))
+                    }
                 }
                 Ok(MultiTurnStreamItem::StreamAssistantItem(
                     StreamedAssistantContent::ReasoningDelta { reasoning, .. },
                 )) => {
-                    replay_probe = (!output.is_empty()).then(|| ReplayProbe::new(&output));
-                    Some(StreamEvent::ReasoningDelta(reasoning))
+                    plain_replay_probe = (!output.is_empty()).then(|| ReplayProbe::new(&output));
+                    let delta = reconcile_stream_text(&reasoning, &mut reasoning_replay_probe);
+                    if delta.is_empty() {
+                        None
+                    } else {
+                        reasoning_output.push_str(&delta);
+                        Some(StreamEvent::ReasoningDelta(delta))
+                    }
                 }
                 Ok(MultiTurnStreamItem::StreamAssistantItem(
                     StreamedAssistantContent::ToolCallDelta {
@@ -654,7 +916,9 @@ impl LlmService {
                         internal_call_id,
                     },
                 )) => {
-                    replay_probe = (!output.is_empty()).then(|| ReplayProbe::new(&output));
+                    plain_replay_probe = (!output.is_empty()).then(|| ReplayProbe::new(&output));
+                    reasoning_replay_probe =
+                        (!reasoning_output.is_empty()).then(|| ReplayProbe::new(&reasoning_output));
                     let name = tool_call.function.name.clone();
                     let fallback_arguments = format_tool_arguments(&tool_call.function.arguments);
                     tool_calls.insert(internal_call_id.clone(), name.clone());
@@ -669,13 +933,33 @@ impl LlmService {
                         ) {
                             Ok(message) => {
                                 commentary_calls.insert(internal_call_id);
-                                Some(StreamEvent::Commentary(message))
+                                if commentary_replay_messages.as_ref().is_some_and(|messages| {
+                                    messages
+                                        .front()
+                                        .is_some_and(|expected| expected == &message)
+                                }) {
+                                    if let Some(messages) = commentary_replay_messages.as_mut() {
+                                        messages.pop_front();
+                                        if messages.is_empty() {
+                                            commentary_replay_messages = None;
+                                        }
+                                    }
+                                    None
+                                } else {
+                                    commentary_replay_messages = None;
+                                    Some(StreamEvent::Commentary(message))
+                                }
                             }
                             Err(_) => Some(StreamEvent::ToolCall {
                                 name,
                                 arguments: fallback_arguments,
                             }),
                         }
+                    } else if resume.as_ref().is_some_and(|resume| {
+                        resume.suppress_matching_tool_call(&name, &fallback_arguments)
+                    }) {
+                        partial_tool_calls.remove(&internal_call_id);
+                        None
                     } else {
                         partial_tool_calls.remove(&internal_call_id);
                         Some(StreamEvent::ToolCall {
@@ -688,7 +972,9 @@ impl LlmService {
                     tool_result,
                     internal_call_id,
                 })) => {
-                    replay_probe = (!output.is_empty()).then(|| ReplayProbe::new(&output));
+                    plain_replay_probe = (!output.is_empty()).then(|| ReplayProbe::new(&output));
+                    reasoning_replay_probe =
+                        (!reasoning_output.is_empty()).then(|| ReplayProbe::new(&reasoning_output));
                     let name = tool_calls
                         .get(&internal_call_id)
                         .cloned()
@@ -933,6 +1219,15 @@ impl WriteApprovalController {
         state.mode
     }
 
+    fn can_resolve(&self, request_id: &str) -> bool {
+        self.inner
+            .lock()
+            .expect("approval state lock")
+            .pending
+            .get(request_id)
+            .is_some_and(|pending| !pending.sender.is_closed() || pending.snapshot.is_some())
+    }
+
     async fn request_approval(
         &self,
         reply_id: u64,
@@ -940,7 +1235,24 @@ impl WriteApprovalController {
         internal_call_id: &str,
         args: &str,
         emit: &EventCallback,
+        snapshot: Option<CompletionRequestSnapshot>,
+        resume: Option<&ResumeOverrideController>,
     ) -> ToolCallHookAction {
+        if let Some(decision) = resume.and_then(|resume| resume.consume_write(tool_name, args)) {
+            if matches!(decision, WriteApprovalDecision::AllowAllSession) {
+                let mut state = self.inner.lock().expect("approval state lock");
+                state.mode = ApprovalMode::Disabled;
+            }
+            return match decision {
+                WriteApprovalDecision::AllowOnce | WriteApprovalDecision::AllowAllSession => {
+                    ToolCallHookAction::Continue
+                }
+                WriteApprovalDecision::Deny => {
+                    ToolCallHookAction::skip("Write action denied by user.")
+                }
+            };
+        }
+
         let rx = {
             let mut state = self.inner.lock().expect("approval state lock");
             if matches!(state.mode, ApprovalMode::Disabled) {
@@ -948,7 +1260,15 @@ impl WriteApprovalController {
             }
 
             let (tx, rx) = oneshot::channel();
-            state.pending.insert(internal_call_id.to_string(), tx);
+            state.pending.insert(
+                internal_call_id.to_string(),
+                PendingWriteApprovalEntry {
+                    sender: tx,
+                    snapshot,
+                    tool_name: tool_name.to_string(),
+                    arguments: args.to_string(),
+                },
+            );
             rx
         };
 
@@ -978,8 +1298,12 @@ impl WriteApprovalController {
         }
     }
 
-    fn resolve(&self, request_id: &str, decision: WriteApprovalDecision) -> bool {
-        let sender = {
+    fn resolve(
+        &self,
+        request_id: &str,
+        decision: WriteApprovalDecision,
+    ) -> InteractionResolveResult {
+        let pending = {
             let mut state = self.inner.lock().expect("approval state lock");
             if matches!(decision, WriteApprovalDecision::AllowAllSession) {
                 state.mode = ApprovalMode::Disabled;
@@ -987,18 +1311,31 @@ impl WriteApprovalController {
             state.pending.remove(request_id)
         };
 
-        if let Some(sender) = sender {
-            sender.send(decision).is_ok()
+        let Some(pending) = pending else {
+            return InteractionResolveResult::Missing;
+        };
+
+        if pending.sender.send(decision).is_ok() {
+            InteractionResolveResult::Resolved
+        } else if let Some(snapshot) = pending.snapshot {
+            InteractionResolveResult::Resume(ResumeRequest {
+                snapshot,
+                override_action: ResumeOverride::WriteApproval {
+                    tool_name: pending.tool_name,
+                    arguments: pending.arguments,
+                    decision,
+                },
+            })
         } else {
-            false
+            InteractionResolveResult::Missing
         }
     }
 
     fn reset_session(&self) {
         let mut state = self.inner.lock().expect("approval state lock");
         state.mode = state.default_mode;
-        for (_, sender) in state.pending.drain() {
-            let _ = sender.send(WriteApprovalDecision::Deny);
+        for (_, pending) in state.pending.drain() {
+            let _ = pending.sender.send(WriteApprovalDecision::Deny);
         }
     }
 
@@ -1030,6 +1367,15 @@ impl ShellApprovalController {
         }
     }
 
+    fn can_resolve(&self, request_id: &str) -> bool {
+        self.inner
+            .lock()
+            .expect("shell approval state lock")
+            .pending
+            .get(request_id)
+            .is_some_and(|pending| !pending.sender.is_closed() || pending.snapshot.is_some())
+    }
+
     async fn request_approval(
         &self,
         reply_id: u64,
@@ -1038,6 +1384,8 @@ impl ShellApprovalController {
         args: &RunShellScriptArgs,
         emit: &EventCallback,
         safety: &SafetyClassifier,
+        snapshot: Option<CompletionRequestSnapshot>,
+        resume: Option<&ResumeOverrideController>,
     ) -> ToolCallHookAction {
         let classification = safety.classify(access_mode, args).await;
         let command = display_shell_command(&args.script);
@@ -1049,6 +1397,34 @@ impl ShellApprovalController {
                 working_directory,
                 command
             ));
+        }
+
+        if let Some(decision) = resume.and_then(|resume| {
+            resume.consume_shell(classification.risk, &command, &working_directory)
+        }) {
+            {
+                let mut state = self.inner.lock().expect("shell approval state lock");
+                let bucket = state.bucket_mut(classification.risk);
+                match &decision {
+                    ShellApprovalDecision::AllowPattern(pattern) => {
+                        if !bucket.patterns.iter().any(|existing| existing == pattern) {
+                            bucket.patterns.push(pattern.clone());
+                        }
+                    }
+                    ShellApprovalDecision::AllowAllRisk => {
+                        bucket.mode = ApprovalMode::Disabled;
+                    }
+                    ShellApprovalDecision::AllowOnce | ShellApprovalDecision::Deny(_) => {}
+                }
+            }
+            return match decision {
+                ShellApprovalDecision::AllowOnce
+                | ShellApprovalDecision::AllowPattern(_)
+                | ShellApprovalDecision::AllowAllRisk => ToolCallHookAction::Continue,
+                ShellApprovalDecision::Deny(note) => ToolCallHookAction::skip(
+                    note.unwrap_or_else(|| "Shell command denied by user.".into()),
+                ),
+            };
         }
 
         let rx = {
@@ -1069,6 +1445,9 @@ impl ShellApprovalController {
                 PendingShellApprovalEntry {
                     risk: classification.risk,
                     sender: tx,
+                    snapshot,
+                    command: command.clone(),
+                    working_directory: working_directory.clone(),
                 },
             );
             rx
@@ -1103,7 +1482,11 @@ impl ShellApprovalController {
         }
     }
 
-    fn resolve(&self, request_id: &str, decision: ShellApprovalDecision) -> bool {
+    fn resolve(
+        &self,
+        request_id: &str,
+        decision: ShellApprovalDecision,
+    ) -> InteractionResolveResult {
         let pending = {
             let mut state = self.inner.lock().expect("shell approval state lock");
             let pending = state.pending.remove(request_id);
@@ -1124,10 +1507,24 @@ impl ShellApprovalController {
             pending
         };
 
-        if let Some(entry) = pending {
-            entry.sender.send(decision).is_ok()
+        let Some(entry) = pending else {
+            return InteractionResolveResult::Missing;
+        };
+
+        if entry.sender.send(decision.clone()).is_ok() {
+            InteractionResolveResult::Resolved
+        } else if let Some(snapshot) = entry.snapshot {
+            InteractionResolveResult::Resume(ResumeRequest {
+                snapshot,
+                override_action: ResumeOverride::ShellApproval {
+                    risk: entry.risk,
+                    command: entry.command,
+                    working_directory: entry.working_directory,
+                    decision,
+                },
+            })
         } else {
-            false
+            InteractionResolveResult::Missing
         }
     }
 
@@ -1165,12 +1562,23 @@ impl AskUserController {
         }
     }
 
+    fn can_resolve(&self, request_id: &str) -> bool {
+        self.inner
+            .lock()
+            .expect("ask user state lock")
+            .pending
+            .get(request_id)
+            .is_some_and(|pending| !pending.sender.is_closed() || pending.snapshot.is_some())
+    }
+
     async fn request_input(
         &self,
         reply_id: u64,
         internal_call_id: &str,
         args: &str,
         emit: &EventCallback,
+        snapshot: Option<CompletionRequestSnapshot>,
+        resume: Option<&ResumeOverrideController>,
     ) -> ToolCallHookAction {
         let request = match serde_json::from_str::<AskUserRequest>(args) {
             Ok(request) => request,
@@ -1184,10 +1592,23 @@ impl AskUserController {
             return ToolCallHookAction::skip(format!("AskUser validation error: {error}"));
         }
 
+        if let Some(response) = resume.and_then(|resume| resume.consume_ask_user(&request)) {
+            return ToolCallHookAction::skip(serde_json::to_string(&response).unwrap_or_else(
+                |_| "{\"questions\":[],\"error\":\"failed to serialize AskUser response\"}".into(),
+            ));
+        }
+
         let rx = {
             let mut state = self.inner.lock().expect("ask user state lock");
             let (tx, rx) = oneshot::channel();
-            state.pending.insert(internal_call_id.to_string(), tx);
+            state.pending.insert(
+                internal_call_id.to_string(),
+                PendingAskUserEntry {
+                    sender: tx,
+                    snapshot,
+                    request: request.clone(),
+                },
+            );
             rx
         };
 
@@ -1215,16 +1636,28 @@ impl AskUserController {
         }
     }
 
-    fn resolve(&self, request_id: &str, response: AskUserResponse) -> bool {
-        let sender = {
+    fn resolve(&self, request_id: &str, response: AskUserResponse) -> InteractionResolveResult {
+        let pending = {
             let mut state = self.inner.lock().expect("ask user state lock");
             state.pending.remove(request_id)
         };
 
-        if let Some(sender) = sender {
-            sender.send(response).is_ok()
+        let Some(pending) = pending else {
+            return InteractionResolveResult::Missing;
+        };
+
+        if pending.sender.send(response.clone()).is_ok() {
+            InteractionResolveResult::Resolved
+        } else if let Some(snapshot) = pending.snapshot {
+            InteractionResolveResult::Resume(ResumeRequest {
+                snapshot,
+                override_action: ResumeOverride::AskUser {
+                    request: pending.request,
+                    response,
+                },
+            })
         } else {
-            false
+            InteractionResolveResult::Missing
         }
     }
 
@@ -1263,6 +1696,8 @@ impl PromptHook<openai::CompletionModel> for ShellApprovalHook {
                 &args,
                 &self.emit,
                 &self.safety,
+                self.capture.as_ref().and_then(CompletionCapture::snapshot),
+                self.resume.as_ref(),
             )
             .await
     }
@@ -1281,7 +1716,15 @@ impl PromptHook<openai::CompletionModel> for WriteApprovalHook {
         }
 
         self.approvals
-            .request_approval(self.reply_id, tool_name, internal_call_id, args, &self.emit)
+            .request_approval(
+                self.reply_id,
+                tool_name,
+                internal_call_id,
+                args,
+                &self.emit,
+                self.capture.as_ref().and_then(CompletionCapture::snapshot),
+                self.resume.as_ref(),
+            )
             .await
     }
 }
@@ -1305,7 +1748,14 @@ impl PromptHook<openai::CompletionModel> for AskUserHook {
         };
 
         controller
-            .request_input(self.reply_id, internal_call_id, args, &self.emit)
+            .request_input(
+                self.reply_id,
+                internal_call_id,
+                args,
+                &self.emit,
+                self.capture.as_ref().and_then(CompletionCapture::snapshot),
+                self.resume.as_ref(),
+            )
             .await
     }
 }
@@ -1740,6 +2190,35 @@ fn mode_preamble(context: &AgentContext) -> String {
 
 fn format_tool_arguments(arguments: &serde_json::Value) -> String {
     serde_json::to_string(arguments).unwrap_or_else(|_| arguments.to_string())
+}
+
+fn resume_override_matches_tool_call(
+    override_action: &ResumeOverride,
+    name: &str,
+    arguments: &str,
+) -> bool {
+    match override_action {
+        ResumeOverride::WriteApproval {
+            tool_name,
+            arguments: expected_arguments,
+            ..
+        } => tool_name == name && expected_arguments == arguments,
+        ResumeOverride::ShellApproval {
+            command,
+            working_directory,
+            ..
+        } => {
+            if name != RUN_SHELL_SCRIPT_TOOL_NAME {
+                return false;
+            }
+            let Ok(args) = serde_json::from_str::<RunShellScriptArgs>(arguments) else {
+                return false;
+            };
+            display_shell_command(&args.script) == *command
+                && display_requested_shell_cwd(args.cwd.as_deref()) == *working_directory
+        }
+        ResumeOverride::AskUser { .. } => false,
+    }
 }
 
 fn format_tool_result(tool_result: &ToolResult) -> String {
@@ -2204,8 +2683,234 @@ mod tests {
     #[test]
     fn write_approval_controller_reset_is_safe_without_pending_requests() {
         let approvals = WriteApprovalController::default();
-        assert!(!approvals.resolve("missing", WriteApprovalDecision::AllowAllSession));
+        assert_eq!(
+            approvals.resolve("missing", WriteApprovalDecision::AllowAllSession),
+            InteractionResolveResult::Missing
+        );
         approvals.reset_session();
+    }
+
+    #[test]
+    fn write_approval_controller_returns_resume_request_when_waiter_is_gone() {
+        let approvals = WriteApprovalController::default();
+        let snapshot = CompletionRequestSnapshot::capture(&RigMessage::user("continue"), &[]);
+        let (tx, rx) = oneshot::channel();
+        drop(rx);
+        approvals
+            .inner
+            .lock()
+            .expect("approval state lock")
+            .pending
+            .insert(
+                "call-1".into(),
+                PendingWriteApprovalEntry {
+                    sender: tx,
+                    snapshot: Some(snapshot.clone()),
+                    tool_name: "WriteFile".into(),
+                    arguments: "{\"path\":\"src/main.rs\"}".into(),
+                },
+            );
+
+        let result = approvals.resolve("call-1", WriteApprovalDecision::AllowOnce);
+
+        assert_eq!(
+            result,
+            InteractionResolveResult::Resume(ResumeRequest {
+                snapshot,
+                override_action: ResumeOverride::WriteApproval {
+                    tool_name: "WriteFile".into(),
+                    arguments: "{\"path\":\"src/main.rs\"}".into(),
+                    decision: WriteApprovalDecision::AllowOnce,
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn write_approval_controller_can_resolve_when_waiter_is_live_or_snapshot_exists() {
+        let approvals = WriteApprovalController::default();
+
+        let (live_tx, _live_rx) = oneshot::channel();
+        approvals
+            .inner
+            .lock()
+            .expect("approval state lock")
+            .pending
+            .insert(
+                "live".into(),
+                PendingWriteApprovalEntry {
+                    sender: live_tx,
+                    snapshot: None,
+                    tool_name: "WriteFile".into(),
+                    arguments: "{}".into(),
+                },
+            );
+
+        let (closed_tx, closed_rx) = oneshot::channel();
+        drop(closed_rx);
+        approvals
+            .inner
+            .lock()
+            .expect("approval state lock")
+            .pending
+            .insert(
+                "resume".into(),
+                PendingWriteApprovalEntry {
+                    sender: closed_tx,
+                    snapshot: Some(CompletionRequestSnapshot::capture(
+                        &RigMessage::user("continue"),
+                        &[],
+                    )),
+                    tool_name: "WriteFile".into(),
+                    arguments: "{}".into(),
+                },
+            );
+
+        let (dead_tx, dead_rx) = oneshot::channel();
+        drop(dead_rx);
+        approvals
+            .inner
+            .lock()
+            .expect("approval state lock")
+            .pending
+            .insert(
+                "dead".into(),
+                PendingWriteApprovalEntry {
+                    sender: dead_tx,
+                    snapshot: None,
+                    tool_name: "WriteFile".into(),
+                    arguments: "{}".into(),
+                },
+            );
+
+        assert!(approvals.can_resolve("live"));
+        assert!(approvals.can_resolve("resume"));
+        assert!(!approvals.can_resolve("dead"));
+    }
+
+    #[test]
+    fn ask_user_controller_returns_resume_request_when_waiter_is_gone() {
+        let controller = AskUserController::default();
+        let snapshot = CompletionRequestSnapshot::capture(&RigMessage::user("continue"), &[]);
+        let request = AskUserRequest {
+            title: Some("Clarify scope".into()),
+            questions: vec![crate::ask_user::AskUserQuestion {
+                id: "scope".into(),
+                prompt: "Which scope?".into(),
+                answers: vec![crate::ask_user::AskUserAnswer {
+                    id: "narrow".into(),
+                    label: "Narrow".into(),
+                }],
+            }],
+        };
+        let response = AskUserResponse {
+            questions: vec![crate::ask_user::AskUserAnsweredQuestion {
+                id: "scope".into(),
+                prompt: "Which scope?".into(),
+                selected_answer: crate::ask_user::AskUserSelectedAnswer {
+                    id: "narrow".into(),
+                    label: "Narrow".into(),
+                    is_recommended: true,
+                    is_something_else: false,
+                },
+                details: String::new(),
+            }],
+        };
+        let (tx, rx) = oneshot::channel();
+        drop(rx);
+        controller
+            .inner
+            .lock()
+            .expect("ask user state lock")
+            .pending
+            .insert(
+                "call-2".into(),
+                PendingAskUserEntry {
+                    sender: tx,
+                    snapshot: Some(snapshot.clone()),
+                    request: request.clone(),
+                },
+            );
+
+        let result = controller.resolve("call-2", response.clone());
+
+        assert_eq!(
+            result,
+            InteractionResolveResult::Resume(ResumeRequest {
+                snapshot,
+                override_action: ResumeOverride::AskUser { request, response },
+            })
+        );
+    }
+
+    #[test]
+    fn ask_user_controller_can_resolve_when_waiter_is_live_or_snapshot_exists() {
+        let controller = AskUserController::default();
+        let request = AskUserRequest {
+            title: Some("Clarify scope".into()),
+            questions: vec![crate::ask_user::AskUserQuestion {
+                id: "scope".into(),
+                prompt: "Which scope?".into(),
+                answers: vec![crate::ask_user::AskUserAnswer {
+                    id: "narrow".into(),
+                    label: "Narrow".into(),
+                }],
+            }],
+        };
+
+        let (live_tx, _live_rx) = oneshot::channel();
+        controller
+            .inner
+            .lock()
+            .expect("ask user state lock")
+            .pending
+            .insert(
+                "live".into(),
+                PendingAskUserEntry {
+                    sender: live_tx,
+                    snapshot: None,
+                    request: request.clone(),
+                },
+            );
+
+        let (closed_tx, closed_rx) = oneshot::channel();
+        drop(closed_rx);
+        controller
+            .inner
+            .lock()
+            .expect("ask user state lock")
+            .pending
+            .insert(
+                "resume".into(),
+                PendingAskUserEntry {
+                    sender: closed_tx,
+                    snapshot: Some(CompletionRequestSnapshot::capture(
+                        &RigMessage::user("continue"),
+                        &[],
+                    )),
+                    request: request.clone(),
+                },
+            );
+
+        let (dead_tx, dead_rx) = oneshot::channel();
+        drop(dead_rx);
+        controller
+            .inner
+            .lock()
+            .expect("ask user state lock")
+            .pending
+            .insert(
+                "dead".into(),
+                PendingAskUserEntry {
+                    sender: dead_tx,
+                    snapshot: None,
+                    request,
+                },
+            );
+
+        assert!(controller.can_resolve("live"));
+        assert!(controller.can_resolve("resume"));
+        assert!(!controller.can_resolve("dead"));
     }
 
     #[tokio::test]
