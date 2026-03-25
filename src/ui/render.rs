@@ -7,9 +7,7 @@ use ratatui::{
 };
 
 use crate::{
-    app::{
-        App, ModelPickerTab, PendingAskUser, PendingShellApproval, SelectionPicker, SlashCommand,
-    },
+    app::{App, ModelPickerTab, SelectionPicker, SlashCommand},
     composer::ComposerLayout,
 };
 
@@ -23,10 +21,10 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     let accent = accent_color(app.mode(), app.plan_active());
     let input_height = if let Some(pending) = app.pending_write_approval() {
         pending_write_approval_height(pending, screen.width)
-    } else if let Some(pending) = app.pending_shell_approval() {
-        pending_shell_approval_height(pending, screen.width)
-    } else if let Some(pending) = app.pending_ask_user() {
-        pending_ask_user_height(pending, screen.width)
+    } else if app.has_pending_shell_approval() {
+        pending_shell_approval_height(app, screen.width)
+    } else if app.has_pending_ask_user() {
+        pending_ask_user_height(app, screen.width)
     } else if app.plan_review_selection_active() {
         pending_plan_review_height(screen.width)
     } else {
@@ -62,13 +60,13 @@ fn render_input(frame: &mut Frame, app: &mut App, area: Rect, accent: Color) {
         return;
     }
 
-    if let Some(pending) = app.pending_shell_approval() {
-        render_shell_approval_prompt(frame, pending, area, accent);
+    if app.has_pending_shell_approval() {
+        render_shell_approval_prompt(frame, app, area, accent);
         return;
     }
 
-    if let Some(pending) = app.pending_ask_user() {
-        render_ask_user_prompt(frame, pending, area, accent);
+    if app.has_pending_ask_user() {
+        render_ask_user_prompt(frame, app, area, accent);
         return;
     }
 
@@ -230,9 +228,27 @@ fn composer_content_width(outer_width: u16) -> usize {
     outer_width.saturating_sub(4).max(1) as usize
 }
 
-fn render_ask_user_prompt(frame: &mut Frame, pending: &PendingAskUser, area: Rect, accent: Color) {
+fn ask_user_state(
+    app: &App,
+) -> Option<(&crate::app::PendingAskUser, &crate::app::ui::AskUserUiState)> {
+    Some((app.ask_user_session()?, app.ask_user_ui()?))
+}
+
+fn shell_approval_state(
+    app: &App,
+) -> Option<(
+    &crate::app::PendingShellApproval,
+    &crate::app::ui::ShellApprovalUiState,
+)> {
+    Some((app.shell_approval_session()?, app.shell_approval_ui()?))
+}
+
+fn render_ask_user_prompt(frame: &mut Frame, app: &App, area: Rect, accent: Color) {
+    let Some((pending, ui)) = ask_user_state(app) else {
+        return;
+    };
     let content_width = composer_content_width(area.width);
-    let prompt = Paragraph::new(ask_user_panel_lines(pending, content_width, accent))
+    let prompt = Paragraph::new(ask_user_panel_lines(pending, ui, content_width, accent))
         .wrap(Wrap { trim: false })
         .block(
             Block::default()
@@ -245,13 +261,14 @@ fn render_ask_user_prompt(frame: &mut Frame, pending: &PendingAskUser, area: Rec
 }
 
 fn ask_user_panel_lines(
-    pending: &PendingAskUser,
+    pending: &crate::app::PendingAskUser,
+    ui: &crate::app::ui::AskUserUiState,
     content_width: usize,
     accent: Color,
 ) -> Vec<Line<'static>> {
-    let mut lines = vec![ask_user_tab_line(pending, accent)];
-    if pending.active_tab < pending.questions.len() {
-        let question = &pending.questions[pending.active_tab];
+    let mut lines = vec![ask_user_tab_line(pending, ui, accent)];
+    if ui.active_tab < pending.questions.len() {
+        let question = &pending.questions[ui.active_tab];
         lines.push(Line::default());
         lines.extend(
             wrap_text(&question.prompt, content_width.max(1))
@@ -298,9 +315,9 @@ fn ask_user_panel_lines(
         let selected = &question.answers[question.selected_index];
         lines.push(Line::default());
 
-        let detail_text = question.detail.lines().join("\n");
+        let detail_text = ui.detail_text(ui.active_tab);
         let show_detail =
-            pending.detail_editing || selected.is_something_else || !detail_text.trim().is_empty();
+            ui.detail_editing || selected.is_something_else || !detail_text.trim().is_empty();
         if !show_detail {
             lines.push(Line::from(Span::styled(
                 if selected.is_something_else {
@@ -313,21 +330,25 @@ fn ask_user_panel_lines(
         } else {
             lines.push(Line::default());
             lines.push(Line::from(Span::styled(
-                if pending.detail_editing {
+                if ui.detail_editing {
                     "Details (editing)"
                 } else {
                     "Details"
                 },
                 Style::default().fg(accent).add_modifier(Modifier::BOLD),
             )));
+            let detail_input = ui
+                .detail_inputs
+                .get(ui.active_tab)
+                .expect("detail input should exist for active tab");
             lines.extend(render_detail_lines(
                 render_aux_textarea_lines(
-                    &question.detail,
+                    detail_input,
                     content_width.saturating_sub(2).max(1),
                     accent,
-                    pending.detail_editing,
+                    ui.detail_editing,
                 ),
-                pending.detail_editing,
+                ui.detail_editing,
             ));
         }
         if selected.is_something_else && detail_text.trim().is_empty() {
@@ -346,7 +367,13 @@ fn ask_user_panel_lines(
 
         for question in &pending.questions {
             let selected = &question.answers[question.selected_index];
-            let detail_text = question.detail.lines().join("\n").trim().to_string();
+            let detail_text = ui.detail_text(
+                pending
+                    .questions
+                    .iter()
+                    .position(|candidate| candidate.id == question.id)
+                    .unwrap_or(0),
+            );
             let complete = !selected.is_something_else || !detail_text.is_empty();
             let marker = if complete { "✓" } else { "!" };
             let marker_style = if complete {
@@ -389,37 +416,6 @@ fn ask_user_panel_lines(
         Style::default().fg(Color::DarkGray),
     )));
     lines
-}
-
-fn ask_user_tab_line(pending: &PendingAskUser, accent: Color) -> Line<'static> {
-    let mut spans = Vec::new();
-    for (index, question) in pending.questions.iter().enumerate() {
-        if !spans.is_empty() {
-            spans.push(Span::styled("  |  ", Style::default().fg(Color::DarkGray)));
-        }
-        let is_active = index == pending.active_tab;
-        spans.push(Span::styled(
-            question.id.clone(),
-            if is_active {
-                Style::default().fg(accent).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::Gray)
-            },
-        ));
-    }
-    if !spans.is_empty() {
-        spans.push(Span::styled("  |  ", Style::default().fg(Color::DarkGray)));
-    }
-    let review_active = pending.active_tab == pending.questions.len();
-    spans.push(Span::styled(
-        "Review",
-        if review_active {
-            Style::default().fg(accent).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::Gray)
-        },
-    ));
-    Line::from(spans)
 }
 
 fn render_detail_lines(lines: Vec<Line<'static>>, editing: bool) -> Vec<Line<'static>> {
@@ -598,12 +594,45 @@ fn render_write_approval_prompt(
     frame.render_widget(prompt, area);
 }
 
-fn render_shell_approval_prompt(
-    frame: &mut Frame,
-    pending: &PendingShellApproval,
-    area: Rect,
+fn ask_user_tab_line(
+    pending: &crate::app::PendingAskUser,
+    ui: &crate::app::ui::AskUserUiState,
     accent: Color,
-) {
+) -> Line<'static> {
+    let mut spans = Vec::new();
+    for (index, question) in pending.questions.iter().enumerate() {
+        if !spans.is_empty() {
+            spans.push(Span::styled("  |  ", Style::default().fg(Color::DarkGray)));
+        }
+        let is_active = index == ui.active_tab;
+        spans.push(Span::styled(
+            question.id.clone(),
+            if is_active {
+                Style::default().fg(accent).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Gray)
+            },
+        ));
+    }
+    if !spans.is_empty() {
+        spans.push(Span::styled("  |  ", Style::default().fg(Color::DarkGray)));
+    }
+    let review_active = ui.active_tab == pending.questions.len();
+    spans.push(Span::styled(
+        "Review",
+        if review_active {
+            Style::default().fg(accent).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Gray)
+        },
+    ));
+    Line::from(spans)
+}
+
+fn render_shell_approval_prompt(frame: &mut Frame, app: &App, area: Rect, accent: Color) {
+    let Some((pending, ui)) = shell_approval_state(app) else {
+        return;
+    };
     let content_width = composer_content_width(area.width);
     let selected_style = Style::default().fg(accent).add_modifier(Modifier::BOLD);
     let unselected_style = Style::default().fg(Color::Gray);
@@ -660,77 +689,60 @@ fn render_shell_approval_prompt(
 
     lines.push(Line::from(vec![
         Span::styled(
-            if pending.selected_index == 0 {
-                "›"
-            } else {
-                " "
-            },
-            marker_style(pending.selected_index == 0),
+            if ui.selected_index == 0 { "›" } else { " " },
+            marker_style(ui.selected_index == 0),
         ),
         Span::raw(" "),
-        Span::styled("Approve once", option_style(pending.selected_index == 0)),
+        Span::styled("Approve once", option_style(ui.selected_index == 0)),
     ]));
 
     lines.push(Line::from(vec![
         Span::styled(
-            if pending.selected_index == 1 {
-                "›"
-            } else {
-                " "
-            },
-            marker_style(pending.selected_index == 1),
+            if ui.selected_index == 1 { "›" } else { " " },
+            marker_style(ui.selected_index == 1),
         ),
         Span::raw(" "),
         Span::styled(
             "Approve commands starting with",
-            option_style(pending.selected_index == 1),
+            option_style(ui.selected_index == 1),
         ),
     ]));
     lines.extend(render_detail_lines(
         render_aux_textarea_lines(
-            &pending.pattern_input,
+            &ui.pattern_input,
             content_width.saturating_sub(2).max(1),
             accent,
-            pending.selected_index == 1,
+            ui.selected_index == 1,
         ),
-        pending.selected_index == 1,
+        ui.selected_index == 1,
     ));
 
     lines.push(Line::from(vec![
         Span::styled(
-            if pending.selected_index == 2 {
-                "›"
-            } else {
-                " "
-            },
-            marker_style(pending.selected_index == 2),
+            if ui.selected_index == 2 { "›" } else { " " },
+            marker_style(ui.selected_index == 2),
         ),
         Span::raw(" "),
         Span::styled(
             format!("Approve all {} risk commands", pending.risk.as_str()),
-            option_style(pending.selected_index == 2),
+            option_style(ui.selected_index == 2),
         ),
     ]));
 
     lines.push(Line::from(vec![
         Span::styled(
-            if pending.selected_index == 3 {
-                "›"
-            } else {
-                " "
-            },
-            marker_style(pending.selected_index == 3),
+            if ui.selected_index == 3 { "›" } else { " " },
+            marker_style(ui.selected_index == 3),
         ),
         Span::raw(" "),
-        Span::styled("Deny", option_style(pending.selected_index == 3)),
+        Span::styled("Deny", option_style(ui.selected_index == 3)),
     ]));
 
-    let deny_text = pending.deny_input.lines().join("\n");
-    if pending.edit_mode == Some(crate::app::ShellApprovalEditMode::Deny)
-        || !deny_text.trim().is_empty()
+    let deny_text = ui.deny_input.lines().join("\n");
+    if ui.edit_mode == Some(crate::app::ShellApprovalEditMode::Deny) || !deny_text.trim().is_empty()
     {
         lines.push(Line::from(Span::styled(
-            if pending.edit_mode == Some(crate::app::ShellApprovalEditMode::Deny) {
+            if ui.edit_mode == Some(crate::app::ShellApprovalEditMode::Deny) {
                 "Details (editing)"
             } else {
                 "Details"
@@ -739,14 +751,14 @@ fn render_shell_approval_prompt(
         )));
         lines.extend(render_detail_lines(
             render_aux_textarea_lines(
-                &pending.deny_input,
+                &ui.deny_input,
                 content_width.saturating_sub(2).max(1),
                 accent,
-                pending.edit_mode == Some(crate::app::ShellApprovalEditMode::Deny),
+                ui.edit_mode == Some(crate::app::ShellApprovalEditMode::Deny),
             ),
-            pending.edit_mode == Some(crate::app::ShellApprovalEditMode::Deny),
+            ui.edit_mode == Some(crate::app::ShellApprovalEditMode::Deny),
         ));
-    } else if pending.selected_index == 3 {
+    } else if ui.selected_index == 3 {
         lines.push(Line::from(Span::styled(
             "Tab to add optional deny details.",
             Style::default().fg(Color::DarkGray),
@@ -754,9 +766,9 @@ fn render_shell_approval_prompt(
     }
 
     lines.push(Line::default());
-    let hint = if pending.selected_index == 1 {
+    let hint = if ui.selected_index == 1 {
         "Use * as a wildcard. Up/Down switch options  Enter submits selected option"
-    } else if pending.selected_index == 3 {
+    } else if ui.selected_index == 3 {
         "Tab edits deny details  Up/Down switch options  Enter submits selected option"
     } else {
         "Up/Down switch options  Enter submits selected option"
@@ -1055,7 +1067,7 @@ fn render_mode(frame: &mut Frame, app: &App, area: Rect, accent: Color) {
         mode_label,
         Style::default().fg(accent).add_modifier(Modifier::BOLD),
     )];
-    if app.pending_write_approval().is_none() && app.pending_shell_approval().is_none() {
+    if app.pending_write_approval().is_none() && !app.has_pending_shell_approval() {
         if app.history_is_pinned() {
             spans.push(Span::raw("  "));
             spans.push(Span::styled("Pinned", Style::default().fg(Color::Gray)));
@@ -1085,7 +1097,7 @@ fn render_mode(frame: &mut Frame, app: &App, area: Rect, accent: Color) {
             ),
             Style::default().fg(Color::Yellow),
         ));
-    } else if let Some(pending) = app.pending_shell_approval() {
+    } else if let Some((pending, _)) = shell_approval_state(app) {
         spans.push(Span::raw("  "));
         spans.push(Span::styled(
             format!("Approval pending: {} risk shell", pending.risk.label()),
@@ -1136,7 +1148,10 @@ fn pending_write_approval_height(
     (source_lines + summary_lines + 3 + 2) as u16
 }
 
-fn pending_shell_approval_height(pending: &PendingShellApproval, panel_width: u16) -> u16 {
+fn pending_shell_approval_height(app: &App, panel_width: u16) -> u16 {
+    let Some((pending, ui)) = shell_approval_state(app) else {
+        return 0;
+    };
     let content_width = panel_width.saturating_sub(4) as usize;
     let source_lines = pending
         .source_label
@@ -1168,24 +1183,24 @@ fn pending_shell_approval_height(pending: &PendingShellApproval, panel_width: u1
         .len()
         + 4;
     let pattern_lines = ComposerLayout::new(
-        pending.pattern_input.lines(),
+        ui.pattern_input.lines(),
         content_width.saturating_sub(2).max(1),
     )
     .rows()
     .len()
     .max(1);
-    let deny_text = pending.deny_input.lines().join("\n");
-    let deny_lines = if pending.edit_mode == Some(crate::app::ShellApprovalEditMode::Deny)
+    let deny_text = ui.deny_input.lines().join("\n");
+    let deny_lines = if ui.edit_mode == Some(crate::app::ShellApprovalEditMode::Deny)
         || !deny_text.trim().is_empty()
     {
         1 + ComposerLayout::new(
-            pending.deny_input.lines(),
+            ui.deny_input.lines(),
             content_width.saturating_sub(2).max(1),
         )
         .rows()
         .len()
         .max(1)
-    } else if pending.selected_index == 3 {
+    } else if ui.selected_index == 3 {
         1
     } else {
         0
@@ -1193,19 +1208,26 @@ fn pending_shell_approval_height(pending: &PendingShellApproval, panel_width: u1
     (base_lines + pattern_lines + deny_lines + 4) as u16
 }
 
-fn pending_ask_user_height(pending: &PendingAskUser, panel_width: u16) -> u16 {
+fn pending_ask_user_height(app: &App, panel_width: u16) -> u16 {
+    let Some((pending, ui)) = ask_user_state(app) else {
+        return 0;
+    };
     let content_width = panel_width.saturating_sub(4) as usize;
     let mut lines = 1usize + 1 + 1;
-    if pending.active_tab < pending.questions.len() {
-        let question = &pending.questions[pending.active_tab];
+    if ui.active_tab < pending.questions.len() {
+        let question = &pending.questions[ui.active_tab];
         lines += wrap_text(&question.prompt, content_width.max(1)).len();
         lines += question.answers.len();
         lines += 2;
         let selected = &question.answers[question.selected_index];
-        let detail_text = question.detail.lines().join("\n");
-        if pending.detail_editing || selected.is_something_else || !detail_text.trim().is_empty() {
+        let detail_text = ui.detail_text(ui.active_tab);
+        if ui.detail_editing || selected.is_something_else || !detail_text.trim().is_empty() {
             lines += 1;
-            lines += ComposerLayout::new(question.detail.lines(), content_width.max(1))
+            let detail_input = ui
+                .detail_inputs
+                .get(ui.active_tab)
+                .expect("detail input should exist for active tab");
+            lines += ComposerLayout::new(detail_input.lines(), content_width.max(1))
                 .rows()
                 .len()
                 .max(1);
@@ -1216,8 +1238,8 @@ fn pending_ask_user_height(pending: &PendingAskUser, panel_width: u16) -> u16 {
     } else {
         lines += 1;
         lines += pending.questions.len();
-        for question in &pending.questions {
-            let detail_text = question.detail.lines().join("\n").trim().to_string();
+        for (index, _question) in pending.questions.iter().enumerate() {
+            let detail_text = ui.detail_text(index);
             if !detail_text.is_empty() {
                 lines += wrap_text(&format!("details: {detail_text}"), content_width.max(1)).len();
             }
@@ -1349,7 +1371,6 @@ fn format_compact_tokens(tokens: u64) -> String {
 #[cfg(test)]
 mod tests {
     use ratatui::{Terminal, backend::TestBackend};
-    use ratatui_textarea::TextArea;
     use std::{
         fs,
         path::PathBuf,
@@ -1777,7 +1798,7 @@ mod tests {
         app.apply(Action::SubmitMessage);
         app.apply(Action::StreamEvent {
             reply_id: 1,
-            event: crate::llm::StreamEvent::ShellApprovalRequested {
+            event: crate::app::StreamEvent::ShellApprovalRequested {
                 request_id: "call-1".into(),
                 risk: crate::app::CommandRisk::Low,
                 risk_explanation: "read-only inspection command with no obvious mutation".into(),
@@ -1849,7 +1870,7 @@ mod tests {
         assert!(matches!(effect, Some(Effect::PromptModel { .. })));
         app.apply(Action::StreamEvent {
             reply_id: 1,
-            event: crate::llm::StreamEvent::TextDelta("\n ".into()),
+            event: crate::app::StreamEvent::TextDelta("\n ".into()),
         });
 
         terminal
@@ -1871,7 +1892,7 @@ mod tests {
         assert!(matches!(effect, Some(Effect::PromptModel { .. })));
         app.apply(Action::StreamEvent {
             reply_id: 1,
-            event: crate::llm::StreamEvent::TextDelta("<proposed_plan>\n".into()),
+            event: crate::app::StreamEvent::TextDelta("<proposed_plan>\n".into()),
         });
 
         terminal
@@ -1914,7 +1935,7 @@ mod tests {
         assert!(matches!(effect, Some(Effect::PromptModel { .. })));
         app.apply(Action::StreamEvent {
             reply_id: 1,
-            event: crate::llm::StreamEvent::ToolCall {
+            event: crate::app::StreamEvent::ToolCall {
                 name: "RunShellScript".into(),
                 arguments: "{\"command\":\"git status\"}".into(),
             },
@@ -1939,7 +1960,7 @@ mod tests {
         assert!(matches!(effect, Some(Effect::PromptModel { .. })));
         app.apply(Action::StreamEvent {
             reply_id: 1,
-            event: crate::llm::StreamEvent::WriteApprovalRequested {
+            event: crate::app::StreamEvent::WriteApprovalRequested {
                 request_id: "call-1".into(),
                 tool_name: "WriteFile".into(),
                 arguments:
@@ -2012,32 +2033,43 @@ mod tests {
 
     #[test]
     fn pending_shell_approval_height_grows_for_multiline_commands() {
-        let short = crate::app::PendingShellApproval {
-            request_id: "call-1".into(),
-            risk: crate::app::CommandRisk::Low,
-            risk_explanation: "read-only inspection command with no obvious mutation".into(),
-            command: "pwd".into(),
-            working_directory: ".".into(),
-            reason: "inspect workspace".into(),
-            source_label: None,
-            selected_index: 0,
-            edit_mode: None,
-            pattern_input: TextArea::from(["pwd"]),
-            deny_input: TextArea::default(),
-        };
-        let multiline = crate::app::PendingShellApproval {
-            request_id: "call-2".into(),
-            risk: crate::app::CommandRisk::Low,
-            risk_explanation: "read-only inspection command with no obvious mutation".into(),
-            command: "printf one\nprintf two".into(),
-            working_directory: ".".into(),
-            reason: "inspect workspace".into(),
-            source_label: None,
-            selected_index: 0,
-            edit_mode: None,
-            pattern_input: TextArea::from(["printf one", "printf two"]),
-            deny_input: TextArea::default(),
-        };
+        let mut short = App::new(true, false, "gpt-5.4-mini", ReasoningEffort::Medium);
+        short
+            .session
+            .pending_shell_approvals
+            .push_back(crate::app::PendingShellApproval::new(
+                "call-1".into(),
+                crate::app::CommandRisk::Low,
+                "read-only inspection command with no obvious mutation".into(),
+                "pwd".into(),
+                ".".into(),
+                "inspect workspace".into(),
+                None,
+            ));
+        short.ui.pending_shell_approval = short
+            .session
+            .pending_shell_approvals
+            .front()
+            .map(crate::app::ui::ShellApprovalUiState::new);
+
+        let mut multiline = App::new(true, false, "gpt-5.4-mini", ReasoningEffort::Medium);
+        multiline
+            .session
+            .pending_shell_approvals
+            .push_back(crate::app::PendingShellApproval::new(
+                "call-2".into(),
+                crate::app::CommandRisk::Low,
+                "read-only inspection command with no obvious mutation".into(),
+                "printf one\nprintf two".into(),
+                ".".into(),
+                "inspect workspace".into(),
+                None,
+            ));
+        multiline.ui.pending_shell_approval = multiline
+            .session
+            .pending_shell_approvals
+            .front()
+            .map(crate::app::ui::ShellApprovalUiState::new);
 
         assert!(
             pending_shell_approval_height(&multiline, 120)
@@ -2054,7 +2086,7 @@ mod tests {
         app.apply(Action::SubmitMessage);
         app.apply(Action::StreamEvent {
             reply_id: 1,
-            event: crate::llm::StreamEvent::WriteApprovalRequested {
+            event: crate::app::StreamEvent::WriteApprovalRequested {
                 request_id: "call-1".into(),
                 tool_name: "ApplyPatches".into(),
                 arguments: "{\"filename\":\"src/lib.rs\",\"patches\":[{\"old_text\":\"a\",\"new_text\":\"b\"}],\"intent\":\"Fix the broken startup path so the app launches again\"}".into(),
@@ -2146,14 +2178,14 @@ mod tests {
         app.apply(Action::SubmitMessage);
         app.apply(Action::StreamEvent {
             reply_id: 1,
-            event: crate::llm::StreamEvent::ToolCall {
+            event: crate::app::StreamEvent::ToolCall {
                 name: "List".into(),
                 arguments: r#"{"dir":"src","recursive":true}"#.into(),
             },
         });
         app.apply(Action::StreamEvent {
             reply_id: 1,
-            event: crate::llm::StreamEvent::ToolResult {
+            event: crate::app::StreamEvent::ToolResult {
                 name: "List".into(),
                 output: "src/\nsrc/main.rs".into(),
             },
@@ -2189,7 +2221,7 @@ mod tests {
         app.apply(Action::SubmitMessage);
         app.apply(Action::StreamEvent {
             reply_id: 1,
-            event: crate::llm::StreamEvent::ToolCall {
+            event: crate::app::StreamEvent::ToolCall {
                 name: "ApplyPatches".into(),
                 arguments: r#"{"filename":"src/lib.rs","patches":[{"old_text":"old line","new_text":"new line"}],"intent":"Fix the broken startup path so the app launches again"}"#.into(),
             },
@@ -2303,7 +2335,7 @@ mod tests {
         app.apply(Action::SubmitMessage);
         app.apply(Action::StreamEvent {
             reply_id: 1,
-            event: crate::llm::StreamEvent::ToolCall {
+            event: crate::app::StreamEvent::ToolCall {
                 name: "WriteFile".into(),
                 arguments:
                     r#"{"filename":"src/new.rs","content":"first line\nsecond line","intent":"Create a new file"}"#
@@ -2332,7 +2364,7 @@ mod tests {
         app.apply(Action::SubmitMessage);
         app.apply(Action::StreamEvent {
             reply_id: 1,
-            event: crate::llm::StreamEvent::ToolCall {
+            event: crate::app::StreamEvent::ToolCall {
                 name: "DeletePath".into(),
                 arguments: r#"{"path":"notes.txt","intent":"Remove stale notes"}"#.into(),
             },
@@ -2388,14 +2420,14 @@ mod tests {
         app.apply(Action::SubmitMessage);
         app.apply(Action::StreamEvent {
             reply_id: 1,
-            event: crate::llm::StreamEvent::ToolCall {
+            event: crate::app::StreamEvent::ToolCall {
                 name: "List".into(),
                 arguments: r#"{"dir":"src","recursive":true}"#.into(),
             },
         });
         app.apply(Action::StreamEvent {
             reply_id: 1,
-            event: crate::llm::StreamEvent::ToolResult {
+            event: crate::app::StreamEvent::ToolResult {
                 name: "List".into(),
                 output: "src/\nsrc/main.rs".into(),
             },
@@ -2429,7 +2461,7 @@ mod tests {
         for index in 1..=6 {
             app.apply(Action::StreamEvent {
                 reply_id: 1,
-                event: crate::llm::StreamEvent::ToolCall {
+                event: crate::app::StreamEvent::ToolCall {
                     name: format!("List{index}"),
                     arguments: format!(r#"{{"dir":"src/{index}"}}"#),
                 },
@@ -2459,14 +2491,14 @@ mod tests {
         for index in 1..=6 {
             app.apply(Action::StreamEvent {
                 reply_id: 1,
-                event: crate::llm::StreamEvent::ToolCall {
+                event: crate::app::StreamEvent::ToolCall {
                     name: format!("List{index}"),
                     arguments: format!(r#"{{"dir":"src/{index}"}}"#),
                 },
             });
             app.apply(Action::StreamEvent {
                 reply_id: 1,
-                event: crate::llm::StreamEvent::ToolResult {
+                event: crate::app::StreamEvent::ToolResult {
                     name: format!("List{index}"),
                     output: format!("hidden result {index}"),
                 },
@@ -2493,7 +2525,7 @@ mod tests {
         for index in 1..=6 {
             app.apply(Action::StreamEvent {
                 reply_id: 1,
-                event: crate::llm::StreamEvent::ToolCall {
+                event: crate::app::StreamEvent::ToolCall {
                     name: format!("First{index}"),
                     arguments: format!(r#"{{"dir":"first/{index}"}}"#),
                 },
@@ -2502,13 +2534,13 @@ mod tests {
 
         app.apply(Action::StreamEvent {
             reply_id: 1,
-            event: crate::llm::StreamEvent::TextDelta("separator".into()),
+            event: crate::app::StreamEvent::TextDelta("separator".into()),
         });
 
         for index in 1..=6 {
             app.apply(Action::StreamEvent {
                 reply_id: 1,
-                event: crate::llm::StreamEvent::ToolCall {
+                event: crate::app::StreamEvent::ToolCall {
                     name: format!("Second{index}"),
                     arguments: format!(r#"{{"dir":"second/{index}"}}"#),
                 },
@@ -2533,7 +2565,7 @@ mod tests {
         app.apply(Action::SubmitMessage);
         app.apply(Action::StreamEvent {
             reply_id: 1,
-            event: crate::llm::StreamEvent::TextDelta("- first item\n- second item".into()),
+            event: crate::app::StreamEvent::TextDelta("- first item\n- second item".into()),
         });
 
         terminal
@@ -2562,7 +2594,7 @@ mod tests {
         app.apply(Action::SubmitMessage);
         app.apply(Action::StreamEvent {
             reply_id: 1,
-            event: crate::llm::StreamEvent::TextDelta("```rust\nlet value = 1;\n```".into()),
+            event: crate::app::StreamEvent::TextDelta("```rust\nlet value = 1;\n```".into()),
         });
 
         terminal
@@ -2584,7 +2616,7 @@ mod tests {
         app.apply(Action::SubmitMessage);
         app.apply(Action::StreamEvent {
             reply_id: 1,
-            event: crate::llm::StreamEvent::TextDelta(
+            event: crate::app::StreamEvent::TextDelta(
                 "<proposed_plan>\n# Plan\n\n- step one\n</proposed_plan>".into(),
             ),
         });
@@ -2644,7 +2676,7 @@ mod tests {
         app.apply(Action::SubmitMessage);
         app.apply(Action::StreamEvent {
             reply_id: 1,
-            event: crate::llm::StreamEvent::TextDelta(
+            event: crate::app::StreamEvent::TextDelta(
                 "- first item\n\n```rust\nlet value = 1;\n```\n\n**after**".into(),
             ),
         });
@@ -2679,7 +2711,7 @@ mod tests {
         app.apply(Action::SubmitMessage);
         app.apply(Action::StreamEvent {
             reply_id: 1,
-            event: crate::llm::StreamEvent::TextDelta("**bold** and *italic*".into()),
+            event: crate::app::StreamEvent::TextDelta("**bold** and *italic*".into()),
         });
 
         terminal
@@ -2706,7 +2738,7 @@ mod tests {
         app.apply(Action::SubmitMessage);
         app.apply(Action::StreamEvent {
             reply_id: 1,
-            event: crate::llm::StreamEvent::TextDelta("```rust\nlet value = \"hi\";\n```".into()),
+            event: crate::app::StreamEvent::TextDelta("```rust\nlet value = \"hi\";\n```".into()),
         });
 
         terminal
@@ -2733,7 +2765,7 @@ mod tests {
         app.apply(Action::SubmitMessage);
         app.apply(Action::StreamEvent {
             reply_id: 1,
-            event: crate::llm::StreamEvent::TextDelta(
+            event: crate::app::StreamEvent::TextDelta(
                 "```csharp\npublic class Demo { }\n```".into(),
             ),
         });
@@ -2762,7 +2794,7 @@ mod tests {
         app.apply(Action::SubmitMessage);
         app.apply(Action::StreamEvent {
             reply_id: 1,
-            event: crate::llm::StreamEvent::TextDelta("```unknownlang\nplain text\n```".into()),
+            event: crate::app::StreamEvent::TextDelta("```unknownlang\nplain text\n```".into()),
         });
 
         terminal
@@ -2786,7 +2818,7 @@ mod tests {
         app.apply(Action::SubmitMessage);
         app.apply(Action::StreamEvent {
             reply_id: 1,
-            event: crate::llm::StreamEvent::TextDelta("```text\nalpha\nbetagamma\n```".into()),
+            event: crate::app::StreamEvent::TextDelta("```text\nalpha\nbetagamma\n```".into()),
         });
 
         terminal
@@ -2874,7 +2906,7 @@ mod tests {
             app.apply(Action::SubmitMessage);
             app.apply(Action::StreamEvent {
                 reply_id: index as u64,
-                event: crate::llm::StreamEvent::Finished { history: None },
+                event: crate::app::StreamEvent::Finished { history: None },
             });
         }
 
@@ -2906,7 +2938,7 @@ mod tests {
             app.apply(Action::SubmitMessage);
             app.apply(Action::StreamEvent {
                 reply_id: index as u64,
-                event: crate::llm::StreamEvent::Finished { history: None },
+                event: crate::app::StreamEvent::Finished { history: None },
             });
         }
 
@@ -2945,7 +2977,7 @@ mod tests {
             .join("\n");
         app.apply(Action::StreamEvent {
             reply_id: 1,
-            event: crate::llm::StreamEvent::TextDelta(initial_items),
+            event: crate::app::StreamEvent::TextDelta(initial_items),
         });
 
         terminal
@@ -2963,7 +2995,7 @@ mod tests {
 
         app.apply(Action::StreamEvent {
             reply_id: 1,
-            event: crate::llm::StreamEvent::TextDelta("\n- item 13\n- item 14".into()),
+            event: crate::app::StreamEvent::TextDelta("\n- item 13\n- item 14".into()),
         });
         terminal
             .draw(|frame| render(frame, &mut app))
@@ -2985,7 +3017,7 @@ mod tests {
             app.apply(Action::SubmitMessage);
             app.apply(Action::StreamEvent {
                 reply_id: index as u64,
-                event: crate::llm::StreamEvent::Finished { history: None },
+                event: crate::app::StreamEvent::Finished { history: None },
             });
         }
 

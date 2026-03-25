@@ -1,0 +1,40 @@
+use crate::subagents::SubagentUiEvent;
+
+use super::{EditorInput, StreamEvent};
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Action {
+    ClearComposerOrQuit,
+    CancelPendingReply,
+    ToggleMode,
+    SelectPreviousCommand,
+    SelectNextCommand,
+    ScrollHistoryPageUp,
+    ScrollHistoryPageDown,
+    ScrollHistoryToTop,
+    ScrollHistoryToBottom,
+    ScrollHistoryUp { lines: usize },
+    ScrollHistoryDown { lines: usize },
+    InsertComposerNewline,
+    SubmitMessage,
+    TogglePickerSelection,
+    PickerTabLeft,
+    PickerTabRight,
+    AskUserTabLeft,
+    AskUserTabRight,
+    AskUserToggleDetailEditor,
+    ShellApprovalToggleDetailEditor,
+    ApproveWriteOnce,
+    ApproveWriteAllSession,
+    DenyWrite,
+    AcceptPlanAndImplement,
+    SuggestPlanChanges,
+    Editor(EditorInput),
+    Paste(String),
+    StartHistorySelection { column: u16, row: u16 },
+    UpdateHistorySelection { column: u16, row: u16 },
+    FinishHistorySelection { column: u16, row: u16 },
+    StreamEvent { reply_id: u64, event: StreamEvent },
+    SubagentEvent(SubagentUiEvent),
+    Tick,
+}

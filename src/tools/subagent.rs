@@ -5,9 +5,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::{
-    app::AccessMode,
+    app::{AccessMode, ApprovalMode},
     config::AppConfig,
-    llm::WriteApprovalController,
     model_registry,
     subagents::{SubagentManager, SubagentSpawnRequest, estimate_prompt_tokens},
 };
@@ -23,7 +22,7 @@ pub struct SpawnSubagentTool {
     manager: SubagentManager,
     config: AppConfig,
     main_access_mode: AccessMode,
-    approvals: WriteApprovalController,
+    approval_mode: ApprovalMode,
 }
 
 #[derive(Clone)]
@@ -74,13 +73,13 @@ impl SpawnSubagentTool {
         manager: SubagentManager,
         config: AppConfig,
         main_access_mode: AccessMode,
-        approvals: WriteApprovalController,
+        approval_mode: ApprovalMode,
     ) -> Self {
         Self {
             manager,
             config,
             main_access_mode,
-            approvals,
+            approval_mode,
         }
     }
 }
@@ -151,7 +150,7 @@ impl Tool for SpawnSubagentTool {
                 activity_kind: crate::subagents::SubagentActivityKind::General,
                 model_name_override: None,
                 config: self.config.clone(),
-                approvals: self.approvals.clone(),
+                approval_mode: self.approval_mode,
             })
             .await
             .map_err(|error| ToolExecError::new(error.to_string()))?;
@@ -246,7 +245,7 @@ mod tests {
         config::{
             AzureConfig, ReasoningEffort, SafetyConfig, SubagentConfig, ToolConfig, UiConfig,
         },
-        planning::PlanningConfig,
+        features::planning::PlanningConfig,
         stats::StatsStore,
     };
 
@@ -281,7 +280,7 @@ mod tests {
             manager(),
             sample_config(),
             AccessMode::ReadOnly,
-            WriteApprovalController::new(ApprovalMode::Manual),
+            ApprovalMode::Manual,
         );
 
         let error = tool

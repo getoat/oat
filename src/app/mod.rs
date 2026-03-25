@@ -1,12 +1,23 @@
-mod actions;
-mod state;
+pub mod session;
+pub mod ui;
 
-pub(crate) use actions::compatible_reasoning_effort;
-pub use actions::{Action, Effect};
-pub use state::{
-    AccessMode, App, ApprovalMode, ChatMessage, CommandRisk, MessageStyle, ModelPickerTab,
-    PendingAskUser, PendingReplyKind, PendingReplyReplaySeed, PendingShellApproval,
-    PendingWriteApproval, ReasoningPickerTarget, SelectionPicker, ShellApprovalDecision,
-    ShellApprovalEditMode, SlashCommand, Speaker, SubagentDisplayState, SubagentStatusEntry,
-    SubagentStatusKind, ToolCall, ToolResultEntry, TranscriptEntry, WriteApprovalDecision,
+mod shell;
+
+pub(crate) use session::compatible_reasoning_effort;
+pub use session::{
+    AccessMode, Action, ApprovalMode, ChatMessage, CommandRisk, EditorInput, EditorKey, Effect,
+    MessageStyle, PendingAskUser, PendingReply, PendingReplyKind, PendingReplyReplaySeed,
+    PendingShellApproval, PendingWriteApproval, SessionHistoryMessage, SessionState,
+    ShellApprovalDecision, SlashCommand, Speaker, StreamEvent, SubagentDisplayState,
+    SubagentStatusEntry, SubagentStatusKind, ToolCall, ToolResultEntry, TranscriptEntry,
+    WriteApprovalDecision,
 };
+pub use shell::AppShell;
+pub use ui::{
+    ModelPickerTab, PickerSelection, ReasoningPickerTarget, SelectionPicker, ShellApprovalEditMode,
+    UiState,
+};
+
+pub type AppAction = Action;
+pub type AppEffect = Effect;
+pub(crate) type App = AppShell;

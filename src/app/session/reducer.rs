@@ -1,108 +1,11 @@
-use ratatui_textarea::Input;
-use rig::completion::Message as RigMessage;
-
-use super::state::{
-    App, MessageStyle, PendingReply, PendingReplyKind, PickerSelection, PlanningSessionStage,
-    ShellApprovalDecision, SlashCommand, SubagentDisplayState, SubagentStatusKind, TranscriptEntry,
-    WriteApprovalDecision,
+use super::events::{
+    apply_write_approval, on_stream_event, on_subagent_event, resolve_write_approval,
 };
-use crate::ask_user::AskUserResponse;
+use super::submit::{submit_message, submit_plan_acceptance};
+use super::{Action, Effect, WriteApprovalDecision};
+use crate::app::AppShell as App;
 use crate::config::ReasoningEffort;
-use crate::llm::StreamEvent;
 use crate::model_registry;
-use crate::planning::{
-    PlanningAgentConfig, contains_proposed_plan, extract_planning_ready_brief,
-    planning_conversation_prompt,
-};
-use crate::subagents::{SubagentActivityKind, SubagentUiEvent};
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum Action {
-    ClearComposerOrQuit,
-    CancelPendingReply,
-    ToggleMode,
-    SelectPreviousCommand,
-    SelectNextCommand,
-    ScrollHistoryPageUp,
-    ScrollHistoryPageDown,
-    ScrollHistoryToTop,
-    ScrollHistoryToBottom,
-    ScrollHistoryUp { lines: usize },
-    ScrollHistoryDown { lines: usize },
-    InsertComposerNewline,
-    SubmitMessage,
-    TogglePickerSelection,
-    PickerTabLeft,
-    PickerTabRight,
-    AskUserTabLeft,
-    AskUserTabRight,
-    AskUserToggleDetailEditor,
-    ShellApprovalToggleDetailEditor,
-    ApproveWriteOnce,
-    ApproveWriteAllSession,
-    DenyWrite,
-    AcceptPlanAndImplement,
-    SuggestPlanChanges,
-    Editor(Input),
-    Paste(String),
-    StartHistorySelection { column: u16, row: u16 },
-    UpdateHistorySelection { column: u16, row: u16 },
-    FinishHistorySelection { column: u16, row: u16 },
-    StreamEvent { reply_id: u64, event: StreamEvent },
-    SubagentEvent(SubagentUiEvent),
-    Tick,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum Effect {
-    PromptModel {
-        reply_id: u64,
-        prompt: String,
-        history: Vec<RigMessage>,
-        history_model_name: Option<String>,
-    },
-    CompactHistory,
-    ShowStats,
-    RotateSession,
-    SetModelSelection {
-        model_name: String,
-    },
-    SetReasoningEffort {
-        reasoning_effort: ReasoningEffort,
-    },
-    SetPlanningAgents {
-        planning_agents: Vec<PlanningAgentConfig>,
-    },
-    SetSafetySelection {
-        model_name: String,
-        reasoning_effort: ReasoningEffort,
-    },
-    RunPlanningWorkflow {
-        reply_id: u64,
-        description: String,
-        history: Vec<RigMessage>,
-        history_model_name: Option<String>,
-    },
-    RebuildLlm {
-        access_mode: super::state::AccessMode,
-    },
-    ResolveWriteApproval {
-        request_id: String,
-        decision: WriteApprovalDecision,
-    },
-    ResolveShellApproval {
-        request_id: String,
-        decision: ShellApprovalDecision,
-    },
-    ResolveAskUser {
-        request_id: String,
-        response: AskUserResponse,
-    },
-    CopyToClipboard {
-        text: String,
-    },
-    CancelPendingReply,
-}
 
 impl App {
     pub fn apply(&mut self, action: Action) -> Option<Effect> {
@@ -115,7 +18,7 @@ impl App {
                     self.clear_composer();
                     None
                 } else {
-                    self.should_quit = true;
+                    self.session.should_quit = true;
                     None
                 }
             }
@@ -135,7 +38,7 @@ impl App {
                 }
             }
             Action::ToggleMode => {
-                self.mode.toggle();
+                self.session.mode.toggle();
                 Some(Effect::RebuildLlm {
                     access_mode: self.mode(),
                 })
@@ -314,352 +217,11 @@ impl App {
                 None
             }
             Action::Tick => {
-                self.tick_count = self.tick_count.wrapping_add(1);
+                self.session.tick_count = self.session.tick_count.wrapping_add(1);
                 None
             }
         }
     }
-}
-
-fn submit_message(app: &mut App) -> Option<Effect> {
-    if app.has_pending_write_approval() {
-        return None;
-    }
-
-    if app.has_pending_shell_approval() {
-        return submit_shell_approval(app);
-    }
-
-    if app.plan_review_selection_active() {
-        return submit_plan_review_selection(app);
-    }
-
-    if app.has_pending_ask_user() {
-        return submit_ask_user(app);
-    }
-
-    if app.selection_picker_visible() {
-        return submit_picker_selection(app);
-    }
-
-    let submitted = app.composer.lines().join("\n");
-    let submitted = submitted.trim().to_owned();
-
-    if app.plan_review_feedback_active() {
-        return submit_plan_revision_feedback(app, &submitted);
-    }
-
-    if app.command_query().is_some() {
-        let command_name = app.command_name().unwrap_or_default().to_owned();
-        let arguments = app.command_arguments().unwrap_or_default().to_owned();
-        return submit_command(app, &command_name, &arguments);
-    }
-
-    if app.planning_draft_mode() {
-        return submit_planning_draft(app, &submitted);
-    }
-
-    if matches!(
-        app.planning_session_stage(),
-        Some(PlanningSessionStage::Conversation | PlanningSessionStage::Finalizing)
-    ) {
-        return submit_planning_turn(app, &submitted);
-    }
-
-    if app.pending_reply.is_some() {
-        return None;
-    }
-
-    if submitted.is_empty() {
-        return None;
-    }
-
-    app.record_submitted_input(&submitted);
-    app.clear_plan_review();
-    app.push_user_message(submitted.clone());
-    app.resume_history_follow();
-    app.clear_composer();
-    let reply_id = app.next_reply_id();
-    app.pending_reply = Some(PendingReply::new(reply_id, PendingReplyKind::Normal));
-
-    Some(Effect::PromptModel {
-        reply_id,
-        prompt: submitted,
-        history: app.session_history().to_vec(),
-        history_model_name: app.last_history_model_name().map(str::to_string),
-    })
-}
-
-fn submit_ask_user(app: &mut App) -> Option<Effect> {
-    let (request_id, response, _summary) = app.advance_ask_user()?;
-    Some(Effect::ResolveAskUser {
-        request_id,
-        response,
-    })
-}
-
-fn submit_shell_approval(app: &mut App) -> Option<Effect> {
-    let (request_id, decision, _risk) = app.submit_shell_approval()?;
-    Some(Effect::ResolveShellApproval {
-        request_id,
-        decision,
-    })
-}
-
-fn submit_plan_acceptance(app: &mut App) -> Option<Effect> {
-    if app.pending_reply.is_some() || !app.plan_review_selection_active() {
-        return None;
-    }
-
-    let visible_prompt = accepted_plan_prompt().to_string();
-    let prompt = accepted_plan_implementation_prompt(app);
-    app.record_submitted_input(&visible_prompt);
-    app.clear_plan_review();
-    app.push_user_message(visible_prompt);
-    app.resume_history_follow();
-    app.clear_composer();
-    let reply_id = app.next_reply_id();
-    app.pending_reply = Some(PendingReply::new(reply_id, PendingReplyKind::Normal));
-
-    Some(Effect::PromptModel {
-        reply_id,
-        prompt,
-        history: Vec::new(),
-        history_model_name: None,
-    })
-}
-
-fn submit_plan_review_selection(app: &mut App) -> Option<Effect> {
-    match app.selected_plan_review_index().unwrap_or(0) {
-        0 => submit_plan_acceptance(app),
-        1 => {
-            app.begin_plan_review_feedback();
-            None
-        }
-        _ => None,
-    }
-}
-
-fn submit_plan_revision_feedback(app: &mut App, submitted: &str) -> Option<Effect> {
-    if app.pending_reply.is_some() || submitted.is_empty() || !app.plan_review_feedback_active() {
-        return None;
-    }
-
-    let prompt = format!(
-        "Revise the proposed plan based on these comments. Respond with an updated <proposed_plan> block and do not begin implementation yet. Do not use subagents for this revision.\n\n{}",
-        submitted
-    );
-    app.record_submitted_input(submitted);
-    app.clear_plan_review();
-    app.push_user_message(prompt.clone());
-    app.resume_history_follow();
-    app.clear_composer();
-    let reply_id = app.next_reply_id();
-    app.pending_reply = Some(PendingReply::new(reply_id, PendingReplyKind::Planning));
-
-    Some(Effect::PromptModel {
-        reply_id,
-        prompt,
-        history: app.session_history().to_vec(),
-        history_model_name: app.last_history_model_name().map(str::to_string),
-    })
-}
-
-fn submit_planning_draft(app: &mut App, submitted: &str) -> Option<Effect> {
-    if app.pending_reply.is_some() || submitted.is_empty() {
-        return None;
-    }
-
-    app.consume_planning_draft_mode();
-    app.record_submitted_input(submitted);
-    app.push_user_message(submitted.to_string());
-    app.resume_history_follow();
-    app.clear_composer();
-    let reply_id = app.next_reply_id();
-    app.pending_reply = Some(PendingReply::new(reply_id, PendingReplyKind::Planning));
-
-    Some(Effect::PromptModel {
-        reply_id,
-        prompt: planning_conversation_prompt(submitted),
-        history: app.session_history().to_vec(),
-        history_model_name: app.last_history_model_name().map(str::to_string),
-    })
-}
-
-fn submit_planning_turn(app: &mut App, submitted: &str) -> Option<Effect> {
-    if app.pending_reply.is_some() || submitted.is_empty() {
-        return None;
-    }
-
-    app.record_submitted_input(submitted);
-    app.push_user_message(submitted.to_string());
-    app.resume_history_follow();
-    app.clear_composer();
-    let reply_id = app.next_reply_id();
-    app.pending_reply = Some(PendingReply::new(reply_id, PendingReplyKind::Planning));
-
-    Some(Effect::PromptModel {
-        reply_id,
-        prompt: submitted.to_string(),
-        history: app.session_history().to_vec(),
-        history_model_name: app.last_history_model_name().map(str::to_string),
-    })
-}
-
-fn submit_command(app: &mut App, command_name: &str, arguments: &str) -> Option<Effect> {
-    let Some(command) = app.selected_command() else {
-        app.push_error_message(format!(
-            "Unknown command `{command_name}`. Try /new, /stats, /model, /plan, /quit, or /effort."
-        ));
-        return None;
-    };
-
-    if !command.matches_exact(command_name) {
-        app.set_composer_text(command.canonical_name());
-        return None;
-    }
-
-    match command {
-        SlashCommand::NewSession => {
-            app.reset_session();
-            Some(Effect::RotateSession)
-        }
-        SlashCommand::Compact => submit_compact_command(app, arguments),
-        SlashCommand::Stats => submit_stats_command(app, arguments),
-        SlashCommand::Model => submit_model_command(app, arguments),
-        SlashCommand::Plan => submit_plan_command(app, arguments),
-        SlashCommand::Quit => {
-            app.should_quit = true;
-            None
-        }
-        SlashCommand::Effort => submit_effort_command(app, arguments),
-    }
-}
-
-fn submit_picker_selection(app: &mut App) -> Option<Effect> {
-    match app.apply_picker_selection()? {
-        PickerSelection::Model(model_name) => Some(Effect::SetModelSelection { model_name }),
-        PickerSelection::Reasoning(reasoning_effort) => {
-            Some(Effect::SetReasoningEffort { reasoning_effort })
-        }
-        PickerSelection::PlanningAgent(_) => Some(Effect::SetPlanningAgents {
-            planning_agents: app.planning_agents().to_vec(),
-        }),
-        PickerSelection::SafetySelection {
-            model_name,
-            reasoning_effort,
-        } => Some(Effect::SetSafetySelection {
-            model_name,
-            reasoning_effort,
-        }),
-    }
-}
-
-fn submit_stats_command(app: &mut App, arguments: &str) -> Option<Effect> {
-    if !arguments.trim().is_empty() {
-        app.push_error_message("Usage: /stats");
-        return None;
-    }
-
-    app.clear_composer();
-    Some(Effect::ShowStats)
-}
-
-fn submit_compact_command(app: &mut App, arguments: &str) -> Option<Effect> {
-    if !arguments.trim().is_empty() {
-        app.push_error_message("Usage: /compact");
-        return None;
-    }
-
-    if app.has_pending_reply() {
-        return None;
-    }
-
-    if app.session_history().is_empty() {
-        app.clear_composer();
-        app.push_agent_message("Nothing to compact.");
-        return None;
-    }
-
-    app.clear_composer();
-    let reply_id = app.next_reply_id();
-    app.pending_reply = Some(PendingReply::new(reply_id, PendingReplyKind::Compacting));
-    Some(Effect::CompactHistory)
-}
-
-fn submit_model_command(app: &mut App, arguments: &str) -> Option<Effect> {
-    if !arguments.trim().is_empty() {
-        app.push_error_message("Usage: /model");
-        return None;
-    }
-
-    app.clear_composer();
-    app.open_model_picker();
-    None
-}
-
-fn submit_plan_command(app: &mut App, arguments: &str) -> Option<Effect> {
-    if !arguments.trim().is_empty() {
-        app.push_error_message("Usage: /plan");
-        return None;
-    }
-
-    app.enter_planning_draft_mode();
-    app.push_agent_message(
-        "Describe what you want planned, then press Enter to start an interactive planning session.",
-    );
-    None
-}
-
-fn submit_effort_command(app: &mut App, arguments: &str) -> Option<Effect> {
-    let value = arguments.trim();
-    let supported_levels = app.supported_reasoning_levels();
-    let supported = supported_levels
-        .iter()
-        .map(|level| level.as_str())
-        .collect::<Vec<_>>()
-        .join(", ");
-    if value.is_empty() {
-        app.push_error_message(format!(
-            "Usage: /effort <{supported}>. Current effort is `{}`.",
-            app.reasoning_effort().as_str()
-        ));
-        return None;
-    }
-
-    let Some(reasoning_effort) = ReasoningEffort::parse(value) else {
-        app.push_error_message(format!(
-            "Unknown reasoning effort `{value}`. Choose one of: {supported}."
-        ));
-        return None;
-    };
-
-    if !supported_levels.contains(&reasoning_effort) {
-        if let Some(model) = app.current_model_info() {
-            app.push_error_message(format!(
-                "Model `{}` supports reasoning efforts: {supported}.",
-                model.name
-            ));
-        } else {
-            app.push_error_message(format!(
-                "Reasoning effort `{}` is not supported. Choose one of: {supported}.",
-                reasoning_effort.as_str()
-            ));
-        }
-        return None;
-    }
-
-    if reasoning_effort == app.reasoning_effort() {
-        app.clear_composer();
-        app.push_agent_message(format!(
-            "Reasoning effort is already set to `{}`.",
-            reasoning_effort.as_str()
-        ));
-        return None;
-    }
-
-    app.clear_composer();
-    Some(Effect::SetReasoningEffort { reasoning_effort })
 }
 
 pub(crate) fn compatible_reasoning_effort(
@@ -683,301 +245,17 @@ pub(crate) fn compatible_reasoning_effort(
     }
 }
 
-fn on_stream_event(app: &mut App, reply_id: u64, event: StreamEvent) -> Option<Effect> {
-    if app.active_reply_id() != Some(reply_id) {
-        return None;
-    }
-
-    match event {
-        StreamEvent::TextDelta(delta) => {
-            app.append_pending_stream_message(&delta, MessageStyle::Plain);
-            None
-        }
-        StreamEvent::Commentary(message) => {
-            app.push_agent_commentary(message);
-            None
-        }
-        StreamEvent::ReasoningDelta(delta) => {
-            if app.show_thinking() {
-                app.append_pending_stream_message(&delta, MessageStyle::Thinking);
-            }
-            None
-        }
-        StreamEvent::ToolCall { name, arguments } => {
-            app.push_tool_call(name, arguments);
-            None
-        }
-        StreamEvent::ToolResult { name, output } => {
-            app.push_tool_result(name, output);
-            None
-        }
-        StreamEvent::AskUserRequested {
-            request_id,
-            request,
-        } => {
-            app.begin_ask_user(request_id, request);
-            None
-        }
-        StreamEvent::WriteApprovalRequested {
-            request_id,
-            tool_name,
-            arguments,
-        } => {
-            app.begin_write_approval(request_id, tool_name, arguments);
-            None
-        }
-        StreamEvent::ShellApprovalRequested {
-            request_id,
-            risk,
-            risk_explanation,
-            command,
-            working_directory,
-            reason,
-        } => {
-            app.begin_shell_approval(
-                request_id,
-                risk,
-                risk_explanation,
-                command,
-                working_directory,
-                reason,
-            );
-            None
-        }
-        StreamEvent::PlanningFinalizationStarted => {
-            app.begin_planning_finalization();
-            None
-        }
-        StreamEvent::CompactionFinished {
-            history,
-            model_name,
-        } => {
-            app.replace_session_history(history);
-            app.set_last_history_model_name(Some(model_name));
-            app.clear_pending_ask_user();
-            app.pending_reply = None;
-            app.push_agent_message("Context compacted.");
-            None
-        }
-        StreamEvent::Finished { history } => {
-            let pending_kind = app.pending_reply.as_ref().map(|pending| pending.kind);
-            let planning_stage = app.planning_session_stage();
-            let final_text = app
-                .pending_reply
-                .as_ref()
-                .map(|pending| pending.plain_text.clone())
-                .unwrap_or_default();
-            if let Some(history) = history {
-                app.replace_session_history(history);
-                app.set_last_history_model_name(Some(app.model_name().to_string()));
-            }
-            app.clear_pending_ask_user();
-            app.pending_reply = None;
-            if planning_stage == Some(PlanningSessionStage::Conversation)
-                && let Some(description) = extract_planning_ready_brief(&final_text)
-            {
-                app.begin_planning_fanout();
-                let reply_id = app.next_reply_id();
-                app.pending_reply = Some(PendingReply::new(reply_id, PendingReplyKind::Planning));
-                return Some(Effect::RunPlanningWorkflow {
-                    reply_id,
-                    description,
-                    history: app.session_history().to_vec(),
-                    history_model_name: app.last_history_model_name().map(str::to_string),
-                });
-            }
-            if pending_kind == Some(PendingReplyKind::Planning)
-                && contains_proposed_plan(&final_text)
-            {
-                app.begin_plan_review();
-            }
-            None
-        }
-        StreamEvent::Failed(error) => {
-            if app.planning_session_stage() == Some(PlanningSessionStage::RunningFanout) {
-                app.begin_planning_conversation();
-            }
-            app.clear_pending_ask_user();
-            app.pending_reply = None;
-            app.push_agent_error(format!("Request failed: {error}"));
-            None
-        }
-    }
-}
-
-fn on_subagent_event(app: &mut App, event: SubagentUiEvent) {
-    match event {
-        SubagentUiEvent::Spawned {
-            id,
-            access_mode,
-            activity_kind,
-        } => {
-            let (kind, display_label) = match activity_kind {
-                SubagentActivityKind::General => (SubagentStatusKind::Subagent, id.clone()),
-                SubagentActivityKind::Planning { model_name } => (
-                    SubagentStatusKind::Planning,
-                    format!("Planning with {model_name}"),
-                ),
-            };
-            app.upsert_subagent_status(
-                id,
-                kind,
-                display_label,
-                SubagentDisplayState::Running,
-                format!(
-                    "running in {} mode",
-                    access_mode.label().to_ascii_lowercase()
-                ),
-            );
-        }
-        SubagentUiEvent::Updated {
-            id,
-            latest_tool_name,
-        } => {
-            if let Some(latest_tool_name) = latest_tool_name {
-                app.set_subagent_latest_tool(id, latest_tool_name);
-            }
-        }
-        SubagentUiEvent::Completed { id } => {
-            let existing = app
-                .entries()
-                .iter()
-                .find_map(|entry| match entry {
-                    TranscriptEntry::SubagentStatus(status) if status.id == id => {
-                        Some((status.kind, status.display_label.clone()))
-                    }
-                    _ => None,
-                })
-                .unwrap_or((SubagentStatusKind::Subagent, id.clone()));
-            app.upsert_subagent_status(
-                id,
-                existing.0,
-                existing.1,
-                SubagentDisplayState::Completed,
-                "completed".into(),
-            );
-        }
-        SubagentUiEvent::Failed {
-            id,
-            error,
-            log_path,
-        } => {
-            let existing = app
-                .entries()
-                .iter()
-                .find_map(|entry| match entry {
-                    TranscriptEntry::SubagentStatus(status) if status.id == id => {
-                        Some((status.kind, status.display_label.clone()))
-                    }
-                    _ => None,
-                })
-                .unwrap_or((SubagentStatusKind::Subagent, id.clone()));
-            app.upsert_subagent_status(
-                id.clone(),
-                existing.0,
-                existing.1,
-                SubagentDisplayState::Failed,
-                format!("failed: {error}"),
-            );
-            let suffix = log_path
-                .as_deref()
-                .map(|path| format!(" Logged request to `{path}`."))
-                .unwrap_or_default();
-            app.push_error_message(format!("Subagent `{id}` failed: {error}{suffix}"));
-        }
-        SubagentUiEvent::Cancelled { id } => {
-            let existing = app
-                .entries()
-                .iter()
-                .find_map(|entry| match entry {
-                    TranscriptEntry::SubagentStatus(status) if status.id == id => {
-                        Some((status.kind, status.display_label.clone()))
-                    }
-                    _ => None,
-                })
-                .unwrap_or((SubagentStatusKind::Subagent, id.clone()));
-            app.upsert_subagent_status(
-                id,
-                existing.0,
-                existing.1,
-                SubagentDisplayState::Cancelled,
-                "cancelled".into(),
-            );
-        }
-        SubagentUiEvent::WriteApprovalRequested {
-            id,
-            request_id,
-            tool_name,
-            arguments,
-        } => {
-            app.begin_subagent_write_approval(id, request_id, tool_name, arguments);
-        }
-        SubagentUiEvent::ShellApprovalRequested {
-            id,
-            request_id,
-            risk,
-            risk_explanation,
-            command,
-            working_directory,
-            reason,
-        } => {
-            app.begin_subagent_shell_approval(
-                id,
-                request_id,
-                risk,
-                risk_explanation,
-                command,
-                working_directory,
-                reason,
-            );
-        }
-    }
-}
-
-fn apply_write_approval(app: &mut App, decision: WriteApprovalDecision) -> Option<String> {
-    app.resolve_write_approval(decision)
-        .map(|pending| pending.request_id)
-}
-
-fn resolve_write_approval(
-    request_id: Option<String>,
-    decision: WriteApprovalDecision,
-) -> Option<Effect> {
-    request_id.map(|request_id| Effect::ResolveWriteApproval {
-        request_id,
-        decision,
-    })
-}
-
-fn accepted_plan_prompt() -> &'static str {
-    "I accept this plan. Begin implementation now."
-}
-
-fn accepted_plan_implementation_prompt(app: &App) -> String {
-    let accepted_plan = app.latest_proposed_plan_message().unwrap_or(
-        "<proposed_plan>\nAccepted plan content was not found in transcript.\n</proposed_plan>",
-    );
-    format!(
-        concat!(
-            "You are no longer in Plan Mode. The plan has been accepted for implementation.\n",
-            "Do not say that you still need a developer or system transition out of plan mode.\n",
-            "Use the accepted plan below as the implementation brief, explore the workspace as needed, and begin implementation now.\n\n",
-            "Accepted plan:\n",
-            "{accepted_plan}\n"
-        ),
-        accepted_plan = accepted_plan
-    )
-}
-
 #[cfg(test)]
 mod tests {
-    use ratatui::layout::Rect;
-    use ratatui_textarea::CursorMove;
-
     use super::*;
     use crate::{
-        app::{ChatMessage, Speaker},
+        app::{
+            ChatMessage, MessageStyle, PendingReply, PendingReplyKind, SessionHistoryMessage,
+            SlashCommand, Speaker, StreamEvent, SubagentDisplayState, TranscriptEntry,
+        },
         ask_user::{AskUserAnswer, AskUserQuestion, AskUserRequest},
+        features::planning::{PlanningAgentConfig, PlanningStage, planning_conversation_prompt},
+        subagents::{SubagentActivityKind, SubagentUiEvent},
     };
 
     fn new_app(show_thinking: bool) -> App {
@@ -1019,31 +297,32 @@ mod tests {
 
         app.apply(Action::ClearComposerOrQuit);
 
-        assert!(app.should_quit);
+        assert!(app.session.should_quit);
     }
 
     #[test]
     fn clear_composer_or_quit_clears_composer_before_quitting() {
         let mut app = new_app(true);
-        app.composer.insert_str("draft");
+        app.composer_mut().insert_str("draft");
 
         app.apply(Action::ClearComposerOrQuit);
 
-        assert!(!app.should_quit);
+        assert!(!app.session.should_quit);
         assert!(!app.composer_has_content());
     }
 
     #[test]
     fn clear_composer_or_quit_cancels_pending_reply_instead_of_quitting() {
         let mut app = new_app(true);
-        app.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
+        app.session.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
 
         let effect = app.apply(Action::ClearComposerOrQuit);
 
         assert_eq!(effect, Some(Effect::CancelPendingReply));
-        assert!(!app.should_quit);
-        assert!(app.pending_reply.is_none());
-        let TranscriptEntry::Message(message) = app.entries.last().expect("cancel message") else {
+        assert!(!app.session.should_quit);
+        assert!(app.session.pending_reply.is_none());
+        let TranscriptEntry::Message(message) = app.entries().last().expect("cancel message")
+        else {
             panic!("expected message entry");
         };
         assert_eq!(message.style, MessageStyle::Error);
@@ -1053,13 +332,14 @@ mod tests {
     #[test]
     fn explicit_cancel_pending_reply_adds_cancellation_message() {
         let mut app = new_app(true);
-        app.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
+        app.session.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
 
         let effect = app.apply(Action::CancelPendingReply);
 
         assert_eq!(effect, Some(Effect::CancelPendingReply));
-        assert!(app.pending_reply.is_none());
-        let TranscriptEntry::Message(message) = app.entries.last().expect("cancel message") else {
+        assert!(app.session.pending_reply.is_none());
+        let TranscriptEntry::Message(message) = app.entries().last().expect("cancel message")
+        else {
             panic!("expected message entry");
         };
         assert_eq!(message.style, MessageStyle::Error);
@@ -1072,15 +352,15 @@ mod tests {
 
         let effect = app.apply(Action::SubmitMessage);
 
-        assert_eq!(app.entries.len(), 1);
-        assert!(app.pending_reply.is_none());
+        assert_eq!(app.entries().len(), 1);
+        assert!(app.session.pending_reply.is_none());
         assert!(effect.is_none());
     }
 
     #[test]
     fn submit_message_records_prompt_and_returns_effect() {
         let mut app = new_app(true);
-        app.composer.insert_str("hello\nworld");
+        app.composer_mut().insert_str("hello\nworld");
 
         let effect = app.apply(Action::SubmitMessage);
 
@@ -1093,23 +373,23 @@ mod tests {
                 history_model_name: None,
             })
         );
-        assert_eq!(app.entries.len(), 2);
-        match &app.entries[1] {
+        assert_eq!(app.entries().len(), 2);
+        match &app.entries()[1] {
             TranscriptEntry::Message(message) => {
                 assert_eq!(message.speaker, Speaker::User);
                 assert_eq!(message.text, "hello\nworld");
             }
             entry => panic!("expected user message, got {entry:?}"),
         }
-        assert!(app.pending_reply.is_some());
+        assert!(app.session.pending_reply.is_some());
         assert!(!app.composer_has_content());
     }
 
     #[test]
     fn submit_message_resumes_live_history_follow() {
         let mut app = new_app(true);
-        app.history.scroll_top = Some(3);
-        app.composer.insert_str("hello");
+        app.ui.history.scroll_top = Some(3);
+        app.composer_mut().insert_str("hello");
 
         let _ = app.apply(Action::SubmitMessage);
 
@@ -1119,12 +399,12 @@ mod tests {
     #[test]
     fn submit_message_does_nothing_while_reply_is_pending() {
         let mut app = new_app(true);
-        app.pending_reply = Some(PendingReply::new(5, PendingReplyKind::Normal));
-        app.composer.insert_str("new prompt");
+        app.session.pending_reply = Some(PendingReply::new(5, PendingReplyKind::Normal));
+        app.composer_mut().insert_str("new prompt");
 
         let effect = app.apply(Action::SubmitMessage);
 
-        assert_eq!(app.entries.len(), 1);
+        assert_eq!(app.entries().len(), 1);
         assert!(app.composer_has_content());
         assert!(effect.is_none());
     }
@@ -1132,8 +412,8 @@ mod tests {
     #[test]
     fn submit_message_clones_canonical_history_into_effect() {
         let mut app = new_app(true);
-        app.replace_session_history(vec![RigMessage::assistant("previous")]);
-        app.composer.insert_str("next");
+        app.replace_session_history(vec![SessionHistoryMessage::assistant("previous")]);
+        app.composer_mut().insert_str("next");
 
         let effect = app.apply(Action::SubmitMessage);
 
@@ -1142,7 +422,7 @@ mod tests {
             Some(Effect::PromptModel {
                 reply_id: 1,
                 prompt: "next".into(),
-                history: vec![RigMessage::assistant("previous")],
+                history: vec![SessionHistoryMessage::assistant("previous")],
                 history_model_name: None,
             })
         );
@@ -1154,44 +434,44 @@ mod tests {
         app.restore_command_history(vec!["first".into(), "second".into()], 20);
 
         app.apply(Action::SelectPreviousCommand);
-        assert_eq!(app.composer.lines(), ["second"]);
+        assert_eq!(app.composer().lines(), ["second"]);
         app.apply(Action::SelectPreviousCommand);
-        assert_eq!(app.composer.lines(), ["second"]);
-        assert_eq!(app.composer.cursor(), (0, 0));
+        assert_eq!(app.composer().lines(), ["second"]);
+        assert_eq!(app.composer().cursor(), (0, 0));
 
         app.apply(Action::SelectPreviousCommand);
-        assert_eq!(app.composer.lines(), ["first"]);
+        assert_eq!(app.composer().lines(), ["first"]);
     }
 
     #[test]
     fn down_arrow_restores_newer_history_and_original_draft() {
         let mut app = new_app(true);
         app.restore_command_history(vec!["first".into(), "second".into()], 20);
-        app.composer.insert_str("draft");
+        app.composer_mut().insert_str("draft");
 
         app.apply(Action::SelectPreviousCommand);
-        assert_eq!(app.composer.lines(), ["draft"]);
-        assert_eq!(app.composer.cursor(), (0, 0));
+        assert_eq!(app.composer().lines(), ["draft"]);
+        assert_eq!(app.composer().cursor(), (0, 0));
 
         app.apply(Action::SelectPreviousCommand);
-        assert_eq!(app.composer.lines(), ["second"]);
+        assert_eq!(app.composer().lines(), ["second"]);
 
         app.apply(Action::SelectNextCommand);
-        assert_eq!(app.composer.lines(), ["draft"]);
+        assert_eq!(app.composer().lines(), ["draft"]);
     }
 
     #[test]
     fn up_arrow_keeps_multiline_cursor_navigation_when_not_at_top() {
         let mut app = new_app(true);
         app.restore_command_history(vec!["previous".into()], 20);
-        app.composer.insert_str("line one");
-        app.composer.insert_newline();
-        app.composer.insert_str("line two");
+        app.composer_mut().insert_str("line one");
+        app.composer_mut().insert_newline();
+        app.composer_mut().insert_str("line two");
 
         app.apply(Action::SelectPreviousCommand);
 
-        assert_eq!(app.composer.lines(), ["line one", "line two"]);
-        assert_eq!(app.composer.cursor().0, 0);
+        assert_eq!(app.composer().lines(), ["line one", "line two"]);
+        assert_eq!(app.composer().cursor().0, 0);
     }
 
     #[test]
@@ -1199,13 +479,13 @@ mod tests {
         let mut app = new_app(true);
         app.set_composer_wrap_width(6);
         app.restore_command_history(vec!["previous".into()], 20);
-        app.composer.insert_str("alpha beta");
-        app.composer_mut().move_cursor(CursorMove::Jump(0, 3));
+        app.composer_mut().insert_str("alpha beta");
+        app.set_composer_cursor(0, 3);
 
         app.apply(Action::SelectPreviousCommand);
 
-        assert_eq!(app.composer.lines(), ["alpha beta"]);
-        assert_eq!(app.composer.cursor(), (0, 0));
+        assert_eq!(app.composer().lines(), ["alpha beta"]);
+        assert_eq!(app.composer().cursor(), (0, 0));
     }
 
     #[test]
@@ -1213,67 +493,67 @@ mod tests {
         let mut app = new_app(true);
         app.set_composer_wrap_width(6);
         app.restore_command_history(vec!["previous".into()], 20);
-        app.composer.insert_str("alpha beta");
-        app.composer_mut().move_cursor(CursorMove::Jump(0, 7));
+        app.composer_mut().insert_str("alpha beta");
+        app.set_composer_cursor(0, 7);
 
         app.apply(Action::SelectNextCommand);
 
-        assert_eq!(app.composer.lines(), ["alpha beta"]);
-        assert_eq!(app.composer.cursor(), (0, 10));
+        assert_eq!(app.composer().lines(), ["alpha beta"]);
+        assert_eq!(app.composer().cursor(), (0, 10));
     }
 
     #[test]
     fn up_and_down_navigate_wrapped_visual_rows() {
         let mut app = new_app(true);
         app.set_composer_wrap_width(6);
-        app.composer.insert_str("alpha beta gamma");
+        app.composer_mut().insert_str("alpha beta gamma");
 
         app.apply(Action::SelectPreviousCommand);
-        assert_eq!(app.composer.cursor(), (0, 10));
+        assert_eq!(app.composer().cursor(), (0, 10));
 
         app.apply(Action::SelectPreviousCommand);
-        assert_eq!(app.composer.cursor(), (0, 5));
+        assert_eq!(app.composer().cursor(), (0, 5));
 
         app.apply(Action::SelectNextCommand);
-        assert_eq!(app.composer.cursor(), (0, 10));
+        assert_eq!(app.composer().cursor(), (0, 10));
     }
 
     #[test]
     fn slash_commands_are_not_added_to_recall_history() {
         let mut app = new_app(true);
-        app.composer.insert_str("/new");
+        app.composer_mut().insert_str("/new");
 
         let effect = app.apply(Action::SubmitMessage);
 
         assert_eq!(effect, Some(Effect::RotateSession));
         app.apply(Action::SelectPreviousCommand);
-        assert_eq!(app.composer.lines(), [""]);
+        assert_eq!(app.composer().lines(), [""]);
     }
 
     #[test]
     fn consecutive_duplicate_messages_are_collapsed_in_recall_history() {
         let mut app = new_app(true);
 
-        app.composer.insert_str("boo");
+        app.composer_mut().insert_str("boo");
         let first = app.apply(Action::SubmitMessage);
         assert!(matches!(first, Some(Effect::PromptModel { .. })));
-        app.pending_reply = None;
+        app.session.pending_reply = None;
 
-        app.composer.insert_str("boo");
+        app.composer_mut().insert_str("boo");
         let second = app.apply(Action::SubmitMessage);
         assert!(matches!(second, Some(Effect::PromptModel { .. })));
-        app.pending_reply = None;
+        app.session.pending_reply = None;
 
         app.apply(Action::SelectPreviousCommand);
-        assert_eq!(app.composer.lines(), ["boo"]);
+        assert_eq!(app.composer().lines(), ["boo"]);
         app.apply(Action::SelectPreviousCommand);
-        assert_eq!(app.composer.lines(), ["boo"]);
+        assert_eq!(app.composer().lines(), ["boo"]);
     }
 
     #[test]
     fn stream_text_creates_and_updates_agent_message() {
         let mut app = new_app(true);
-        app.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
+        app.session.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
 
         app.apply(Action::StreamEvent {
             reply_id: 1,
@@ -1284,7 +564,7 @@ mod tests {
             event: StreamEvent::TextDelta(", world".into()),
         });
 
-        match &app.entries[1] {
+        match &app.entries()[1] {
             TranscriptEntry::Message(message) => {
                 assert_eq!(message.style, MessageStyle::Plain);
                 assert_eq!(message.text, "Hello, world");
@@ -1296,17 +576,18 @@ mod tests {
     #[test]
     fn whitespace_only_text_delta_stays_pending_without_visible_content() {
         let mut app = new_app(true);
-        app.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
+        app.session.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
 
         app.apply(Action::StreamEvent {
             reply_id: 1,
             event: StreamEvent::TextDelta("\n  ".into()),
         });
 
-        assert_eq!(app.entries.len(), 1);
+        assert_eq!(app.entries().len(), 1);
         assert!(!app.has_visible_pending_content());
         assert_eq!(
-            app.pending_reply
+            app.session
+                .pending_reply
                 .as_ref()
                 .expect("pending reply")
                 .plain_text,
@@ -1317,14 +598,14 @@ mod tests {
     #[test]
     fn proposed_plan_wrapper_prefix_stays_pending_until_visible_text_arrives() {
         let mut app = registry_app(true);
-        app.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Planning));
+        app.session.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Planning));
 
         app.apply(Action::StreamEvent {
             reply_id: 1,
             event: StreamEvent::TextDelta("<proposed_plan>\n".into()),
         });
 
-        assert_eq!(app.entries.len(), 1);
+        assert_eq!(app.entries().len(), 1);
         assert!(!app.has_visible_pending_content());
 
         app.apply(Action::StreamEvent {
@@ -1334,7 +615,7 @@ mod tests {
 
         assert!(app.has_visible_pending_content());
         assert!(matches!(
-            &app.entries[1],
+            &app.entries()[1],
             TranscriptEntry::Message(message)
                 if message.style == MessageStyle::Plain
                     && message.text == "<proposed_plan>\n# Test Plan\n"
@@ -1344,14 +625,14 @@ mod tests {
     #[test]
     fn planning_ready_wrapper_prefix_stays_pending_until_visible_text_arrives() {
         let mut app = registry_app(true);
-        app.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Planning));
+        app.session.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Planning));
 
         app.apply(Action::StreamEvent {
             reply_id: 1,
             event: StreamEvent::TextDelta("<planning_ready>\n".into()),
         });
 
-        assert_eq!(app.entries.len(), 1);
+        assert_eq!(app.entries().len(), 1);
         assert!(!app.has_visible_pending_content());
 
         app.apply(Action::StreamEvent {
@@ -1361,7 +642,7 @@ mod tests {
 
         assert!(app.has_visible_pending_content());
         assert!(matches!(
-            &app.entries[1],
+            &app.entries()[1],
             TranscriptEntry::Message(message)
                 if message.style == MessageStyle::Plain
                     && message.text == "<planning_ready>\n## Summary\n"
@@ -1371,20 +652,20 @@ mod tests {
     #[test]
     fn stream_reasoning_is_hidden_when_config_disables_it() {
         let mut app = new_app(false);
-        app.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
+        app.session.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
 
         app.apply(Action::StreamEvent {
             reply_id: 1,
             event: StreamEvent::ReasoningDelta("thinking".into()),
         });
 
-        assert_eq!(app.entries.len(), 1);
+        assert_eq!(app.entries().len(), 1);
     }
 
     #[test]
     fn stream_commentary_adds_agent_commentary_entry() {
         let mut app = new_app(true);
-        app.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
+        app.session.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
 
         app.apply(Action::StreamEvent {
             reply_id: 1,
@@ -1392,7 +673,7 @@ mod tests {
         });
 
         assert!(matches!(
-            &app.entries[1],
+            &app.entries()[1],
             TranscriptEntry::Message(message)
                 if message.style == MessageStyle::Commentary
                     && message.text == "Checking the current failure mode."
@@ -1402,7 +683,7 @@ mod tests {
     #[test]
     fn stream_tool_call_adds_transcript_entry() {
         let mut app = new_app(true);
-        app.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
+        app.session.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
 
         app.apply(Action::StreamEvent {
             reply_id: 1,
@@ -1412,7 +693,7 @@ mod tests {
             },
         });
 
-        match &app.entries[1] {
+        match &app.entries()[1] {
             TranscriptEntry::ToolCall(tool_call) => {
                 assert_eq!(tool_call.name, "List");
                 assert_eq!(tool_call.parameter, r#"{"dir":"src","recursive":true}"#);
@@ -1424,7 +705,7 @@ mod tests {
     #[test]
     fn stream_text_after_tool_call_starts_new_message_entry() {
         let mut app = new_app(true);
-        app.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
+        app.session.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
 
         app.apply(Action::StreamEvent {
             reply_id: 1,
@@ -1443,16 +724,16 @@ mod tests {
         });
 
         assert!(matches!(
-            &app.entries[1],
+            &app.entries()[1],
             TranscriptEntry::Message(message) if message.text == "Before tool"
         ));
         assert!(matches!(
-            &app.entries[2],
+            &app.entries()[2],
             TranscriptEntry::ToolCall(tool_call)
                 if tool_call.name == "List" && tool_call.parameter == r#"{"dir":"src"}"#
         ));
         assert!(matches!(
-            &app.entries[3],
+            &app.entries()[3],
             TranscriptEntry::Message(message) if message.text == "After tool"
         ));
     }
@@ -1460,7 +741,7 @@ mod tests {
     #[test]
     fn stream_tool_result_adds_transcript_entry() {
         let mut app = new_app(true);
-        app.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
+        app.session.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
 
         app.apply(Action::StreamEvent {
             reply_id: 1,
@@ -1470,7 +751,7 @@ mod tests {
             },
         });
 
-        match &app.entries[1] {
+        match &app.entries()[1] {
             TranscriptEntry::ToolResult(tool_result) => {
                 assert_eq!(tool_result.name, "ReadFile");
                 assert_eq!(tool_result.output, "1 | hello");
@@ -1482,7 +763,7 @@ mod tests {
     #[test]
     fn commentary_between_text_segments_stays_separate_from_final_reply_text() {
         let mut app = new_app(true);
-        app.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
+        app.session.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
 
         app.apply(Action::StreamEvent {
             reply_id: 1,
@@ -1498,23 +779,24 @@ mod tests {
         });
 
         assert!(matches!(
-            &app.entries[1],
+            &app.entries()[1],
             TranscriptEntry::Message(message)
                 if message.style == MessageStyle::Plain && message.text == "Before"
         ));
         assert!(matches!(
-            &app.entries[2],
+            &app.entries()[2],
             TranscriptEntry::Message(message)
                 if message.style == MessageStyle::Commentary
                     && message.text == "Inspecting the failing path."
         ));
         assert!(matches!(
-            &app.entries[3],
+            &app.entries()[3],
             TranscriptEntry::Message(message)
                 if message.style == MessageStyle::Plain && message.text == "After"
         ));
         assert_eq!(
-            app.pending_reply
+            app.session
+                .pending_reply
                 .as_ref()
                 .expect("pending reply")
                 .plain_text,
@@ -1525,7 +807,7 @@ mod tests {
     #[test]
     fn stream_text_after_tool_result_starts_new_message_entry() {
         let mut app = App::new(true, true, "gpt-5-mini", ReasoningEffort::Medium);
-        app.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
+        app.session.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
 
         app.apply(Action::StreamEvent {
             reply_id: 1,
@@ -1544,16 +826,16 @@ mod tests {
         });
 
         assert!(matches!(
-            &app.entries[1],
+            &app.entries()[1],
             TranscriptEntry::Message(message) if message.text == "Before result"
         ));
         assert!(matches!(
-            &app.entries[2],
+            &app.entries()[2],
             TranscriptEntry::ToolResult(tool_result)
                 if tool_result.name == "ReadFile" && tool_result.output == "1 | line"
         ));
         assert!(matches!(
-            &app.entries[3],
+            &app.entries()[3],
             TranscriptEntry::Message(message) if message.text == "After result"
         ));
     }
@@ -1561,7 +843,7 @@ mod tests {
     #[test]
     fn reasoning_followed_by_text_creates_distinct_entries_in_order() {
         let mut app = new_app(true);
-        app.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
+        app.session.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
 
         app.apply(Action::StreamEvent {
             reply_id: 1,
@@ -1573,12 +855,12 @@ mod tests {
         });
 
         assert!(matches!(
-            &app.entries[1],
+            &app.entries()[1],
             TranscriptEntry::Message(message)
                 if message.style == MessageStyle::Thinking && message.text == "thinking"
         ));
         assert!(matches!(
-            &app.entries[2],
+            &app.entries()[2],
             TranscriptEntry::Message(message)
                 if message.style == MessageStyle::Plain && message.text == "answer"
         ));
@@ -1587,7 +869,7 @@ mod tests {
     #[test]
     fn text_reasoning_text_creates_three_ordered_segments() {
         let mut app = new_app(true);
-        app.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
+        app.session.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
 
         app.apply(Action::StreamEvent {
             reply_id: 1,
@@ -1603,17 +885,17 @@ mod tests {
         });
 
         assert!(matches!(
-            &app.entries[1],
+            &app.entries()[1],
             TranscriptEntry::Message(message)
                 if message.style == MessageStyle::Plain && message.text == "first"
         ));
         assert!(matches!(
-            &app.entries[2],
+            &app.entries()[2],
             TranscriptEntry::Message(message)
                 if message.style == MessageStyle::Thinking && message.text == "thought"
         ));
         assert!(matches!(
-            &app.entries[3],
+            &app.entries()[3],
             TranscriptEntry::Message(message)
                 if message.style == MessageStyle::Plain && message.text == "second"
         ));
@@ -1622,7 +904,7 @@ mod tests {
     #[test]
     fn ask_user_stream_event_starts_pending_interaction() {
         let mut app = new_app(true);
-        app.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
+        app.session.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
 
         app.apply(Action::StreamEvent {
             reply_id: 1,
@@ -1643,15 +925,12 @@ mod tests {
     #[test]
     fn ask_user_review_submission_returns_resolve_effect() {
         let mut app = new_app(true);
-        app.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
+        app.session.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
         app.begin_ask_user("call-1".into(), ask_user_request());
 
         let first = app.apply(Action::SubmitMessage);
         assert!(first.is_none());
-        assert_eq!(
-            app.pending_ask_user().map(|pending| pending.active_tab),
-            Some(1)
-        );
+        assert_eq!(app.ask_user_ui().map(|ui| ui.active_tab), Some(1));
 
         let effect = app.apply(Action::SubmitMessage);
 
@@ -1672,15 +951,15 @@ mod tests {
     #[test]
     fn stream_failure_appends_error_message() {
         let mut app = new_app(true);
-        app.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
+        app.session.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
 
         app.apply(Action::StreamEvent {
             reply_id: 1,
             event: StreamEvent::Failed("boom".into()),
         });
 
-        assert!(app.pending_reply.is_none());
-        let TranscriptEntry::Message(message) = app.entries.last().expect("error entry exists")
+        assert!(app.session.pending_reply.is_none());
+        let TranscriptEntry::Message(message) = app.entries().last().expect("error entry exists")
         else {
             panic!("expected message entry");
         };
@@ -1691,7 +970,7 @@ mod tests {
     #[test]
     fn stream_failure_while_waiting_for_interaction_clears_pending_reply_at_app_layer() {
         let mut app = new_app(true);
-        app.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
+        app.session.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
         app.begin_ask_user("call-1".into(), ask_user_request());
 
         app.apply(Action::StreamEvent {
@@ -1699,7 +978,7 @@ mod tests {
             event: StreamEvent::Failed("boom".into()),
         });
 
-        assert!(app.pending_reply.is_none());
+        assert!(app.session.pending_reply.is_none());
         assert!(!app.has_pending_ask_user());
     }
 
@@ -1713,7 +992,7 @@ mod tests {
             log_path: Some("/tmp/subagent-1.json".into()),
         }));
 
-        let TranscriptEntry::Message(message) = app.entries.last().expect("message entry") else {
+        let TranscriptEntry::Message(message) = app.entries().last().expect("message entry") else {
             panic!("expected message entry");
         };
         assert!(
@@ -1737,7 +1016,7 @@ mod tests {
             latest_tool_name: Some("Grep".into()),
         }));
 
-        let TranscriptEntry::SubagentStatus(status) = app.entries.last().expect("status entry")
+        let TranscriptEntry::SubagentStatus(status) = app.entries().last().expect("status entry")
         else {
             panic!("expected subagent status entry");
         };
@@ -1747,20 +1026,20 @@ mod tests {
     #[test]
     fn partial_command_completes_before_execution() {
         let mut app = new_app(true);
-        app.composer.insert_str("/n");
+        app.composer_mut().insert_str("/n");
         app.sync_command_selection();
 
         let effect = app.apply(Action::SubmitMessage);
 
         assert!(effect.is_none());
-        assert_eq!(app.composer.lines(), ["/new"]);
-        assert_eq!(app.entries.len(), 1);
+        assert_eq!(app.composer().lines(), ["/new"]);
+        assert_eq!(app.entries().len(), 1);
     }
 
     #[test]
     fn model_command_opens_model_picker() {
         let mut app = registry_app(true);
-        app.composer.insert_str("/model");
+        app.composer_mut().insert_str("/model");
         app.sync_command_selection();
 
         let effect = app.apply(Action::SubmitMessage);
@@ -1773,7 +1052,7 @@ mod tests {
     #[test]
     fn plan_command_enters_planning_draft_mode() {
         let mut app = registry_app(true);
-        app.composer.insert_str("/plan");
+        app.composer_mut().insert_str("/plan");
         app.sync_command_selection();
 
         let effect = app.apply(Action::SubmitMessage);
@@ -1786,7 +1065,7 @@ mod tests {
     fn planning_draft_submission_starts_planning_workflow() {
         let mut app = registry_app(true);
         app.enter_planning_draft_mode();
-        app.composer.insert_str("Add a planning workflow");
+        app.composer_mut().insert_str("Add a planning workflow");
 
         let effect = app.apply(Action::SubmitMessage);
 
@@ -1802,7 +1081,10 @@ mod tests {
         assert!(!app.planning_draft_mode());
         assert!(app.plan_active());
         assert_eq!(
-            app.pending_reply.as_ref().map(|pending| pending.kind),
+            app.session
+                .pending_reply
+                .as_ref()
+                .map(|pending| pending.kind),
             Some(PendingReplyKind::Planning)
         );
     }
@@ -1810,7 +1092,7 @@ mod tests {
     #[test]
     fn finished_plan_response_enters_plan_review_selection_mode() {
         let mut app = registry_app(true);
-        app.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Planning));
+        app.session.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Planning));
 
         app.apply(Action::StreamEvent {
             reply_id: 1,
@@ -1847,10 +1129,13 @@ mod tests {
                 && prompt.contains("# Test Plan")
                 && prompt.contains("step one")
         ));
-        assert!(app.pending_reply.is_some());
+        assert!(app.session.pending_reply.is_some());
         assert!(!app.plan_review_selection_active());
         assert_eq!(
-            app.pending_reply.as_ref().map(|pending| pending.kind),
+            app.session
+                .pending_reply
+                .as_ref()
+                .map(|pending| pending.kind),
             Some(PendingReplyKind::Normal)
         );
     }
@@ -1897,7 +1182,7 @@ mod tests {
     fn submitting_plan_feedback_regenerates_plan_with_main_agent_prompt() {
         let mut app = registry_app(true);
         app.begin_plan_review_feedback();
-        app.composer.insert_str("Cover rollback and tests.");
+        app.composer_mut().insert_str("Cover rollback and tests.");
 
         let effect = app.apply(Action::SubmitMessage);
 
@@ -1910,9 +1195,12 @@ mod tests {
                 history_model_name: None,
             })
         );
-        assert!(app.pending_reply.is_some());
+        assert!(app.session.pending_reply.is_some());
         assert_eq!(
-            app.pending_reply.as_ref().map(|pending| pending.kind),
+            app.session
+                .pending_reply
+                .as_ref()
+                .map(|pending| pending.kind),
             Some(PendingReplyKind::Planning)
         );
         assert!(!app.plan_review_feedback_active());
@@ -1927,13 +1215,13 @@ mod tests {
             activity_kind: SubagentActivityKind::General,
         }));
 
-        let entry_count_before = app.entries.len();
+        let entry_count_before = app.entries().len();
         app.apply(Action::SubagentEvent(SubagentUiEvent::Cancelled {
             id: "subagent-1".into(),
         }));
 
-        assert_eq!(app.entries.len(), entry_count_before);
-        let TranscriptEntry::SubagentStatus(status) = app.entries.last().expect("status entry")
+        assert_eq!(app.entries().len(), entry_count_before);
+        let TranscriptEntry::SubagentStatus(status) = app.entries().last().expect("status entry")
         else {
             panic!("expected subagent status entry");
         };
@@ -1980,7 +1268,7 @@ mod tests {
     #[test]
     fn effort_command_returns_effect_for_valid_value() {
         let mut app = new_app(true);
-        app.composer.insert_str("/effort high");
+        app.composer_mut().insert_str("/effort high");
         app.sync_command_selection();
 
         let effect = app.apply(Action::SubmitMessage);
@@ -1997,7 +1285,7 @@ mod tests {
     #[test]
     fn stats_command_returns_effect() {
         let mut app = new_app(true);
-        app.composer.insert_str("/stats");
+        app.composer_mut().insert_str("/stats");
         app.sync_command_selection();
 
         let effect = app.apply(Action::SubmitMessage);
@@ -2009,8 +1297,8 @@ mod tests {
     #[test]
     fn compact_command_returns_effect() {
         let mut app = new_app(true);
-        app.replace_session_history(vec![RigMessage::assistant("previous")]);
-        app.composer.insert_str("/compact");
+        app.replace_session_history(vec![SessionHistoryMessage::assistant("previous")]);
+        app.composer_mut().insert_str("/compact");
         app.sync_command_selection();
 
         let effect = app.apply(Action::SubmitMessage);
@@ -2024,14 +1312,14 @@ mod tests {
     #[test]
     fn compact_command_without_history_reports_noop() {
         let mut app = new_app(true);
-        app.composer.insert_str("/compact");
+        app.composer_mut().insert_str("/compact");
         app.sync_command_selection();
 
         let effect = app.apply(Action::SubmitMessage);
 
         assert!(effect.is_none());
         assert!(!app.has_pending_reply());
-        let TranscriptEntry::Message(message) = app.entries.last().expect("message entry") else {
+        let TranscriptEntry::Message(message) = app.entries().last().expect("message entry") else {
             panic!("expected message entry");
         };
         assert_eq!(message.text, "Nothing to compact.");
@@ -2040,7 +1328,7 @@ mod tests {
     #[test]
     fn status_alias_returns_stats_effect() {
         let mut app = new_app(true);
-        app.composer.insert_str("/status");
+        app.composer_mut().insert_str("/status");
         app.sync_command_selection();
 
         let effect = app.apply(Action::SubmitMessage);
@@ -2051,7 +1339,7 @@ mod tests {
     #[test]
     fn effort_alias_returns_effect_for_valid_value() {
         let mut app = new_app(true);
-        app.composer.insert_str("/thinking xhigh");
+        app.composer_mut().insert_str("/thinking xhigh");
         app.sync_command_selection();
 
         let effect = app.apply(Action::SubmitMessage);
@@ -2067,13 +1355,13 @@ mod tests {
     #[test]
     fn effort_command_rejects_invalid_value() {
         let mut app = new_app(true);
-        app.composer.insert_str("/effort turbo");
+        app.composer_mut().insert_str("/effort turbo");
         app.sync_command_selection();
 
         let effect = app.apply(Action::SubmitMessage);
 
         assert!(effect.is_none());
-        let TranscriptEntry::Message(message) = app.entries.last().expect("error entry exists")
+        let TranscriptEntry::Message(message) = app.entries().last().expect("error entry exists")
         else {
             panic!("expected message entry");
         };
@@ -2085,13 +1373,13 @@ mod tests {
     #[test]
     fn effort_command_rejects_unsupported_value_for_registry_model() {
         let mut app = registry_app(true);
-        app.composer.insert_str("/effort xhigh");
+        app.composer_mut().insert_str("/effort xhigh");
         app.sync_command_selection();
 
         let effect = app.apply(Action::SubmitMessage);
 
         assert!(effect.is_none());
-        let TranscriptEntry::Message(message) = app.entries.last().expect("error entry exists")
+        let TranscriptEntry::Message(message) = app.entries().last().expect("error entry exists")
         else {
             panic!("expected message entry");
         };
@@ -2102,13 +1390,13 @@ mod tests {
     #[test]
     fn effort_command_reports_noop_when_value_is_unchanged() {
         let mut app = new_app(true);
-        app.composer.insert_str("/effort medium");
+        app.composer_mut().insert_str("/effort medium");
         app.sync_command_selection();
 
         let effect = app.apply(Action::SubmitMessage);
 
         assert!(effect.is_none());
-        let TranscriptEntry::Message(message) = app.entries.last().expect("message entry exists")
+        let TranscriptEntry::Message(message) = app.entries().last().expect("message entry exists")
         else {
             panic!("expected message entry");
         };
@@ -2120,20 +1408,22 @@ mod tests {
     #[test]
     fn clear_alias_starts_new_session() {
         let mut app = new_app(true);
-        app.entries.push(TranscriptEntry::Message(ChatMessage {
-            speaker: Speaker::User,
-            text: "old".into(),
-            style: MessageStyle::Plain,
-        }));
-        app.pending_reply = Some(PendingReply::new(8, PendingReplyKind::Normal));
-        app.composer.insert_str("/clear");
+        app.session
+            .entries
+            .push(TranscriptEntry::Message(ChatMessage {
+                speaker: Speaker::User,
+                text: "old".into(),
+                style: MessageStyle::Plain,
+            }));
+        app.session.pending_reply = Some(PendingReply::new(8, PendingReplyKind::Normal));
+        app.composer_mut().insert_str("/clear");
         app.sync_command_selection();
 
         let effect = app.apply(Action::SubmitMessage);
 
         assert_eq!(effect, Some(Effect::RotateSession));
-        assert_eq!(app.entries.len(), 1);
-        assert!(app.pending_reply.is_none());
+        assert_eq!(app.entries().len(), 1);
+        assert!(app.session.pending_reply.is_none());
         assert!(!app.composer_has_content());
     }
 
@@ -2151,7 +1441,7 @@ mod tests {
     #[test]
     fn command_selection_wraps() {
         let mut app = new_app(true);
-        app.composer.insert_str("/");
+        app.composer_mut().insert_str("/");
         app.sync_command_selection();
 
         app.apply(Action::SelectPreviousCommand);
@@ -2168,7 +1458,7 @@ mod tests {
 
         app.apply(Action::ScrollHistoryPageUp);
 
-        assert_eq!(app.history.scroll_top, Some(20));
+        assert_eq!(app.ui.history.scroll_top, Some(20));
         assert!(app.history_is_pinned());
     }
 
@@ -2176,18 +1466,18 @@ mod tests {
     fn page_down_clamps_at_bottom_without_resuming_follow() {
         let mut app = new_app(true);
         app.sync_history_viewport(30, 5);
-        app.history.scroll_top = Some(24);
+        app.ui.history.scroll_top = Some(24);
 
         app.apply(Action::ScrollHistoryPageDown);
 
-        assert_eq!(app.history.scroll_top, Some(25));
+        assert_eq!(app.ui.history.scroll_top, Some(25));
         assert!(app.history_is_pinned());
     }
 
     #[test]
     fn jump_to_bottom_resumes_live_follow() {
         let mut app = new_app(true);
-        app.history.scroll_top = Some(7);
+        app.ui.history.scroll_top = Some(7);
 
         app.apply(Action::ScrollHistoryToBottom);
 
@@ -2198,27 +1488,19 @@ mod tests {
     fn line_scroll_clamps_to_history_bounds() {
         let mut app = new_app(true);
         app.sync_history_viewport(18, 6);
-        app.history.scroll_top = Some(2);
+        app.ui.history.scroll_top = Some(2);
 
         app.apply(Action::ScrollHistoryUp { lines: 10 });
-        assert_eq!(app.history.scroll_top, Some(0));
+        assert_eq!(app.ui.history.scroll_top, Some(0));
 
         app.apply(Action::ScrollHistoryDown { lines: 20 });
-        assert_eq!(app.history.scroll_top, Some(12));
+        assert_eq!(app.ui.history.scroll_top, Some(12));
     }
 
     #[test]
     fn finishing_history_selection_returns_copy_effect() {
         let mut app = new_app(true);
-        app.update_history_snapshot(
-            Rect {
-                x: 0,
-                y: 0,
-                width: 20,
-                height: 2,
-            },
-            vec!["alpha".into(), "beta".into()],
-        );
+        app.update_history_snapshot_for_test(0, 0, 20, 2, vec!["alpha".into(), "beta".into()]);
 
         assert!(
             app.apply(Action::StartHistorySelection { column: 1, row: 0 })
@@ -2237,7 +1519,7 @@ mod tests {
     #[test]
     fn quit_command_sets_should_quit() {
         let mut app = new_app(true);
-        app.composer.insert_str("/quit");
+        app.composer_mut().insert_str("/quit");
         app.sync_command_selection();
 
         let effect = app.apply(Action::SubmitMessage);
@@ -2249,14 +1531,16 @@ mod tests {
     #[test]
     fn stale_stream_events_are_ignored_after_new_session() {
         let mut app = new_app(true);
-        app.replace_session_history(vec![RigMessage::assistant("previous")]);
-        app.pending_reply = Some(PendingReply::new(11, PendingReplyKind::Normal));
-        app.entries.push(TranscriptEntry::Message(ChatMessage {
-            speaker: Speaker::User,
-            text: "hello".into(),
-            style: MessageStyle::Plain,
-        }));
-        app.composer.insert_str("/new");
+        app.replace_session_history(vec![SessionHistoryMessage::assistant("previous")]);
+        app.session.pending_reply = Some(PendingReply::new(11, PendingReplyKind::Normal));
+        app.session
+            .entries
+            .push(TranscriptEntry::Message(ChatMessage {
+                speaker: Speaker::User,
+                text: "hello".into(),
+                style: MessageStyle::Plain,
+            }));
+        app.composer_mut().insert_str("/new");
         app.sync_command_selection();
 
         app.apply(Action::SubmitMessage);
@@ -2265,44 +1549,47 @@ mod tests {
             event: StreamEvent::TextDelta("stale".into()),
         });
 
-        assert_eq!(app.entries.len(), 1);
+        assert_eq!(app.entries().len(), 1);
         assert!(app.session_history().is_empty());
     }
 
     #[test]
     fn finished_stream_replaces_canonical_history() {
         let mut app = new_app(true);
-        app.pending_reply = Some(PendingReply::new(2, PendingReplyKind::Normal));
-        app.replace_session_history(vec![RigMessage::assistant("old")]);
+        app.session.pending_reply = Some(PendingReply::new(2, PendingReplyKind::Normal));
+        app.replace_session_history(vec![SessionHistoryMessage::assistant("old")]);
 
         app.apply(Action::StreamEvent {
             reply_id: 2,
             event: StreamEvent::Finished {
                 history: Some(vec![
-                    RigMessage::user("hello"),
-                    RigMessage::assistant("world"),
+                    SessionHistoryMessage::user("hello"),
+                    SessionHistoryMessage::assistant("world"),
                 ]),
             },
         });
 
-        assert!(app.pending_reply.is_none());
+        assert!(app.session.pending_reply.is_none());
         assert_eq!(
             app.session_history(),
-            &[RigMessage::user("hello"), RigMessage::assistant("world")]
+            &[
+                SessionHistoryMessage::user("hello"),
+                SessionHistoryMessage::assistant("world")
+            ]
         );
     }
 
     #[test]
     fn finished_planning_stream_clears_plan_active_state() {
         let mut app = registry_app(true);
-        app.pending_reply = Some(PendingReply::new(2, PendingReplyKind::Planning));
+        app.session.pending_reply = Some(PendingReply::new(2, PendingReplyKind::Planning));
 
         app.apply(Action::StreamEvent {
             reply_id: 2,
             event: StreamEvent::Finished { history: None },
         });
 
-        assert!(app.pending_reply.is_none());
+        assert!(app.session.pending_reply.is_none());
         assert!(!app.plan_active());
     }
 
@@ -2310,8 +1597,8 @@ mod tests {
     fn planning_ready_response_starts_planner_fanout() {
         let mut app = registry_app(true);
         app.begin_planning_conversation();
-        app.pending_reply = Some(PendingReply::new(2, PendingReplyKind::Planning));
-        app.replace_session_history(vec![RigMessage::user("plan this")]);
+        app.session.pending_reply = Some(PendingReply::new(2, PendingReplyKind::Planning));
+        app.replace_session_history(vec![SessionHistoryMessage::user("plan this")]);
 
         app.apply(Action::StreamEvent {
             reply_id: 2,
@@ -2339,30 +1626,36 @@ mod tests {
                 description,
                 history,
                 ..
-            }) if description == "## Summary\nStable brief" && history == vec![RigMessage::user("plan this")]
+            }) if description == "## Summary\nStable brief" && history == vec![SessionHistoryMessage::user("plan this")]
         ));
         assert_eq!(
-            app.pending_reply.as_ref().map(|pending| pending.kind),
+            app.session
+                .pending_reply
+                .as_ref()
+                .map(|pending| pending.kind),
             Some(PendingReplyKind::Planning)
         );
         assert_eq!(
             app.planning_session_stage(),
-            Some(PlanningSessionStage::RunningFanout)
+            Some(PlanningStage::RunningFanout)
         );
     }
 
     #[test]
     fn failed_stream_keeps_previous_canonical_history() {
         let mut app = new_app(true);
-        app.pending_reply = Some(PendingReply::new(2, PendingReplyKind::Normal));
-        app.replace_session_history(vec![RigMessage::assistant("stable")]);
+        app.session.pending_reply = Some(PendingReply::new(2, PendingReplyKind::Normal));
+        app.replace_session_history(vec![SessionHistoryMessage::assistant("stable")]);
 
         app.apply(Action::StreamEvent {
             reply_id: 2,
             event: StreamEvent::Failed("boom".into()),
         });
 
-        assert_eq!(app.session_history(), &[RigMessage::assistant("stable")]);
+        assert_eq!(
+            app.session_history(),
+            &[SessionHistoryMessage::assistant("stable")]
+        );
     }
 
     #[test]

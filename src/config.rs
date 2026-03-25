@@ -7,9 +7,8 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::{
-    model_registry,
-    planning::{PlanningAgentConfig, PlanningConfig, sanitize_planning_agents},
-    tool_policy,
+    features::planning::{PlanningAgentConfig, PlanningConfig, sanitize_planning_agents},
+    model_registry, tool_policy,
 };
 
 const DEFAULT_CONFIG_PATH: &str = "config.toml";

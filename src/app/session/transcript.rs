@@ -1,0 +1,147 @@
+use crate::{
+    features::planning::{
+        contains_proposed_plan, strip_planning_ready_tags, strip_proposed_plan_tags,
+    },
+    tools::MutationPreview,
+};
+
+use super::models::{AccessMode, Speaker};
+
+#[derive(Clone, Debug)]
+pub struct ChatMessage {
+    pub speaker: Speaker,
+    pub text: String,
+    pub style: MessageStyle,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MessageStyle {
+    Plain,
+    Commentary,
+    Thinking,
+    Error,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ToolCall {
+    pub name: String,
+    pub parameter: String,
+    pub preview: Option<MutationPreview>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ToolResultEntry {
+    pub name: String,
+    pub output: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SubagentStatusKind {
+    Subagent,
+    Planning,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SubagentDisplayState {
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SubagentStatusEntry {
+    pub id: String,
+    pub kind: SubagentStatusKind,
+    pub display_label: String,
+    pub state: SubagentDisplayState,
+    pub status_text: String,
+    pub latest_tool_name: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub enum TranscriptEntry {
+    Message(ChatMessage),
+    ToolCall(ToolCall),
+    ToolResult(ToolResultEntry),
+    SubagentStatus(SubagentStatusEntry),
+}
+
+#[derive(Debug)]
+pub struct PendingReply {
+    pub id: u64,
+    pub kind: PendingReplyKind,
+    pub reasoning_entry_index: Option<usize>,
+    pub text_entry_index: Option<usize>,
+    pub staged_reasoning_text: String,
+    pub staged_plain_text: String,
+    pub plain_text: String,
+    pub reasoning_text: String,
+    pub commentary_messages: Vec<String>,
+    pub has_visible_content: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PendingReplyReplaySeed {
+    pub plain_text: String,
+    pub reasoning_text: String,
+    pub commentary_messages: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PendingReplyKind {
+    Normal,
+    Planning,
+    Compacting,
+}
+
+impl PendingReply {
+    pub fn new(id: u64, kind: PendingReplyKind) -> Self {
+        Self {
+            id,
+            kind,
+            reasoning_entry_index: None,
+            text_entry_index: None,
+            staged_reasoning_text: String::new(),
+            staged_plain_text: String::new(),
+            plain_text: String::new(),
+            reasoning_text: String::new(),
+            commentary_messages: Vec::new(),
+            has_visible_content: false,
+        }
+    }
+
+    pub fn reset_active_stream_segment(&mut self) {
+        self.reasoning_entry_index = None;
+        self.text_entry_index = None;
+        self.staged_reasoning_text.clear();
+        self.staged_plain_text.clear();
+    }
+}
+
+pub fn startup_banner_message(model_name: &str, mode: AccessMode) -> String {
+    let _ = mode;
+    format!(
+        "Loaded Azure model `{model_name}` from config. Send a message to start a one-shot response, or type / for commands."
+    )
+}
+
+pub fn pending_stream_text_is_visible(style: MessageStyle, text: &str) -> bool {
+    match style {
+        MessageStyle::Plain => {
+            let visible_text = strip_planning_ready_tags(&strip_proposed_plan_tags(text));
+            !visible_text.trim().is_empty()
+        }
+        MessageStyle::Commentary | MessageStyle::Thinking => !text.trim().is_empty(),
+        MessageStyle::Error => false,
+    }
+}
+
+pub fn latest_proposed_plan_message(entries: &[TranscriptEntry]) -> Option<&str> {
+    entries.iter().rev().find_map(|entry| match entry {
+        TranscriptEntry::Message(message) if contains_proposed_plan(&message.text) => {
+            Some(message.text.as_str())
+        }
+        _ => None,
+    })
+}

@@ -6,7 +6,7 @@ use tui_markdown::from_str as markdown_from_str;
 
 use crate::{
     app::{App, ChatMessage, MessageStyle, Speaker},
-    planning::{strip_planning_ready_tags, strip_proposed_plan_tags},
+    features::planning::{strip_planning_ready_tags, strip_proposed_plan_tags},
 };
 
 use super::wrap::{wrap_styled_lines, wrap_text};

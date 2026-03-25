@@ -471,9 +471,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        app::{Action, Effect},
+        app::{Action, Effect, StreamEvent},
         config::ReasoningEffort,
-        llm::StreamEvent,
     };
 
     #[test]

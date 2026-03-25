@@ -1,9 +1,8 @@
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
-use ratatui_textarea::Input;
 
-use crate::app::Action;
+use crate::app::{Action, EditorInput, EditorKey};
 
 const MOUSE_SCROLL_LINES: usize = 3;
 
@@ -102,12 +101,12 @@ fn map_key_event(
             (KeyCode::Up, KeyModifiers::NONE)
                 if shell_approval_editing && shell_approval_can_move_up =>
             {
-                Action::Editor(Input::from(key))
+                Action::Editor(editor_input_from_key(key))
             }
             (KeyCode::Down, KeyModifiers::NONE)
                 if shell_approval_editing && shell_approval_can_move_down =>
             {
-                Action::Editor(Input::from(key))
+                Action::Editor(editor_input_from_key(key))
             }
             (KeyCode::Up, KeyModifiers::NONE) => Action::SelectPreviousCommand,
             (KeyCode::Down, KeyModifiers::NONE) => Action::SelectNextCommand,
@@ -116,7 +115,7 @@ fn map_key_event(
             (KeyCode::PageDown, _) => Action::ScrollHistoryPageDown,
             (KeyCode::Home, _) => Action::ScrollHistoryToTop,
             (KeyCode::End, _) => Action::ScrollHistoryToBottom,
-            _ if shell_approval_editing => Action::Editor(Input::from(key)),
+            _ if shell_approval_editing => Action::Editor(editor_input_from_key(key)),
             _ => Action::Tick,
         };
     }
@@ -137,7 +136,7 @@ fn map_key_event(
             (KeyCode::Home, _) => Action::ScrollHistoryToTop,
             (KeyCode::End, _) => Action::ScrollHistoryToBottom,
             (KeyCode::Enter, _) => Action::SubmitMessage,
-            _ => Action::Editor(Input::from(key)),
+            _ => Action::Editor(editor_input_from_key(key)),
         };
     }
 
@@ -180,7 +179,33 @@ fn map_key_event(
             Action::InsertComposerNewline
         }
         (KeyCode::Enter, _) => Action::SubmitMessage,
-        _ => Action::Editor(Input::from(key)),
+        _ => Action::Editor(editor_input_from_key(key)),
+    }
+}
+
+fn editor_input_from_key(key: KeyEvent) -> EditorInput {
+    EditorInput {
+        key: match key.code {
+            KeyCode::Backspace => EditorKey::Backspace,
+            KeyCode::Enter => EditorKey::Enter,
+            KeyCode::Left => EditorKey::Left,
+            KeyCode::Right => EditorKey::Right,
+            KeyCode::Up => EditorKey::Up,
+            KeyCode::Down => EditorKey::Down,
+            KeyCode::Home => EditorKey::Home,
+            KeyCode::End => EditorKey::End,
+            KeyCode::PageUp => EditorKey::PageUp,
+            KeyCode::PageDown => EditorKey::PageDown,
+            KeyCode::Tab | KeyCode::BackTab => EditorKey::Tab,
+            KeyCode::Delete => EditorKey::Delete,
+            KeyCode::Esc => EditorKey::Esc,
+            KeyCode::Char(value) => EditorKey::Char(value),
+            KeyCode::F(value) => EditorKey::F(value),
+            _ => EditorKey::Null,
+        },
+        ctrl: key.modifiers.contains(KeyModifiers::CONTROL),
+        alt: key.modifiers.contains(KeyModifiers::ALT),
+        shift: key.modifiers.contains(KeyModifiers::SHIFT),
     }
 }
 
@@ -454,7 +479,7 @@ mod tests {
                 false,
                 false,
             ),
-            Some(Action::Editor(Input::from(up)))
+            Some(Action::Editor(editor_input_from_key(up)))
         );
 
         let down = key(KeyCode::Down, KeyModifiers::NONE);
@@ -470,7 +495,7 @@ mod tests {
                 false,
                 false,
             ),
-            Some(Action::Editor(Input::from(down)))
+            Some(Action::Editor(editor_input_from_key(down)))
         );
     }
 
@@ -692,7 +717,7 @@ mod tests {
         let action = map_event(Event::Key(key(KeyCode::Char('x'), KeyModifiers::NONE)));
         assert_eq!(
             action,
-            Some(Action::Editor(Input::from(key(
+            Some(Action::Editor(editor_input_from_key(key(
                 KeyCode::Char('x'),
                 KeyModifiers::NONE
             ))))

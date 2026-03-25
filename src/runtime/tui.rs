@@ -1,0 +1,104 @@
+use std::error::Error;
+
+use crate::{
+    Tui,
+    app::{Action, StreamEvent},
+    input, ui,
+};
+
+use super::{
+    bootstrap::bootstrap_tui, command_history::persist_command_history_if_needed,
+    effect_executor::EffectExecutor,
+};
+
+pub(crate) fn run_with_options(
+    terminal: &mut Tui,
+    config: crate::config::AppConfig,
+    startup: crate::StartupOptions,
+) -> Result<(), Box<dyn Error>> {
+    let mut state = bootstrap_tui(config, startup)?;
+
+    while !state.app.should_quit() {
+        while let Ok((reply_id, event)) = state.stream_rx.try_recv() {
+            state.reply_driver.clear_completed_task(reply_id, &event);
+            if matches!(&event, StreamEvent::Failed(_))
+                && state
+                    .reply_driver
+                    .should_defer_failed_stream_event(&state.app, &state.llm, reply_id)
+            {
+                continue;
+            }
+            if let Some(effect) = state.app.apply(Action::StreamEvent { reply_id, event }) {
+                let mut runner = EffectExecutor {
+                    runtime: &state.runtime,
+                    terminal,
+                    reply_driver: &mut state.reply_driver,
+                    llm: &mut state.llm,
+                    config: &mut state.config,
+                    app: &mut state.app,
+                    stats: &state.stats,
+                    stream_tx: state.stream_tx.clone(),
+                    subagents: &state.subagents,
+                };
+                if let Err(error) = runner.run(effect) {
+                    state
+                        .app
+                        .push_error_message(format!("Command failed: {error}"));
+                }
+            }
+            persist_command_history_if_needed(&mut state.app, &state.command_history);
+        }
+        while let Ok(event) = state.subagent_rx.try_recv() {
+            state.app.apply(Action::SubagentEvent(event));
+            persist_command_history_if_needed(&mut state.app, &state.command_history);
+        }
+
+        state.app.set_session_stats(state.stats.current_totals());
+        terminal.draw(|frame| ui::render(frame, &mut state.app))?;
+
+        let timeout = state.tick_rate.saturating_sub(state.last_tick.elapsed());
+        if crossterm::event::poll(timeout)?
+            && let Some(action) = input::map_event_with_shell_editor_state(
+                crossterm::event::read()?,
+                state.app.has_pending_write_approval(),
+                state.app.has_pending_shell_approval(),
+                state.app.shell_approval_editing(),
+                state.app.shell_approval_editor_can_move_up(),
+                state.app.shell_approval_editor_can_move_down(),
+                state.app.has_pending_ask_user(),
+                state.app.selection_picker_visible(),
+                state.app.plan_review_selection_active(),
+            )
+            && let Some(effect) = state.app.apply(action)
+        {
+            let mut runner = EffectExecutor {
+                runtime: &state.runtime,
+                terminal,
+                reply_driver: &mut state.reply_driver,
+                llm: &mut state.llm,
+                config: &mut state.config,
+                app: &mut state.app,
+                stats: &state.stats,
+                stream_tx: state.stream_tx.clone(),
+                subagents: &state.subagents,
+            };
+            if let Err(error) = runner.run(effect) {
+                state
+                    .app
+                    .push_error_message(format!("Command failed: {error}"));
+            }
+            persist_command_history_if_needed(&mut state.app, &state.command_history);
+        } else {
+            persist_command_history_if_needed(&mut state.app, &state.command_history);
+        }
+
+        if state.last_tick.elapsed() >= state.tick_rate {
+            state.app.apply(crate::app::Action::Tick);
+            persist_command_history_if_needed(&mut state.app, &state.command_history);
+            state.last_tick = std::time::Instant::now();
+        }
+    }
+
+    state.stats.finalize_current_session()?;
+    Ok(())
+}

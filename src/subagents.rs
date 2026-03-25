@@ -17,10 +17,10 @@ use tokio::{
 
 use crate::{
     agent::AgentContext,
-    app::{AccessMode, CommandRisk},
+    app::{AccessMode, ApprovalMode, CommandRisk, StreamEvent},
     completion_request::CompletionRequestSnapshot,
     config::AppConfig,
-    llm::{CompletionCapture, LlmService, PromptRunResult, StreamEvent, WriteApprovalController},
+    llm::{CompletionCapture, LlmService, PromptRunResult, WriteApprovalController},
     stats::StatsStore,
     token_counting::count_text_tokens,
 };
@@ -124,7 +124,7 @@ pub struct SubagentSpawnRequest {
     pub activity_kind: SubagentActivityKind,
     pub model_name_override: Option<String>,
     pub config: AppConfig,
-    pub approvals: WriteApprovalController,
+    pub approval_mode: ApprovalMode,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -342,7 +342,7 @@ impl SubagentManager {
         let service = LlmService::from_config(
             &request.config,
             context,
-            request.approvals.clone(),
+            WriteApprovalController::new(request.approval_mode),
             None,
             Some(self.clone()),
         )
