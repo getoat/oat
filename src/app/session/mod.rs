@@ -2,12 +2,12 @@ mod actions;
 mod approvals;
 mod ask_user;
 mod effects;
-mod events;
+pub(crate) mod events;
 mod models;
 mod reducer;
 mod selectors;
 mod state;
-mod submit;
+pub(crate) mod submit;
 mod transcript;
 
 pub use actions::Action;
@@ -27,6 +27,6 @@ pub use selectors::*;
 pub use state::SessionState;
 pub use transcript::{
     ChatMessage, MessageStyle, PendingReply, PendingReplyKind, PendingReplyReplaySeed,
-    SubagentDisplayState, SubagentStatusEntry, SubagentStatusKind, ToolCall, ToolResultEntry,
-    TranscriptEntry, pending_stream_text_is_visible, startup_banner_message,
+    ProposedPlanEntry, SubagentDisplayState, SubagentStatusEntry, SubagentStatusKind, ToolCall,
+    ToolResultEntry, TranscriptEntry, pending_stream_text_is_visible, startup_banner_message,
 };

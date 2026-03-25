@@ -5,8 +5,8 @@ use ratatui::{
 use tui_markdown::from_str as markdown_from_str;
 
 use crate::{
-    app::{App, ChatMessage, MessageStyle, Speaker},
-    features::planning::{strip_planning_ready_tags, strip_proposed_plan_tags},
+    app::{App, ChatMessage, MessageStyle, Speaker, query},
+    features::planning::planning_reply_visible_text,
 };
 
 use super::wrap::{wrap_styled_lines, wrap_text};
@@ -134,7 +134,7 @@ pub(super) fn rendered_line_text(line: &Line<'_>) -> String {
 }
 
 pub(super) fn loading_frame(app: &App) -> &'static str {
-    LOADING_FRAMES[app.tick_count() % LOADING_FRAMES.len()]
+    LOADING_FRAMES[query::tick_count(app.state()) % LOADING_FRAMES.len()]
 }
 
 fn push_plain_message_lines(
@@ -174,7 +174,7 @@ fn push_markdown_message_lines(
     accent: Color,
 ) {
     let content_width = width.saturating_sub(prefix_width(message.speaker)).max(1);
-    let display_text = strip_planning_ready_tags(&strip_proposed_plan_tags(&message.text));
+    let display_text = planning_reply_visible_text(&message.text);
     let rendered = render_markdown_message_lines(&display_text, content_width);
     push_prefixed_styled_lines(lines, rendered, message.speaker, accent);
 }

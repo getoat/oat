@@ -6,7 +6,7 @@ use ratatui::{
 };
 
 use crate::{
-    app::{App, ModelPickerTab, SlashCommand},
+    app::{App, ModelPickerTab, SlashCommand, query},
     composer::ComposerLayout,
 };
 
@@ -26,7 +26,10 @@ pub(super) fn composer_content_width(outer_width: u16) -> usize {
 pub(super) fn ask_user_state(
     app: &App,
 ) -> Option<(&crate::app::PendingAskUser, &crate::app::ui::AskUserUiState)> {
-    Some((app.ask_user_session()?, app.ask_user_ui()?))
+    Some((
+        query::ask_user_session(app.state())?,
+        query::ask_user_ui(app.state())?,
+    ))
 }
 
 pub(super) fn shell_approval_state(
@@ -35,7 +38,10 @@ pub(super) fn shell_approval_state(
     &crate::app::PendingShellApproval,
     &crate::app::ui::ShellApprovalUiState,
 )> {
-    Some((app.shell_approval_session()?, app.shell_approval_ui()?))
+    Some((
+        query::shell_approval_session(app.state())?,
+        query::shell_approval_ui(app.state())?,
+    ))
 }
 
 pub(super) fn render_detail_lines(lines: Vec<Line<'static>>, editing: bool) -> Vec<Line<'static>> {
@@ -205,32 +211,36 @@ pub(super) fn render_mode(
     area: ratatui::layout::Rect,
     accent: Color,
 ) {
-    let mode_label = mode_status_label(app.mode(), app.approval_mode(), app.plan_active());
-    let session_stats = app.session_stats();
-    let context_percent = app.next_request_context_percent();
+    let mode_label = mode_status_label(
+        query::mode(app.state()),
+        query::approval_mode(app.state()),
+        query::plan_active(app.state()),
+    );
+    let session_stats = query::session_stats(app.state());
+    let context_percent = query::next_request_context_percent_state(app.state());
 
     let mut spans = vec![Span::styled(
         mode_label,
         Style::default().fg(accent).add_modifier(Modifier::BOLD),
     )];
-    if app.pending_write_approval().is_none()
-        && !app.has_pending_shell_approval()
-        && app.history_is_pinned()
+    if query::pending_write_approval(app.state()).is_none()
+        && !query::has_pending_shell_approval(app.state())
+        && query::history_is_pinned(app.state())
     {
         spans.push(Span::raw("  "));
         spans.push(Span::styled("Pinned", Style::default().fg(Color::Gray)));
     }
     spans.push(Span::raw(format!(
         "  {} • {}  in {}  out {}  ctx {}  ${:.6}",
-        app.model_name(),
-        app.reasoning_effort().as_str(),
+        query::model_name(app.state()),
+        query::reasoning_effort(app.state()).as_str(),
         format_compact_tokens(session_stats.input_tokens),
         format_compact_tokens(session_stats.output_tokens),
         format!("{context_percent}%"),
         session_stats.estimated_cost_usd(),
     )));
 
-    if let Some(pending) = app.pending_write_approval() {
+    if let Some(pending) = query::pending_write_approval(app.state()) {
         spans.push(Span::raw("  "));
         spans.push(Span::styled(
             format!(
@@ -250,7 +260,7 @@ pub(super) fn render_mode(
             format!("Approval pending: {} risk shell", pending.risk.label()),
             Style::default().fg(Color::Yellow),
         ));
-    } else if matches!(app.mode(), crate::app::AccessMode::ReadOnly) {
+    } else if matches!(query::mode(app.state()), crate::app::AccessMode::ReadOnly) {
         spans.push(Span::styled(
             "  Tab switches to write mode for edits and higher-risk shell commands",
             Style::default().fg(Color::Gray),

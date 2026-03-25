@@ -1,10 +1,13 @@
 pub mod session;
 pub mod ui;
 
-mod reducer_context;
+pub(crate) mod ops;
+pub(crate) mod query;
+mod reducer;
 mod shell;
+mod state;
 
-pub(crate) use reducer_context::ReducerContext;
+pub use query::InputTarget;
 pub(crate) use session::compatible_reasoning_effort;
 pub use session::{
     AccessMode, Action, ApprovalMode, ChatMessage, CommandRisk, EditorInput, EditorKey, Effect,
@@ -16,6 +19,7 @@ pub use session::{
 };
 pub use shell::App;
 pub use shell::App as AppShell;
+pub use state::AppState;
 pub use ui::{
     ModelPickerTab, PickerSelection, ReasoningPickerTarget, SelectionPicker, ShellApprovalEditMode,
     UiState,

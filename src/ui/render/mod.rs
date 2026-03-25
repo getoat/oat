@@ -10,7 +10,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
 };
 
-use crate::app::App;
+use crate::app::{App, ops, query};
 
 use approvals::{pending_shell_approval_height, pending_write_approval_height};
 use ask_user::pending_ask_user_height;
@@ -23,20 +23,20 @@ use super::{history::render_history, markdown::loading_frame, theme::accent_colo
 
 pub fn render(frame: &mut Frame, app: &mut App) {
     let screen = frame.area();
-    app.set_composer_wrap_width(composer_content_width(screen.width));
-    let accent = accent_color(app.mode(), app.plan_active());
-    let input_height = if let Some(pending) = app.pending_write_approval() {
+    ops::composer::set_composer_wrap_width(app.state_mut(), composer_content_width(screen.width));
+    let accent = accent_color(query::mode(app.state()), query::plan_active(app.state()));
+    let input_height = if let Some(pending) = query::pending_write_approval(app.state()) {
         pending_write_approval_height(pending, screen.width)
-    } else if app.has_pending_shell_approval() {
+    } else if query::has_pending_shell_approval(app.state()) {
         pending_shell_approval_height(app, screen.width)
-    } else if app.has_pending_ask_user() {
+    } else if query::has_pending_ask_user(app.state()) {
         pending_ask_user_height(app, screen.width)
-    } else if app.plan_review_selection_active() {
+    } else if query::plan_review_selection_active(app.state()) {
         pending_plan_review_height(screen.width)
     } else {
-        app.composer_height().max(3)
+        ops::composer::composer_height(app.state_mut()).max(3)
     };
-    let overlay_height = app.overlay_height();
+    let overlay_height = query::overlay_height(app.state());
     let mut constraints = vec![Constraint::Min(1)];
     if overlay_height > 0 {
         constraints.push(Constraint::Length(overlay_height));

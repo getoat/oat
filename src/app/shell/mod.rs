@@ -1,33 +1,11 @@
-mod approvals;
-mod ask_user;
-mod composer;
-mod history;
-mod picker;
-mod planning;
-mod session;
-mod transcript;
+use std::ops::{Deref, DerefMut};
 
-use std::path::Path;
+use crate::{config::ReasoningEffort, features::planning::PlanningAgentConfig};
 
-use ratatui_textarea::TextArea;
-
-use crate::{
-    config::ReasoningEffort,
-    features::planning::{PlanReviewState, PlanningAgentConfig, PlanningStage},
-    model_registry,
-    stats::StatsTotals,
-};
-
-use super::session::latest_proposed_plan_message;
-use super::ui::{ShellApprovalUiState, split_command_query};
-use super::{
-    AccessMode, ApprovalMode, PendingReplyKind, PendingReplyReplaySeed, PendingWriteApproval,
-    SelectionPicker, SessionHistoryMessage, SessionState, SlashCommand, TranscriptEntry, UiState,
-};
+use super::{AccessMode, AppState, ApprovalMode, SessionState, UiState};
 
 pub struct App {
-    pub session: SessionState,
-    pub ui: UiState,
+    state: AppState,
 }
 
 impl App {
@@ -58,350 +36,262 @@ impl App {
         initial_approval_mode: ApprovalMode,
     ) -> Self {
         Self {
-            session: SessionState::with_startup(
-                show_thinking,
-                show_tool_output,
-                model_name,
-                reasoning_effort,
-                planning_agents,
-                initial_mode,
-                initial_approval_mode,
+            state: AppState::new(
+                SessionState::with_startup(
+                    show_thinking,
+                    show_tool_output,
+                    model_name,
+                    reasoning_effort,
+                    planning_agents,
+                    initial_mode,
+                    initial_approval_mode,
+                ),
+                UiState::default(),
             ),
-            ui: UiState::default(),
         }
     }
 
     pub fn apply(&mut self, action: super::Action) -> Option<super::Effect> {
-        crate::app::session::apply(&mut self.session, &mut self.ui, action)
+        crate::app::session::apply(&mut self.state, action)
     }
 
-    fn reducer_context(&mut self) -> crate::app::ReducerContext<'_> {
-        crate::app::ReducerContext::new(&mut self.session, &mut self.ui)
+    pub fn state(&self) -> &AppState {
+        &self.state
     }
 
-    pub fn mode(&self) -> AccessMode {
-        self.session.mode
+    pub(crate) fn state_mut(&mut self) -> &mut AppState {
+        &mut self.state
+    }
+}
+
+impl Deref for App {
+    type Target = AppState;
+
+    fn deref(&self) -> &Self::Target {
+        &self.state
+    }
+}
+
+impl DerefMut for App {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.state
+    }
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+impl App {
+    pub(crate) fn mode(&self) -> AccessMode {
+        self.state.session.mode
     }
 
-    pub fn workspace_root(&self) -> &Path {
-        self.session.workspace_root()
+    pub(crate) fn should_quit(&self) -> bool {
+        self.state.session.should_quit
     }
 
-    pub fn approval_mode(&self) -> ApprovalMode {
-        self.session.approval_mode
+    pub(crate) fn composer(&self) -> &ratatui_textarea::TextArea<'static> {
+        &self.state.ui.composer.composer
     }
 
-    pub fn safety_model_name(&self) -> &str {
-        &self.session.safety_model_name
+    pub(crate) fn composer_mut(&mut self) -> &mut ratatui_textarea::TextArea<'static> {
+        self.state.ui.invalidate_composer_layout();
+        self.state.ui.composer.visual_column = None;
+        &mut self.state.ui.composer.composer
     }
 
-    pub fn safety_reasoning_effort(&self) -> ReasoningEffort {
-        self.session.safety_reasoning_effort
+    pub(crate) fn set_composer_wrap_width(&mut self, width: usize) {
+        crate::app::ops::composer::set_composer_wrap_width(self.state_mut(), width);
     }
 
-    pub fn pending_write_approval(&self) -> Option<&PendingWriteApproval> {
-        self.session.pending_write_approvals.front()
+    pub(crate) fn set_composer_cursor(&mut self, row: u16, col: u16) {
+        crate::app::ops::composer::set_composer_cursor(self.state_mut(), row, col);
     }
 
-    pub fn main_pending_write_approval_request_id(&self) -> Option<&str> {
-        self.session
-            .pending_write_approvals
-            .iter()
-            .find(|pending| pending.source_label.is_none())
-            .map(|pending| pending.request_id.as_str())
+    pub(crate) fn composer_has_content(&self) -> bool {
+        crate::app::ops::composer::composer_has_content(&self.state)
     }
 
-    pub fn has_pending_write_approval(&self) -> bool {
-        !self.session.pending_write_approvals.is_empty()
+    pub(crate) fn entries(&self) -> &[super::TranscriptEntry] {
+        &self.state.session.entries
     }
 
-    pub fn main_pending_shell_approval_request_id(&self) -> Option<&str> {
-        self.session
-            .pending_shell_approvals
-            .iter()
-            .find(|pending| pending.source_label.is_none())
-            .map(|pending| pending.request_id.as_str())
+    pub(crate) fn session_history(&self) -> &[super::SessionHistoryMessage] {
+        &self.state.session.session_history
     }
 
-    pub fn has_pending_shell_approval(&self) -> bool {
-        !self.session.pending_shell_approvals.is_empty()
+    pub(crate) fn has_pending_reply(&self) -> bool {
+        crate::app::query::has_pending_reply(&self.state)
     }
 
-    pub fn shell_approval_editing(&self) -> bool {
-        self.ui
-            .pending_shell_approval
-            .as_ref()
-            .is_some_and(ShellApprovalUiState::is_editing)
+    pub(crate) fn has_pending_ask_user(&self) -> bool {
+        crate::app::query::has_pending_ask_user(&self.state)
     }
 
-    pub fn shell_approval_editor_can_move_up(&self) -> bool {
-        self.ui
-            .pending_shell_approval
-            .as_ref()
-            .is_some_and(ShellApprovalUiState::editor_can_move_up)
+    pub(crate) fn pending_ask_user(&self) -> Option<&super::PendingAskUser> {
+        self.state.session.pending_ask_user.as_ref()
     }
 
-    pub fn shell_approval_editor_can_move_down(&self) -> bool {
-        self.ui
-            .pending_shell_approval
-            .as_ref()
-            .is_some_and(ShellApprovalUiState::editor_can_move_down)
+    pub(crate) fn ask_user_ui(&self) -> Option<&super::ui::AskUserUiState> {
+        self.state.ui.pending_ask_user.as_ref()
     }
 
-    pub fn has_pending_ask_user(&self) -> bool {
-        self.session.pending_ask_user.is_some()
+    pub(crate) fn planning_session_stage(
+        &self,
+    ) -> Option<crate::features::planning::PlanningStage> {
+        crate::app::query::planning_session_stage(&self.state)
     }
 
-    pub fn ask_user_review_active(&self) -> bool {
-        self.session
-            .pending_ask_user
-            .as_ref()
-            .zip(self.ui.pending_ask_user.as_ref())
-            .is_some_and(|(pending, ui)| ui.active_tab == pending.questions.len())
+    pub(crate) fn planning_draft_mode(&self) -> bool {
+        crate::app::query::planning_draft_mode(&self.state)
     }
 
-    pub fn ask_user_detail_editing(&self) -> bool {
-        self.ui
-            .pending_ask_user
-            .as_ref()
-            .is_some_and(|pending| pending.detail_editing)
+    pub(crate) fn plan_active(&self) -> bool {
+        crate::app::query::plan_active(&self.state)
     }
 
-    pub fn plan_review_selection_active(&self) -> bool {
-        self.session.planning.stage == PlanningStage::Review
-            && self.session.planning.review == Some(PlanReviewState::Selection)
+    pub(crate) fn plan_review_selection_active(&self) -> bool {
+        crate::app::query::plan_review_selection_active(&self.state)
     }
 
-    pub fn plan_review_feedback_active(&self) -> bool {
-        self.session.planning.stage == PlanningStage::Review
-            && self.session.planning.review == Some(PlanReviewState::Feedback)
+    pub(crate) fn plan_review_feedback_active(&self) -> bool {
+        crate::app::query::plan_review_feedback_active(&self.state)
     }
 
-    pub fn planning_session_stage(&self) -> Option<PlanningStage> {
-        (self.session.planning.stage != PlanningStage::Idle).then_some(self.session.planning.stage)
+    pub(crate) fn history_is_pinned(&self) -> bool {
+        crate::app::query::history_is_pinned(&self.state)
     }
 
-    pub fn should_quit(&self) -> bool {
-        self.session.should_quit
+    pub(crate) fn has_visible_pending_content(&self) -> bool {
+        crate::app::session::has_visible_pending_content(&self.state.session)
     }
 
-    pub fn composer(&self) -> &TextArea<'static> {
-        &self.ui.composer.composer
+    pub(crate) fn selection_picker_visible(&self) -> bool {
+        crate::app::query::selection_picker_visible(&self.state)
     }
 
-    pub fn composer_mut(&mut self) -> &mut TextArea<'static> {
-        self.ui.invalidate_composer_layout();
-        self.ui.composer.visual_column = None;
-        &mut self.ui.composer.composer
+    pub(crate) fn selected_command(&self) -> Option<super::SlashCommand> {
+        crate::app::query::selected_command(&self.state)
     }
 
-    pub fn entries(&self) -> &[TranscriptEntry] {
-        &self.session.entries
+    pub(crate) fn history_pending_status_label(&self) -> &'static str {
+        crate::app::query::history_pending_status_label_state(&self.state)
     }
 
-    pub fn latest_proposed_plan_message(&self) -> Option<&str> {
-        latest_proposed_plan_message(&self.session)
+    pub(crate) fn sync_history_viewport(
+        &mut self,
+        total_lines: usize,
+        viewport_rows: usize,
+    ) -> usize {
+        self.ui.history.sync_viewport(total_lines, viewport_rows)
     }
 
-    pub fn session_history(&self) -> &[SessionHistoryMessage] {
-        &self.session.session_history
+    pub(crate) fn update_history_snapshot_for_test(
+        &mut self,
+        x: u16,
+        y: u16,
+        width: u16,
+        height: u16,
+        lines: Vec<String>,
+    ) {
+        self.ui.history.update_snapshot(
+            ratatui::layout::Rect {
+                x,
+                y,
+                width,
+                height,
+            },
+            lines,
+        );
     }
 
-    pub(crate) fn shows_startup_banner(&self) -> bool {
-        crate::app::session::shows_startup_banner(&self.session)
+    pub(crate) fn open_model_picker(&mut self) {
+        crate::app::ops::picker::open_model_picker(self.state_mut());
     }
 
-    pub fn has_pending_reply(&self) -> bool {
-        self.session.pending_reply.is_some()
+    pub(crate) fn open_reasoning_picker(&mut self) {
+        crate::app::ops::picker::open_reasoning_picker(self.state_mut());
     }
 
-    pub fn has_visible_pending_content(&self) -> bool {
-        crate::app::session::has_visible_pending_content(&self.session)
+    pub(crate) fn sync_command_selection(&mut self) {
+        crate::app::ops::composer::sync_command_selection(self.state_mut());
     }
 
-    pub fn should_show_history_busy_indicator(&self) -> bool {
-        crate::app::session::should_show_history_busy_indicator(&self.session)
+    pub(crate) fn begin_ask_user(
+        &mut self,
+        request_id: String,
+        request: crate::ask_user::AskUserRequest,
+    ) {
+        crate::app::ops::ask_user::begin_ask_user(self.state_mut(), request_id, request);
     }
 
-    pub fn history_pending_status_label(&self) -> &'static str {
-        crate::app::session::history_pending_status_label(&self.session)
+    pub(crate) fn begin_plan_review(&mut self) {
+        crate::app::ops::planning::begin_plan_review(self.state_mut());
     }
 
-    pub fn composer_height(&mut self) -> u16 {
-        self.ui.composer_layout().height().saturating_add(2) as u16
+    pub(crate) fn begin_plan_review_feedback(&mut self) {
+        crate::app::ops::planning::begin_plan_review_feedback(self.state_mut());
     }
 
-    pub fn overlay_height(&self) -> u16 {
-        if let Some(picker) = self.selection_picker() {
-            return crate::app::ui::picker_height(picker);
-        }
-
-        self.command_palette_height()
+    pub(crate) fn selected_plan_review_index(&self) -> Option<usize> {
+        crate::app::query::selected_plan_review_index(self.state())
     }
 
-    pub fn command_palette_height(&self) -> u16 {
-        if !self.command_palette_visible() {
-            return 0;
-        }
-
-        let line_count = self.filtered_commands().len().clamp(1, 4) as u16;
-        line_count + 2
+    pub(crate) fn enter_planning_draft_mode(&mut self) {
+        crate::app::ops::planning::enter_planning_draft_mode(self.state_mut());
     }
 
-    pub fn composer_has_content(&self) -> bool {
-        self.ui
-            .composer
-            .composer
-            .lines()
-            .iter()
-            .any(|line| !line.is_empty())
+    pub(crate) fn begin_planning_conversation(&mut self) {
+        crate::app::ops::planning::begin_planning_conversation(self.state_mut());
     }
 
-    pub fn show_thinking(&self) -> bool {
-        self.session.show_thinking
+    pub(crate) fn restore_command_history(&mut self, entries: Vec<String>, limit: usize) {
+        crate::app::ops::session::restore_command_history(self.state_mut(), entries, limit);
     }
 
-    pub fn model_name(&self) -> &str {
-        &self.session.model_name
+    pub(crate) fn take_command_history_to_persist(&mut self) -> Option<Vec<String>> {
+        crate::app::ops::session::take_command_history_to_persist(self.state_mut())
     }
 
-    pub fn reasoning_effort(&self) -> ReasoningEffort {
-        self.session.reasoning_effort
+    pub(crate) fn replace_session_history(&mut self, history: Vec<super::SessionHistoryMessage>) {
+        self.session.replace_session_history(history);
     }
 
-    pub fn last_history_model_name(&self) -> Option<&str> {
-        self.session.last_history_model_name.as_deref()
+    pub(crate) fn set_reasoning_effort(&mut self, reasoning_effort: ReasoningEffort) {
+        self.session.reasoning_effort = reasoning_effort;
     }
 
-    pub fn planning_agents(&self) -> &[PlanningAgentConfig] {
-        &self.session.planning_agents
+    pub(crate) fn set_safety_reasoning_effort(&mut self, reasoning_effort: ReasoningEffort) {
+        self.session.safety_reasoning_effort = reasoning_effort;
     }
 
-    pub fn planning_draft_mode(&self) -> bool {
-        self.session.planning.stage == PlanningStage::Drafting
+    pub(crate) fn set_session_stats(&mut self, session_stats: crate::stats::StatsTotals) {
+        self.session.session_stats = session_stats;
     }
 
-    pub fn plan_active(&self) -> bool {
-        self.session.planning.stage != PlanningStage::Idle
-            || self
-                .session
-                .pending_reply
-                .as_ref()
-                .is_some_and(|pending| pending.kind == PendingReplyKind::Planning)
+    pub(crate) fn set_model_name(&mut self, model_name: impl Into<String>) {
+        self.session.model_name = model_name.into();
     }
 
-    pub fn current_model_info(&self) -> Option<&'static model_registry::ModelInfo> {
-        crate::app::session::current_model_info(&self.session)
+    pub(crate) fn set_safety_model_name(&mut self, model_name: impl Into<String>) {
+        self.session.safety_model_name = model_name.into();
     }
 
-    pub fn show_tool_output(&self) -> bool {
-        self.session.show_tool_output
+    pub(crate) fn set_planning_agents(
+        &mut self,
+        planning_agents: Vec<crate::features::planning::PlanningAgentConfig>,
+    ) {
+        self.session.planning_agents = planning_agents;
     }
 
-    pub fn session_stats(&self) -> StatsTotals {
-        self.session.session_stats
+    pub(crate) fn set_workspace_root(&mut self, workspace_root: std::path::PathBuf) {
+        self.session.workspace_root = workspace_root;
     }
 
-    pub fn estimated_next_request_context_tokens(&self) -> u64 {
-        self.session.estimated_session_history_tokens
+    pub(crate) fn push_agent_message(&mut self, text: impl Into<String>) {
+        crate::app::ops::transcript::push_agent_message(self.state_mut(), text);
     }
 
-    pub fn next_request_context_percent(&self) -> u64 {
-        crate::app::session::next_request_context_percent(&self.session)
-    }
-
-    pub fn tick_count(&self) -> usize {
-        self.session.tick_count
-    }
-
-    pub fn command_palette_visible(&self) -> bool {
-        self.selection_picker().is_none() && self.command_query().is_some()
-    }
-
-    pub fn selection_picker(&self) -> Option<&SelectionPicker> {
-        self.ui.picker.as_ref()
-    }
-
-    pub fn selection_picker_visible(&self) -> bool {
-        self.ui.picker.is_some()
-    }
-
-    pub fn history_is_pinned(&self) -> bool {
-        self.ui.history.is_pinned()
-    }
-
-    pub fn history_status_label(&self) -> &'static str {
-        if self.history_is_pinned() {
-            "History pinned  End latest"
-        } else {
-            "History live  PgUp/PgDn scroll"
-        }
-    }
-
-    pub fn command_query(&self) -> Option<&str> {
-        let [line] = self.ui.composer.composer.lines() else {
-            return None;
-        };
-
-        line.starts_with('/').then_some(line.as_str())
-    }
-
-    pub fn command_name(&self) -> Option<&str> {
-        self.command_query()
-            .map(split_command_query)
-            .map(|(name, _)| name)
-    }
-
-    pub fn command_arguments(&self) -> Option<&str> {
-        self.command_query()
-            .map(split_command_query)
-            .map(|(_, args)| args)
-    }
-
-    pub fn filtered_commands(&self) -> Vec<SlashCommand> {
-        self.command_name()
-            .map(SlashCommand::filtered)
-            .unwrap_or_default()
-    }
-
-    pub fn selected_command(&self) -> Option<SlashCommand> {
-        let commands = self.filtered_commands();
-        commands
-            .contains(&self.ui.selected_command)
-            .then_some(self.ui.selected_command)
-            .or_else(|| commands.first().copied())
-    }
-
-    pub fn supported_reasoning_levels(&self) -> Vec<ReasoningEffort> {
-        crate::app::session::supported_reasoning_levels(&self.session)
-    }
-
-    pub(crate) fn active_reply_id(&self) -> Option<u64> {
-        self.session
-            .pending_reply
-            .as_ref()
-            .map(|pending| pending.id)
-    }
-
-    pub(crate) fn active_reply_kind(&self) -> Option<PendingReplyKind> {
-        self.session
-            .pending_reply
-            .as_ref()
-            .map(|pending| pending.kind)
-    }
-
-    pub(crate) fn pending_reply_replay_seed(&self) -> Option<PendingReplyReplaySeed> {
-        self.session
-            .pending_reply
-            .as_ref()
-            .map(|pending| PendingReplyReplaySeed {
-                plain_text: pending.plain_text.clone(),
-                reasoning_text: pending.reasoning_text.clone(),
-                commentary_messages: pending.commentary_messages.clone(),
-            })
-    }
-
-    pub(crate) fn ensure_pending_reply(&mut self, kind: PendingReplyKind) -> u64 {
-        self.session.ensure_pending_reply(kind)
+    pub(crate) fn push_error_message(&mut self, text: impl Into<String>) {
+        crate::app::ops::transcript::push_error_message(self.state_mut(), text);
     }
 }

@@ -53,6 +53,45 @@ impl SubagentManager {
         }
     }
 
+    pub async fn wait_all(
+        &self,
+        ids: &[String],
+        timeout: Option<std::time::Duration>,
+    ) -> Result<WaitResult> {
+        if ids.is_empty() {
+            anyhow::bail!("ids must contain at least one subagent id");
+        }
+
+        let inactivity_timeout = timeout
+            .unwrap_or_else(|| std::time::Duration::from_millis(super::DEFAULT_WAIT_TIMEOUT_MS));
+        if inactivity_timeout.is_zero() {
+            anyhow::bail!("timeout_ms must be greater than 0");
+        }
+
+        let mut rx = self.inner.notify_tx.subscribe();
+        loop {
+            let snapshot = self.wait_state_snapshot(ids, inactivity_timeout)?;
+            if snapshot.all_terminal() {
+                return Ok(snapshot.into_result());
+            }
+
+            let deadline = snapshot.deadline.expect("deadline for running subagents");
+            tokio::select! {
+                changed = rx.changed() => {
+                    if changed.is_err() {
+                        return Ok(self.wait_state_snapshot(ids, inactivity_timeout)?.into_result());
+                    }
+                }
+                _ = tokio::time::sleep_until(deadline) => {
+                    let timed_out = self.wait_state_snapshot(ids, inactivity_timeout)?;
+                    if let Some(inactive_id) = timed_out.inactive_id.clone() {
+                        return Ok(timed_out.into_result_with_inactive(inactive_id));
+                    }
+                }
+            }
+        }
+    }
+
     pub(crate) fn wait_state_snapshot(
         &self,
         ids: &[String],
@@ -112,6 +151,10 @@ impl SubagentManager {
 impl WaitStateSnapshot {
     pub(crate) fn is_terminal(&self) -> bool {
         self.completed_id.is_some() || self.failed_id.is_some() || self.cancelled_id.is_some()
+    }
+
+    pub(crate) fn all_terminal(&self) -> bool {
+        self.deadline.is_none() && self.inactive_id.is_none()
     }
 
     pub(crate) fn into_result(self) -> WaitResult {

@@ -100,6 +100,69 @@ async fn wait_returns_cancelled_subagent_immediately() {
     assert!(!result.timed_out_on_inactivity);
 }
 
+#[tokio::test(start_paused = true)]
+async fn wait_all_returns_after_every_id_reaches_a_terminal_state() {
+    let (manager, _rx) = manager(4);
+    manager.register_running_for_test("subagent-1", Duration::from_secs(0));
+    manager.register_running_for_test("subagent-2", Duration::from_secs(0));
+
+    let wait = tokio::spawn({
+        let manager = manager.clone();
+        async move {
+            manager
+                .wait_all(
+                    &["subagent-1".into(), "subagent-2".into()],
+                    Some(Duration::from_secs(30)),
+                )
+                .await
+        }
+    });
+
+    manager.complete_for_test("subagent-1", "done");
+    tokio::task::yield_now().await;
+    assert!(!wait.is_finished());
+
+    manager.fail_for_test("subagent-2", "boom");
+    let result = wait.await.expect("join").expect("wait succeeds");
+
+    assert_eq!(result.completed_id.as_deref(), Some("subagent-1"));
+    assert_eq!(result.failed_id.as_deref(), Some("subagent-2"));
+    assert!(!result.timed_out_on_inactivity);
+    assert!(
+        result
+            .subagents
+            .iter()
+            .all(|snapshot| snapshot.status != SubagentStatus::Running)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn wait_all_reports_inactivity_when_one_id_stalls() {
+    let (manager, _rx) = manager(4);
+    manager.register_running_for_test("subagent-1", Duration::from_secs(0));
+    manager.register_running_for_test("subagent-2", Duration::from_secs(0));
+    manager.complete_for_test("subagent-1", "done");
+
+    let wait = tokio::spawn({
+        let manager = manager.clone();
+        async move {
+            manager
+                .wait_all(
+                    &["subagent-1".into(), "subagent-2".into()],
+                    Some(Duration::from_millis(100)),
+                )
+                .await
+        }
+    });
+
+    advance(Duration::from_millis(101)).await;
+    let result = wait.await.expect("join").expect("wait succeeds");
+
+    assert_eq!(result.completed_id.as_deref(), Some("subagent-1"));
+    assert_eq!(result.inactive_id.as_deref(), Some("subagent-2"));
+    assert!(result.timed_out_on_inactivity);
+}
+
 #[test]
 fn prompt_token_estimate_uses_tokenizer() {
     assert_eq!(

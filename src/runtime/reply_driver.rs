@@ -2,7 +2,7 @@ use anyhow::{Result, anyhow};
 use tokio::{runtime::Runtime, sync::mpsc, task::JoinHandle};
 
 use crate::{
-    app::{App, PendingReplyKind, StreamEvent},
+    app::{App, PendingReplyKind, StreamEvent, ops, query},
     llm::{InteractionResolveResult, LlmService, ResumeRequest},
     stats::StatsStore,
 };
@@ -34,17 +34,15 @@ impl ReplyDriver {
         llm: &LlmService,
         reply_id: u64,
     ) -> bool {
-        if app.active_reply_id() != Some(reply_id) {
+        if query::active_reply_id(app.state()) != Some(reply_id) {
             return false;
         }
 
-        app.main_pending_write_approval_request_id()
+        query::main_pending_write_approval_request_id(app.state())
             .is_some_and(|request_id| llm.can_resolve_write_approval(request_id))
-            || app
-                .main_pending_shell_approval_request_id()
+            || query::main_pending_shell_approval_request_id(app.state())
                 .is_some_and(|request_id| llm.can_resolve_shell_approval(request_id))
-            || app
-                .pending_ask_user()
+            || query::pending_ask_user(app.state())
                 .is_some_and(|pending| llm.can_resolve_ask_user(&pending.request_id))
     }
 
@@ -72,11 +70,11 @@ impl ReplyDriver {
             task.abort();
         }
 
-        let reply_kind = app.active_reply_kind().unwrap_or(PendingReplyKind::Normal);
-        let reply_id = app.ensure_pending_reply(reply_kind);
-        let replay_seed = app.pending_reply_replay_seed();
+        let reply_kind = query::active_reply_kind(app.state()).unwrap_or(PendingReplyKind::Normal);
+        let reply_id = ops::session::ensure_pending_reply(app.state_mut(), reply_kind);
+        let replay_seed = query::pending_reply_replay_seed(app.state());
         let llm = llm.clone();
-        let stats_hook = stats.hook_for_model(app.model_name().to_string());
+        let stats_hook = stats.hook_for_model(query::model_name(app.state()).to_string());
 
         let task = runtime.spawn(async move {
             llm.stream_resumed_prompt(
@@ -109,7 +107,10 @@ impl ReplyDriver {
                 self.resume_interrupted_reply(runtime, app, stats, llm, stream_tx, request)
             }
             InteractionResolveResult::Missing => {
-                app.push_error_message("Write approval request is no longer active.");
+                ops::transcript::push_error_message(
+                    app.state_mut(),
+                    "Write approval request is no longer active.",
+                );
                 Ok(())
             }
         }
@@ -131,7 +132,10 @@ impl ReplyDriver {
                 self.resume_interrupted_reply(runtime, app, stats, llm, stream_tx, request)
             }
             InteractionResolveResult::Missing => {
-                app.push_error_message("Shell approval request is no longer active.");
+                ops::transcript::push_error_message(
+                    app.state_mut(),
+                    "Shell approval request is no longer active.",
+                );
                 Ok(())
             }
         }
@@ -153,14 +157,17 @@ impl ReplyDriver {
                 self.resume_interrupted_reply(runtime, app, stats, llm, stream_tx, request)
             }
             InteractionResolveResult::Missing => {
-                app.push_error_message("AskUser request is no longer active.");
+                ops::transcript::push_error_message(
+                    app.state_mut(),
+                    "AskUser request is no longer active.",
+                );
                 Ok(())
             }
         }
     }
 
     pub(crate) fn require_active_reply_id(app: &App) -> Result<u64> {
-        app.active_reply_id()
+        query::active_reply_id(app.state())
             .ok_or_else(|| anyhow!("Compaction requires an active pending reply."))
     }
 }

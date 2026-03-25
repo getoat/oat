@@ -6,7 +6,7 @@ use tokio::{runtime::Runtime, sync::mpsc};
 use crate::{
     StartupOptions,
     agent::AgentContext,
-    app::{App, StreamEvent},
+    app::{App, StreamEvent, ops, query},
     command_history::CommandHistoryStore,
     config::AppConfig,
     llm::{AskUserController, LlmService, WriteApprovalController},
@@ -43,22 +43,31 @@ pub(crate) fn bootstrap_tui(config: AppConfig, startup: StartupOptions) -> Resul
         startup.access_mode,
         startup.approval_mode,
     );
-    app.set_safety_model_name(config.safety.model_name.clone());
-    app.set_safety_reasoning_effort(config.safety.reasoning_effort);
+    app.state_mut().session.safety_model_name = config.safety.model_name.clone();
+    app.state_mut().session.safety_reasoning_effort = config.safety.reasoning_effort;
     let stats = StatsStore::new();
     let (subagent_tx, subagent_rx) = mpsc::unbounded_channel();
     let subagents =
         SubagentManager::new(config.subagents.max_concurrent, subagent_tx, stats.clone());
     let command_history = CommandHistoryStore::new(config.ui.command_history_limit);
     match command_history.load() {
-        Ok(entries) => app.restore_command_history(entries, config.ui.command_history_limit),
-        Err(error) => app.push_error_message(format!("Failed to load input history: {error}")),
+        Ok(entries) => ops::session::restore_command_history(
+            app.state_mut(),
+            entries,
+            config.ui.command_history_limit,
+        ),
+        Err(error) => {
+            ops::transcript::push_error_message(
+                app.state_mut(),
+                format!("Failed to load input history: {error}"),
+            );
+        }
     }
     let llm = {
         let _guard = runtime.enter();
         LlmService::from_config(
             &config,
-            AgentContext::main(app.mode()),
+            AgentContext::main(query::mode(app.state())),
             WriteApprovalController::new(startup.approval_mode),
             Some(AskUserController::default()),
             Some(subagents.clone()),

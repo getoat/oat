@@ -2,7 +2,11 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{config::ReasoningEffort, model_registry};
+use crate::{
+    config::ReasoningEffort,
+    features::planning::state::{PlanningBrief, PlanningReply, ProposedPlan},
+    model_registry,
+};
 
 pub const PLANNING_READY_START_TAG: &str = "<planning_ready>";
 pub const PLANNING_READY_END_TAG: &str = "</planning_ready>";
@@ -175,31 +179,49 @@ pub fn planning_finalization_prompt(
     )
 }
 
-pub fn extract_planning_ready_brief(text: &str) -> Option<String> {
-    extract_tagged_block(text, PLANNING_READY_START_TAG, PLANNING_READY_END_TAG)
-}
-
-pub fn contains_proposed_plan(text: &str) -> bool {
-    text.contains(PROPOSED_PLAN_START_TAG) && text.contains(PROPOSED_PLAN_END_TAG)
-}
-
-pub fn strip_planning_ready_tags(text: &str) -> String {
-    strip_tag_lines(
-        &strip_tagged_block(text, PLANNING_READY_START_TAG, PLANNING_READY_END_TAG),
-        &[PLANNING_READY_START_TAG, PLANNING_READY_END_TAG],
-    )
-}
-
-pub fn strip_proposed_plan_tags(text: &str) -> String {
-    if let Some(inner) = text
-        .trim()
-        .strip_prefix(PROPOSED_PLAN_START_TAG)
-        .and_then(|rest| rest.strip_suffix(PROPOSED_PLAN_END_TAG))
+pub fn parse_planning_reply(text: &str) -> PlanningReply {
+    if let Some(markdown) =
+        extract_tagged_block(text, PLANNING_READY_START_TAG, PLANNING_READY_END_TAG)
     {
-        return inner.trim_matches('\n').to_string();
+        return PlanningReply::ReadyBrief(PlanningBrief { markdown });
     }
 
-    strip_tag_lines(text, &[PROPOSED_PLAN_START_TAG, PROPOSED_PLAN_END_TAG])
+    if let Some(markdown) =
+        extract_tagged_block(text, PROPOSED_PLAN_START_TAG, PROPOSED_PLAN_END_TAG)
+    {
+        return PlanningReply::ProposedPlan(ProposedPlan {
+            raw_block: format!("{PROPOSED_PLAN_START_TAG}\n{markdown}\n{PROPOSED_PLAN_END_TAG}"),
+            markdown,
+        });
+    }
+
+    PlanningReply::ConversationText(text.to_string())
+}
+
+pub fn planning_reply_visible_text(text: &str) -> String {
+    match parse_planning_reply(text) {
+        PlanningReply::ConversationText(text) => text,
+        PlanningReply::ReadyBrief(_) => String::new(),
+        PlanningReply::ProposedPlan(plan) => plan.markdown,
+    }
+}
+
+pub fn pending_plain_text_is_visible(text: &str) -> bool {
+    if let Some(rest) = text.strip_prefix(PLANNING_READY_START_TAG) {
+        if text.contains(PLANNING_READY_END_TAG) {
+            return false;
+        }
+        return !rest.trim().is_empty();
+    }
+
+    if let Some(rest) = text.strip_prefix(PROPOSED_PLAN_START_TAG) {
+        if text.contains(PROPOSED_PLAN_END_TAG) {
+            return !planning_reply_visible_text(text).trim().is_empty();
+        }
+        return !rest.trim().is_empty();
+    }
+
+    !planning_reply_visible_text(text).trim().is_empty()
 }
 
 fn extract_tagged_block(text: &str, start_tag: &str, end_tag: &str) -> Option<String> {
@@ -207,36 +229,6 @@ fn extract_tagged_block(text: &str, start_tag: &str, end_tag: &str) -> Option<St
     let content_start = start + start_tag.len();
     let end = text[content_start..].find(end_tag)? + content_start;
     Some(text[content_start..end].trim().to_string())
-}
-
-fn strip_tagged_block(text: &str, start_tag: &str, end_tag: &str) -> String {
-    let mut output = String::new();
-    let mut remaining = text;
-
-    while let Some(start) = remaining.find(start_tag) {
-        output.push_str(&remaining[..start]);
-        let after_start = &remaining[start + start_tag.len()..];
-        let Some(end) = after_start.find(end_tag) else {
-            output.push_str(&remaining[start..]);
-            return output;
-        };
-        remaining = &after_start[end + end_tag.len()..];
-    }
-
-    output.push_str(remaining);
-    output
-}
-
-fn strip_tag_lines(text: &str, tags: &[&str]) -> String {
-    let mut stripped = String::new();
-    for raw_line in text.split_inclusive('\n') {
-        let line = raw_line.trim();
-        if tags.contains(&line) {
-            continue;
-        }
-        stripped.push_str(raw_line);
-    }
-    stripped
 }
 
 #[cfg(test)]
@@ -346,44 +338,55 @@ mod tests {
     }
 
     #[test]
-    fn extract_planning_ready_brief_returns_inner_content() {
+    fn parse_planning_reply_returns_inner_content_for_ready_brief() {
         let text = "<planning_ready>\n# Brief\n\nDetails\n</planning_ready>";
         assert_eq!(
-            extract_planning_ready_brief(text),
-            Some("# Brief\n\nDetails".into())
+            parse_planning_reply(text),
+            PlanningReply::ReadyBrief(PlanningBrief {
+                markdown: "# Brief\n\nDetails".into(),
+            })
         );
     }
 
     #[test]
-    fn strip_planning_ready_tags_removes_internal_block() {
-        let text = "Need one more thing.\n<planning_ready>\n# Brief\n</planning_ready>\nDone.";
-        assert_eq!(
-            strip_planning_ready_tags(text),
-            "Need one more thing.\n\nDone."
-        );
-    }
-
-    #[test]
-    fn strip_planning_ready_tags_drops_lone_wrapper_lines() {
-        assert_eq!(strip_planning_ready_tags("<planning_ready>\n"), "");
-    }
-
-    #[test]
-    fn strip_proposed_plan_tags_removes_wrapper_lines() {
+    fn parse_planning_reply_returns_proposed_plan() {
         let text = "<proposed_plan>\n# Plan\n\nDetails\n</proposed_plan>";
-        assert_eq!(strip_proposed_plan_tags(text), "# Plan\n\nDetails");
+        assert_eq!(
+            parse_planning_reply(text),
+            PlanningReply::ProposedPlan(ProposedPlan {
+                markdown: "# Plan\n\nDetails".into(),
+                raw_block: "<proposed_plan>\n# Plan\n\nDetails\n</proposed_plan>".into(),
+            })
+        );
     }
 
     #[test]
-    fn strip_proposed_plan_tags_drops_lone_wrapper_lines() {
-        assert_eq!(strip_proposed_plan_tags("<proposed_plan>\n"), "");
+    fn planning_reply_visible_text_hides_ready_brief() {
+        assert_eq!(
+            planning_reply_visible_text("<planning_ready>\n# Brief\n</planning_ready>"),
+            ""
+        );
     }
 
     #[test]
-    fn contains_proposed_plan_detects_wrapped_plan() {
-        assert!(contains_proposed_plan(
-            "<proposed_plan>\n# Title\n</proposed_plan>"
+    fn pending_plain_text_is_visible_hides_complete_ready_brief() {
+        assert!(!pending_plain_text_is_visible(
+            "<planning_ready>\n# Brief\n</planning_ready>"
         ));
-        assert!(!contains_proposed_plan("# Title"));
+    }
+
+    #[test]
+    fn pending_plain_text_is_visible_shows_partial_ready_brief_content_only_after_text() {
+        assert!(!pending_plain_text_is_visible("<planning_ready>\n"));
+        assert!(pending_plain_text_is_visible(
+            "<planning_ready>\n# Brief\nStill drafting"
+        ));
+    }
+
+    #[test]
+    fn pending_plain_text_is_visible_shows_proposed_plan_content_once_complete() {
+        assert!(pending_plain_text_is_visible(
+            "<proposed_plan>\n# Plan\nShip it\n</proposed_plan>"
+        ));
     }
 }

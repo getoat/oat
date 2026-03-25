@@ -1,6 +1,4 @@
-use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
-
-use tokio::time::sleep;
+use std::{future::Future, pin::Pin, sync::Arc};
 
 use crate::{
     app::ApprovalMode,
@@ -117,38 +115,46 @@ async fn collect_planning_batch_results(
     subagents: &SubagentManager,
     batch_ids: Vec<(PlanningJob, String)>,
 ) -> (Vec<(PlanningJob, String)>, Vec<String>) {
-    let mut pending = batch_ids;
+    let ids = batch_ids
+        .iter()
+        .map(|(_, id)| id.clone())
+        .collect::<Vec<_>>();
+    let wait_result = match subagents.wait_all(&ids, None).await {
+        Ok(result) => result,
+        Err(_) => {
+            return (
+                Vec::new(),
+                batch_ids
+                    .into_iter()
+                    .map(|(job, _)| job.model_name)
+                    .collect::<Vec<_>>(),
+            );
+        }
+    };
+    let snapshots = wait_result
+        .subagents
+        .into_iter()
+        .map(|snapshot| (snapshot.id.clone(), snapshot))
+        .collect::<std::collections::HashMap<_, _>>();
     let mut successful = Vec::new();
     let mut failed = Vec::new();
 
-    while !pending.is_empty() {
-        let mut next_pending = Vec::new();
-
-        for (job, id) in pending {
-            match subagents.inspect(&id) {
-                Ok(snapshot) => match snapshot.status {
-                    SubagentStatus::Running => next_pending.push((job, id)),
-                    SubagentStatus::Completed => {
-                        if let Some(output) = snapshot.output {
-                            successful.push((job, output));
-                        } else {
-                            failed.push(job.model_name);
-                        }
+    for (job, id) in batch_ids {
+        match snapshots.get(&id) {
+            Some(snapshot) => match snapshot.status {
+                SubagentStatus::Completed => {
+                    if let Some(output) = snapshot.output.clone() {
+                        successful.push((job, output));
+                    } else {
+                        failed.push(job.model_name);
                     }
-                    SubagentStatus::Failed | SubagentStatus::Cancelled => {
-                        failed.push(job.model_name)
-                    }
-                },
-                Err(_) => failed.push(job.model_name),
-            }
+                }
+                SubagentStatus::Failed | SubagentStatus::Cancelled | SubagentStatus::Running => {
+                    failed.push(job.model_name)
+                }
+            },
+            None => failed.push(job.model_name),
         }
-
-        if next_pending.is_empty() {
-            break;
-        }
-
-        pending = next_pending;
-        sleep(Duration::from_millis(100)).await;
     }
 
     (successful, failed)

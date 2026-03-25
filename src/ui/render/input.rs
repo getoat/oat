@@ -6,7 +6,10 @@ use ratatui::{
     widgets::{Block, Borders, Padding, Paragraph},
 };
 
-use crate::{app::App, ui::wrap::wrap_text};
+use crate::{
+    app::{App, ops, query},
+    ui::wrap::wrap_text,
+};
 
 use super::{
     approvals::{render_shell_approval_prompt, render_write_approval_prompt},
@@ -16,22 +19,22 @@ use super::{
 };
 
 pub(super) fn render_input(frame: &mut Frame, app: &mut App, area: Rect, accent: Color) {
-    if let Some(pending) = app.pending_write_approval() {
+    if let Some(pending) = query::pending_write_approval(app.state()) {
         render_write_approval_prompt(frame, pending, area, accent);
         return;
     }
 
-    if app.has_pending_shell_approval() {
+    if query::has_pending_shell_approval(app.state()) {
         render_shell_approval_prompt(frame, app, area, accent);
         return;
     }
 
-    if app.has_pending_ask_user() {
+    if query::has_pending_ask_user(app.state()) {
         render_ask_user_prompt(frame, app, area, accent);
         return;
     }
 
-    if app.plan_review_selection_active() {
+    if query::plan_review_selection_active(app.state()) {
         render_plan_review_prompt(frame, app, area, accent);
         return;
     }
@@ -40,21 +43,21 @@ pub(super) fn render_input(frame: &mut Frame, app: &mut App, area: Rect, accent:
         .borders(Borders::ALL)
         .padding(Padding::horizontal(1))
         .border_style(Style::default().fg(accent));
-    app.set_composer_wrap_width(composer_content_width(area.width));
+    ops::composer::set_composer_wrap_width(app.state_mut(), composer_content_width(area.width));
     let paragraph = Paragraph::new(render_composer_lines(app, accent)).block(block);
     frame.render_widget(paragraph, area);
 }
 
 fn render_composer_lines(app: &mut App, accent: Color) -> Vec<Line<'static>> {
     let show_placeholder = {
-        let composer = app.composer();
+        let composer = query::composer(app.state());
         composer.lines() == [String::new()] && !composer.placeholder_text().is_empty()
     };
     if show_placeholder {
-        let placeholder = app.composer().placeholder_text().to_owned();
+        let placeholder = query::composer(app.state()).placeholder_text().to_owned();
         let placeholder_style = Style::default().fg(Color::DarkGray);
         let cursor_style = Style::default().bg(accent).fg(Color::Black);
-        let content_width = app.composer_wrap_width();
+        let content_width = app.ui.composer.wrap_width;
         let placeholder_rows = if content_width <= 1 {
             vec![String::new()]
         } else {
@@ -78,10 +81,10 @@ fn render_composer_lines(app: &mut App, accent: Color) -> Vec<Line<'static>> {
         return lines;
     }
 
-    let cursor_position = app.composer().cursor();
-    let base_style = app.composer().style();
+    let cursor_position = query::composer(app.state()).cursor();
+    let base_style = query::composer(app.state()).style();
     let (rows, cursor) = {
-        let layout = app.composer_layout();
+        let layout = ops::composer::composer_layout(app.state_mut());
         (layout.rows().to_vec(), layout.cursor_state(cursor_position))
     };
     let cursor_style = Style::default().bg(accent).fg(Color::Black);
@@ -92,7 +95,7 @@ fn render_composer_lines(app: &mut App, accent: Color) -> Vec<Line<'static>> {
             .filter(|state| state.row_index == index)
             .map(|state| state.visual_col);
         lines.push(render_composer_row(
-            &app.composer().lines()[row.line_index],
+            &query::composer(app.state()).lines()[row.line_index],
             row.start_col,
             row.end_col,
             cursor_col,

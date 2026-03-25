@@ -1,8 +1,8 @@
 use crate::{app::session::SlashCommand, composer::ComposerLayout};
 
 use super::{
-    AskUserUiState, ComposerUiState, HistoryRenderCache, HistoryViewState, SelectionPicker,
-    ShellApprovalUiState,
+    AskUserUiState, CommandRecallState, ComposerUiState, HistoryRenderCache, HistoryViewState,
+    SelectionPicker, ShellApprovalUiState,
 };
 
 #[derive(Debug)]
@@ -15,6 +15,7 @@ pub struct UiState {
     pub pending_ask_user: Option<AskUserUiState>,
     pub history_render_cache: Option<HistoryRenderCache>,
     pub history: HistoryViewState,
+    pub command_history: CommandRecallState,
 }
 
 impl Default for UiState {
@@ -28,6 +29,10 @@ impl Default for UiState {
             pending_ask_user: None,
             history_render_cache: None,
             history: HistoryViewState::default(),
+            command_history: CommandRecallState {
+                limit: 20,
+                ..CommandRecallState::default()
+            },
         }
     }
 }

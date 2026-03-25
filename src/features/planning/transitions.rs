@@ -3,6 +3,8 @@ use super::state::{PlanReviewState, PlanningFeatureState, PlanningStage};
 pub fn enter_draft(state: &mut PlanningFeatureState) {
     state.stage = PlanningStage::Drafting;
     state.review = None;
+    state.normalized_brief = None;
+    state.proposed_plan = None;
 }
 
 pub fn cancel_draft(state: &mut PlanningFeatureState) {

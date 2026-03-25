@@ -6,14 +6,14 @@ use ratatui::{
     widgets::{Block, Borders, Padding, Paragraph, Wrap},
 };
 
-use crate::app::{App, ModelPickerTab, SelectionPicker};
+use crate::app::{App, ModelPickerTab, SelectionPicker, query};
 
 use super::helpers::{
     command_palette_line, model_picker_detail, model_picker_tab_line, selection_picker_line,
 };
 
 pub(super) fn render_overlay(frame: &mut Frame, app: &App, area: Rect, accent: Color) {
-    if let Some(picker) = app.selection_picker() {
+    if let Some(picker) = query::selection_picker(app.state()) {
         render_selection_picker(frame, app, picker, area, accent);
     } else {
         render_command_palette(frame, app, area, accent);
@@ -22,8 +22,8 @@ pub(super) fn render_overlay(frame: &mut Frame, app: &App, area: Rect, accent: C
 
 fn render_command_palette(frame: &mut Frame, app: &App, area: Rect, accent: Color) {
     let visible_rows = area.height.saturating_sub(2) as usize;
-    let commands = app.filtered_commands();
-    let selected = app.selected_command();
+    let commands = query::filtered_commands(app.state());
+    let selected = query::selected_command(app.state());
     let lines = if commands.is_empty() {
         vec![Line::from(Span::styled(
             "No matching commands",
@@ -87,12 +87,11 @@ fn render_selection_picker(
                     lines.extend(
                         crate::model_registry::models()
                             .iter()
-                            .filter(|model| model.name != app.model_name())
+                            .filter(|model| model.name != query::model_name(app.state()))
                             .take(row_budget)
                             .enumerate()
                             .map(|(index, model)| {
-                                let planning_agent = app
-                                    .planning_agents()
+                                let planning_agent = query::planning_agents(app.state())
                                     .iter()
                                     .find(|agent| agent.model_name == model.name);
                                 let detail = planning_agent
@@ -121,10 +120,11 @@ fn render_selection_picker(
                             .take(row_budget)
                             .enumerate()
                             .map(|(index, model)| {
-                                let detail = if app.safety_model_name() == model.name {
+                                let detail = if query::safety_model_name(app.state()) == model.name
+                                {
                                     format!(
                                         "selected  effort: {}",
-                                        app.safety_reasoning_effort().as_str()
+                                        query::safety_reasoning_effort(app.state()).as_str()
                                     )
                                 } else {
                                     "Enter sets effort".into()

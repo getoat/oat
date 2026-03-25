@@ -2,7 +2,7 @@ use std::error::Error;
 
 use crate::{
     Tui,
-    app::{Action, StreamEvent},
+    app::{Action, StreamEvent, ops, query},
     input, ui,
 };
 
@@ -18,7 +18,7 @@ pub(crate) fn run_with_options(
 ) -> Result<(), Box<dyn Error>> {
     let mut state = bootstrap_tui(config, startup)?;
 
-    while !state.app.should_quit() {
+    while !query::should_quit(state.app.state()) {
         while let Ok((reply_id, event)) = state.stream_rx.try_recv() {
             state.reply_driver.clear_completed_task(reply_id, &event);
             if matches!(&event, StreamEvent::Failed(_))
@@ -41,9 +41,10 @@ pub(crate) fn run_with_options(
                     subagents: &state.subagents,
                 };
                 if let Err(error) = runner.run(effect) {
-                    state
-                        .app
-                        .push_error_message(format!("Command failed: {error}"));
+                    ops::transcript::push_error_message(
+                        state.app.state_mut(),
+                        format!("Command failed: {error}"),
+                    );
                 }
             }
             persist_command_history_if_needed(&mut state.app, &state.command_history);
@@ -53,21 +54,21 @@ pub(crate) fn run_with_options(
             persist_command_history_if_needed(&mut state.app, &state.command_history);
         }
 
-        state.app.set_session_stats(state.stats.current_totals());
+        state.app.state_mut().session.session_stats = state.stats.current_totals();
         terminal.draw(|frame| ui::render(frame, &mut state.app))?;
 
         let timeout = state.tick_rate.saturating_sub(state.last_tick.elapsed());
         if crossterm::event::poll(timeout)?
             && let Some(action) = input::map_event_with_shell_editor_state(
                 crossterm::event::read()?,
-                state.app.has_pending_write_approval(),
-                state.app.has_pending_shell_approval(),
-                state.app.shell_approval_editing(),
-                state.app.shell_approval_editor_can_move_up(),
-                state.app.shell_approval_editor_can_move_down(),
-                state.app.has_pending_ask_user(),
-                state.app.selection_picker_visible(),
-                state.app.plan_review_selection_active(),
+                query::has_pending_write_approval(state.app.state()),
+                query::has_pending_shell_approval(state.app.state()),
+                query::shell_approval_editing(state.app.state()),
+                query::shell_approval_editor_can_move_up(state.app.state()),
+                query::shell_approval_editor_can_move_down(state.app.state()),
+                query::has_pending_ask_user(state.app.state()),
+                query::selection_picker_visible(state.app.state()),
+                query::plan_review_selection_active(state.app.state()),
             )
             && let Some(effect) = state.app.apply(action)
         {
@@ -83,9 +84,10 @@ pub(crate) fn run_with_options(
                 subagents: &state.subagents,
             };
             if let Err(error) = runner.run(effect) {
-                state
-                    .app
-                    .push_error_message(format!("Command failed: {error}"));
+                ops::transcript::push_error_message(
+                    state.app.state_mut(),
+                    format!("Command failed: {error}"),
+                );
             }
             persist_command_history_if_needed(&mut state.app, &state.command_history);
         } else {

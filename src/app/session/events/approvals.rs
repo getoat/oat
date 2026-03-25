@@ -1,15 +1,14 @@
 use super::super::{Effect, WriteApprovalDecision};
-use crate::app::ReducerContext;
+use crate::app::{AppState, ops};
 
-pub(in crate::app::session) fn apply_write_approval(
-    ctx: &mut ReducerContext<'_>,
+pub(crate) fn apply_write_approval(
+    state: &mut AppState,
     decision: WriteApprovalDecision,
 ) -> Option<String> {
-    ctx.resolve_write_approval(decision)
-        .map(|pending| pending.request_id)
+    ops::approvals::resolve_write_approval(state, decision).map(|pending| pending.request_id)
 }
 
-pub(in crate::app::session) fn resolve_write_approval(
+pub(crate) fn resolve_write_approval(
     request_id: Option<String>,
     decision: WriteApprovalDecision,
 ) -> Option<Effect> {

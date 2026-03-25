@@ -2,7 +2,6 @@ use crate::{config::ReasoningEffort, model_registry};
 
 use super::{
     MessageStyle, PendingReplyKind, SessionState, TranscriptEntry, startup_banner_message,
-    transcript,
 };
 
 pub fn shows_startup_banner(session: &SessionState) -> bool {
@@ -16,10 +15,6 @@ pub fn shows_startup_banner(session: &SessionState) -> bool {
                 text,
             })) if text == &startup_banner_message(&session.model_name, session.initial_mode)
         )
-}
-
-pub fn latest_proposed_plan_message(session: &SessionState) -> Option<&str> {
-    transcript::latest_proposed_plan_message(&session.entries)
 }
 
 pub fn has_visible_pending_content(session: &SessionState) -> bool {

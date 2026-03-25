@@ -1,9 +1,4 @@
-use crate::{
-    features::planning::{
-        contains_proposed_plan, strip_planning_ready_tags, strip_proposed_plan_tags,
-    },
-    tools::MutationPreview,
-};
+use crate::{features::planning::pending_plain_text_is_visible, tools::MutationPreview};
 
 use super::models::{AccessMode, Speaker};
 
@@ -35,6 +30,12 @@ pub struct ToolResultEntry {
     pub output: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProposedPlanEntry {
+    pub markdown: String,
+    pub raw_block: String,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SubagentStatusKind {
     Subagent,
@@ -62,6 +63,7 @@ pub struct SubagentStatusEntry {
 #[derive(Clone, Debug)]
 pub enum TranscriptEntry {
     Message(ChatMessage),
+    ProposedPlan(ProposedPlanEntry),
     ToolCall(ToolCall),
     ToolResult(ToolResultEntry),
     SubagentStatus(SubagentStatusEntry),
@@ -128,20 +130,8 @@ pub fn startup_banner_message(model_name: &str, mode: AccessMode) -> String {
 
 pub fn pending_stream_text_is_visible(style: MessageStyle, text: &str) -> bool {
     match style {
-        MessageStyle::Plain => {
-            let visible_text = strip_planning_ready_tags(&strip_proposed_plan_tags(text));
-            !visible_text.trim().is_empty()
-        }
+        MessageStyle::Plain => pending_plain_text_is_visible(text),
         MessageStyle::Commentary | MessageStyle::Thinking => !text.trim().is_empty(),
         MessageStyle::Error => false,
     }
-}
-
-pub fn latest_proposed_plan_message(entries: &[TranscriptEntry]) -> Option<&str> {
-    entries.iter().rev().find_map(|entry| match entry {
-        TranscriptEntry::Message(message) if contains_proposed_plan(&message.text) => {
-            Some(message.text.as_str())
-        }
-        _ => None,
-    })
 }

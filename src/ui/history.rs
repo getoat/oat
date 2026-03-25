@@ -6,8 +6,10 @@ use ratatui::{
     widgets::Paragraph,
 };
 
+use crate::app::session::ProposedPlanEntry;
 use crate::app::{
-    App, ChatMessage, MessageStyle, SubagentStatusEntry, ToolCall, ToolResultEntry, TranscriptEntry,
+    App, ChatMessage, MessageStyle, SubagentStatusEntry, ToolCall, ToolResultEntry,
+    TranscriptEntry, query,
 };
 
 use super::{
@@ -32,6 +34,7 @@ const STARTUP_BANNER_LINES: [&str; 7] = [
 #[derive(Clone, Copy)]
 enum VisibleEntry<'a> {
     Message(&'a ChatMessage),
+    ProposedPlan(&'a ProposedPlanEntry),
     ToolCall(&'a ToolCall),
     ToolResult(&'a ToolResultEntry),
     SubagentStatus(&'a SubagentStatusEntry),
@@ -67,18 +70,32 @@ pub(super) fn render_history(
     };
     let content_area = history_layout[0];
     let content_width = content_area.width as usize;
-    let use_cache = app.history_cache_allowed();
+    let use_cache = !query::shows_startup_banner_state(app.state())
+        && !query::should_show_history_busy_indicator_state(app.state());
     let mut owned_lines = None;
     let total_lines = if use_cache {
-        if app.cached_history_lines(content_width, accent).is_none() {
+        let cache_missing = app.ui.history_render_cache.as_ref().is_none_or(|cache| {
+            cache.width != content_width
+                || cache.accent != accent
+                || cache.transcript_revision != app.session.transcript_revision
+        });
+        if cache_missing {
             let lines = build_history_lines(app, content_width, accent, loading_frame);
-            app.store_history_render_cache(content_width, accent, lines);
+            app.ui.history_render_cache = Some(crate::app::ui::HistoryRenderCache {
+                width: content_width,
+                accent,
+                transcript_revision: app.session.transcript_revision,
+                lines,
+            });
         }
-        app.cached_history_lines(content_width, accent)
+        app.ui
+            .history_render_cache
+            .as_ref()
             .expect("history cache should be populated")
+            .lines
             .len()
     } else {
-        app.clear_history_render_cache();
+        app.ui.history_render_cache = None;
         owned_lines = Some(build_history_lines(
             app,
             content_width,
@@ -88,11 +105,15 @@ pub(super) fn render_history(
         owned_lines.as_ref().expect("owned history lines").len()
     };
     let visible_count = content_area.height as usize;
-    let start = app.sync_history_viewport(total_lines, visible_count);
+    let start = app.ui.history.sync_viewport(total_lines, visible_count);
     let mut visible_lines = if use_cache {
         let lines = app
-            .cached_history_lines(content_width, accent)
-            .expect("history cache should be populated");
+            .ui
+            .history_render_cache
+            .as_ref()
+            .expect("history cache should be populated")
+            .lines
+            .as_slice();
         history_viewport_lines(lines, start, visible_count)
     } else {
         history_viewport_lines(
@@ -108,11 +129,13 @@ pub(super) fn render_history(
         .iter()
         .map(rendered_line_text)
         .collect::<Vec<_>>();
-    app.update_history_snapshot(content_area, history_snapshot);
+    app.ui
+        .history
+        .update_snapshot(content_area, history_snapshot);
     apply_history_selection_highlight(&mut visible_lines, app, accent);
     frame.render_widget(Paragraph::new(visible_lines), content_area);
 
-    if show_scrollbar && app.history_total_lines() > app.history_viewport_rows() {
+    if show_scrollbar && app.ui.history.total_lines() > app.ui.history.viewport_rows() {
         render_history_scrollbar(frame, history_layout[1], app, accent);
     }
 }
@@ -124,8 +147,8 @@ fn build_history_lines(
     loading_frame: &str,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
-    if app.shows_startup_banner() {
-        push_startup_banner_lines(&mut lines, accent, app.tick_count());
+    if query::shows_startup_banner_state(app.state()) {
+        push_startup_banner_lines(&mut lines, accent, app.session.tick_count);
         lines.push(Line::default());
     }
     let visible_entries = visible_entries(app);
@@ -144,13 +167,13 @@ fn build_history_lines(
         index += 1;
     }
 
-    if app.should_show_history_busy_indicator() {
+    if query::should_show_history_busy_indicator_state(app.state()) {
         push_pending_lines(
             &mut lines,
             width,
             accent,
             loading_frame,
-            app.history_pending_status_label(),
+            query::history_pending_status_label_state(app.state()),
         );
     }
 
@@ -205,7 +228,7 @@ fn history_viewport_lines(
 fn apply_history_selection_highlight(lines: &mut [Line<'static>], app: &App, accent: Color) {
     let highlight = Style::default().bg(accent);
     for (row, line) in lines.iter_mut().enumerate() {
-        if let Some((start, end)) = app.history_selection_span_for_row(row) {
+        if let Some((start, end)) = app.ui.history.selection_span_for_row(row) {
             *line = highlight_line_range(line.clone(), start, end, highlight);
         }
     }
@@ -273,9 +296,9 @@ fn slice_chars(text: &str, start: usize, end: usize) -> String {
 fn render_history_scrollbar(frame: &mut Frame, area: Rect, app: &App, accent: Color) {
     let (thumb_start, thumb_len) = scrollbar_thumb_bounds(
         area.height as usize,
-        app.history_total_lines(),
-        app.history_viewport_rows(),
-        app.history_scroll_position(),
+        app.ui.history.total_lines(),
+        app.ui.history.viewport_rows(),
+        app.ui.history.scroll_position(),
     );
 
     let lines = (0..area.height as usize)
@@ -292,13 +315,13 @@ fn render_history_scrollbar(frame: &mut Frame, area: Rect, app: &App, accent: Co
 }
 
 fn visible_entries(app: &App) -> Vec<VisibleEntry<'_>> {
-    app.entries()
+    query::entries(app.state())
         .iter()
         .filter_map(|entry| match entry {
             TranscriptEntry::Message(message) => Some(VisibleEntry::Message(message)),
+            TranscriptEntry::ProposedPlan(plan) => Some(VisibleEntry::ProposedPlan(plan)),
             TranscriptEntry::ToolCall(tool_call) => Some(VisibleEntry::ToolCall(tool_call)),
-            TranscriptEntry::ToolResult(tool_result) => app
-                .show_tool_output()
+            TranscriptEntry::ToolResult(tool_result) => query::show_tool_output(app.state())
                 .then_some(VisibleEntry::ToolResult(tool_result)),
             TranscriptEntry::SubagentStatus(status) => Some(VisibleEntry::SubagentStatus(status)),
         })
@@ -325,6 +348,14 @@ fn push_visible_entry_lines(
                 lines.push(commentary_separator_line(width));
             }
             push_message_lines(lines, message, width, accent);
+        }
+        VisibleEntry::ProposedPlan(plan) => {
+            let message = ChatMessage {
+                speaker: crate::app::Speaker::Agent,
+                text: plan.markdown.clone(),
+                style: MessageStyle::Plain,
+            };
+            push_message_lines(lines, &message, width, accent);
         }
         VisibleEntry::ToolCall(tool_call) => push_tool_call_lines(lines, tool_call, width),
         VisibleEntry::ToolResult(tool_result) => push_tool_result_lines(lines, tool_result, width),
@@ -363,6 +394,7 @@ fn push_tool_activity_run_lines(
             VisibleEntry::SubagentStatus(status) => {
                 push_subagent_status_lines(lines, status, width)
             }
+            VisibleEntry::ProposedPlan(_) => {}
             VisibleEntry::Message(_) => {}
         }
         lines.push(Line::default());

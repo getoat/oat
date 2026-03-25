@@ -1,11 +1,8 @@
 use super::super::{SubagentDisplayState, SubagentStatusKind, TranscriptEntry};
-use crate::app::ReducerContext;
+use crate::app::{AppState, ops};
 use crate::subagents::{SubagentActivityKind, SubagentUiEvent};
 
-pub(in crate::app::session) fn on_subagent_event(
-    ctx: &mut ReducerContext<'_>,
-    event: SubagentUiEvent,
-) {
+pub(crate) fn on_subagent_event(state: &mut AppState, event: SubagentUiEvent) {
     match event {
         SubagentUiEvent::Spawned {
             id,
@@ -19,7 +16,8 @@ pub(in crate::app::session) fn on_subagent_event(
                     format!("Planning with {model_name}"),
                 ),
             };
-            ctx.upsert_subagent_status(
+            ops::transcript::upsert_subagent_status(
+                state,
                 id,
                 kind,
                 display_label,
@@ -35,11 +33,11 @@ pub(in crate::app::session) fn on_subagent_event(
             latest_tool_name,
         } => {
             if let Some(latest_tool_name) = latest_tool_name {
-                ctx.set_subagent_latest_tool(id, latest_tool_name);
+                ops::transcript::set_subagent_latest_tool(state, id, latest_tool_name);
             }
         }
         SubagentUiEvent::Completed { id } => {
-            let existing = ctx
+            let existing = state
                 .session
                 .entries
                 .iter()
@@ -50,7 +48,8 @@ pub(in crate::app::session) fn on_subagent_event(
                     _ => None,
                 })
                 .unwrap_or((SubagentStatusKind::Subagent, id.clone()));
-            ctx.upsert_subagent_status(
+            ops::transcript::upsert_subagent_status(
+                state,
                 id,
                 existing.0,
                 existing.1,
@@ -63,7 +62,7 @@ pub(in crate::app::session) fn on_subagent_event(
             error,
             log_path,
         } => {
-            let existing = ctx
+            let existing = state
                 .session
                 .entries
                 .iter()
@@ -74,7 +73,8 @@ pub(in crate::app::session) fn on_subagent_event(
                     _ => None,
                 })
                 .unwrap_or((SubagentStatusKind::Subagent, id.clone()));
-            ctx.upsert_subagent_status(
+            ops::transcript::upsert_subagent_status(
+                state,
                 id.clone(),
                 existing.0,
                 existing.1,
@@ -85,10 +85,13 @@ pub(in crate::app::session) fn on_subagent_event(
                 .as_deref()
                 .map(|path| format!(" Logged request to `{path}`."))
                 .unwrap_or_default();
-            ctx.push_error_message(format!("Subagent `{id}` failed: {error}{suffix}"));
+            ops::transcript::push_error_message(
+                state,
+                format!("Subagent `{id}` failed: {error}{suffix}"),
+            );
         }
         SubagentUiEvent::Cancelled { id } => {
-            let existing = ctx
+            let existing = state
                 .session
                 .entries
                 .iter()
@@ -99,7 +102,8 @@ pub(in crate::app::session) fn on_subagent_event(
                     _ => None,
                 })
                 .unwrap_or((SubagentStatusKind::Subagent, id.clone()));
-            ctx.upsert_subagent_status(
+            ops::transcript::upsert_subagent_status(
+                state,
                 id,
                 existing.0,
                 existing.1,
@@ -113,7 +117,9 @@ pub(in crate::app::session) fn on_subagent_event(
             tool_name,
             arguments,
         } => {
-            ctx.begin_subagent_write_approval(id, request_id, tool_name, arguments);
+            ops::approvals::begin_subagent_write_approval(
+                state, id, request_id, tool_name, arguments,
+            );
         }
         SubagentUiEvent::ShellApprovalRequested {
             id,
@@ -124,7 +130,8 @@ pub(in crate::app::session) fn on_subagent_event(
             working_directory,
             reason,
         } => {
-            ctx.begin_subagent_shell_approval(
+            ops::approvals::begin_subagent_shell_approval(
+                state,
                 id,
                 request_id,
                 risk,

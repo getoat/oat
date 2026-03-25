@@ -7,7 +7,7 @@ use tokio::{runtime::Runtime, sync::mpsc};
 use crate::{
     Tui,
     agent::AgentContext,
-    app::{self, App, Effect, StreamEvent},
+    app::{self, App, Effect, StreamEvent, query},
     config::AppConfig,
     features::planning::run_planning_workflow,
     features::planning::sanitize_planning_agents,
@@ -41,7 +41,9 @@ impl EffectExecutor<'_> {
             } => {
                 self.reply_driver.cancel_active_reply(self.llm);
                 let llm = self.llm.clone();
-                let stats_hook = self.stats.hook_for_model(self.app.model_name().to_string());
+                let stats_hook = self
+                    .stats
+                    .hook_for_model(query::model_name(self.app.state()).to_string());
                 let stream_tx = self.stream_tx.clone();
                 let task = self.runtime.spawn(async move {
                     llm.stream_prompt(
@@ -60,8 +62,9 @@ impl EffectExecutor<'_> {
             Effect::CompactHistory => {
                 self.reply_driver.cancel_active_reply(self.llm);
                 let llm = self.llm.clone();
-                let history = self.app.session_history().to_vec();
-                let history_model_name = self.app.last_history_model_name().map(str::to_string);
+                let history = query::session_history(self.app.state()).to_vec();
+                let history_model_name =
+                    query::last_history_model_name(self.app.state()).map(str::to_string);
                 let stream_tx = self.stream_tx.clone();
                 let reply_id = ReplyDriver::require_active_reply_id(self.app)?;
                 let task = self.runtime.spawn(async move {
@@ -81,7 +84,10 @@ impl EffectExecutor<'_> {
                 Ok(())
             }
             Effect::ShowStats => {
-                self.app.push_agent_message(self.stats.report()?.render());
+                app::ops::transcript::push_agent_message(
+                    self.app.state_mut(),
+                    self.stats.report()?.render(),
+                );
                 Ok(())
             }
             Effect::RotateSession => {
@@ -92,58 +98,70 @@ impl EffectExecutor<'_> {
                 Ok(())
             }
             Effect::SetModelSelection { model_name } => {
-                let reasoning_effort =
-                    app::compatible_reasoning_effort(&model_name, self.app.reasoning_effort());
+                let reasoning_effort = app::compatible_reasoning_effort(
+                    &model_name,
+                    query::reasoning_effort(self.app.state()),
+                );
                 let planning_agents =
-                    sanitize_planning_agents(&model_name, self.app.planning_agents());
+                    sanitize_planning_agents(&model_name, query::planning_agents(self.app.state()));
                 let updated_config = AppConfig::set_default_model_selection_with_planning(
                     &model_name,
                     reasoning_effort,
                     &planning_agents,
                 )?;
-                let rebuilt = self.rebuild_llm(&updated_config, self.app.mode())?;
+                let rebuilt = self.rebuild_llm(&updated_config, query::mode(self.app.state()))?;
                 *self.config = updated_config;
                 *self.llm = rebuilt;
-                self.app.set_model_name(model_name.clone());
-                self.app.set_reasoning_effort(reasoning_effort);
-                self.app
-                    .set_safety_model_name(self.config.safety.model_name.clone());
-                self.app
-                    .set_safety_reasoning_effort(self.config.safety.reasoning_effort);
-                self.app.set_planning_agents(planning_agents);
-                self.app.open_reasoning_picker();
-                self.app.push_agent_message(format!(
-                    "Model set to `{}` and saved to the active config. Select a reasoning effort.",
-                    model_name
-                ));
+                self.app.state_mut().session.model_name = model_name.clone();
+                self.app.state_mut().session.reasoning_effort = reasoning_effort;
+                self.app.state_mut().session.safety_model_name =
+                    self.config.safety.model_name.clone();
+                self.app.state_mut().session.safety_reasoning_effort =
+                    self.config.safety.reasoning_effort;
+                self.app.state_mut().session.planning_agents = planning_agents;
+                app::ops::picker::open_reasoning_picker(self.app.state_mut());
+                app::ops::transcript::push_agent_message(
+                    self.app.state_mut(),
+                    format!(
+                        "Model set to `{}` and saved to the active config. Select a reasoning effort.",
+                        model_name
+                    ),
+                );
                 Ok(())
             }
             Effect::SetReasoningEffort { reasoning_effort } => {
                 let updated_config = AppConfig::set_default_reasoning_effort(reasoning_effort)?;
-                let rebuilt = self.rebuild_llm(&updated_config, self.app.mode())?;
+                let rebuilt = self.rebuild_llm(&updated_config, query::mode(self.app.state()))?;
                 *self.config = updated_config;
                 *self.llm = rebuilt;
-                self.app.set_reasoning_effort(reasoning_effort);
-                self.app
-                    .set_safety_model_name(self.config.safety.model_name.clone());
-                self.app
-                    .set_safety_reasoning_effort(self.config.safety.reasoning_effort);
-                self.app.push_agent_message(format!(
-                    "Reasoning effort set to `{}` for model `{}` and saved to the active config.",
-                    reasoning_effort.as_str(),
-                    self.app.model_name()
-                ));
+                self.app.state_mut().session.reasoning_effort = reasoning_effort;
+                self.app.state_mut().session.safety_model_name =
+                    self.config.safety.model_name.clone();
+                self.app.state_mut().session.safety_reasoning_effort =
+                    self.config.safety.reasoning_effort;
+                let model_name = query::model_name(self.app.state()).to_string();
+                app::ops::transcript::push_agent_message(
+                    self.app.state_mut(),
+                    format!(
+                        "Reasoning effort set to `{}` for model `{}` and saved to the active config.",
+                        reasoning_effort.as_str(),
+                        model_name
+                    ),
+                );
                 Ok(())
             }
             Effect::SetPlanningAgents { planning_agents } => {
                 let updated_config = AppConfig::set_default_planning_agents(&planning_agents)?;
                 *self.config = updated_config;
-                self.app.set_planning_agents(planning_agents.clone());
-                self.app.push_agent_message(format!(
-                    "Saved {} planning agent{} to the active config.",
-                    planning_agents.len(),
-                    if planning_agents.len() == 1 { "" } else { "s" }
-                ));
+                self.app.state_mut().session.planning_agents = planning_agents.clone();
+                app::ops::transcript::push_agent_message(
+                    self.app.state_mut(),
+                    format!(
+                        "Saved {} planning agent{} to the active config.",
+                        planning_agents.len(),
+                        if planning_agents.len() == 1 { "" } else { "s" }
+                    ),
+                );
                 Ok(())
             }
             Effect::SetSafetySelection {
@@ -152,16 +170,19 @@ impl EffectExecutor<'_> {
             } => {
                 let updated_config =
                     AppConfig::set_default_safety_selection(&model_name, reasoning_effort)?;
-                let rebuilt = self.rebuild_llm(&updated_config, self.app.mode())?;
+                let rebuilt = self.rebuild_llm(&updated_config, query::mode(self.app.state()))?;
                 *self.config = updated_config;
                 *self.llm = rebuilt;
-                self.app.set_safety_model_name(model_name.clone());
-                self.app.set_safety_reasoning_effort(reasoning_effort);
-                self.app.push_agent_message(format!(
-                    "Safety model set to `{}` with `{}` reasoning and saved to the active config.",
-                    model_name,
-                    reasoning_effort.as_str()
-                ));
+                self.app.state_mut().session.safety_model_name = model_name.clone();
+                self.app.state_mut().session.safety_reasoning_effort = reasoning_effort;
+                app::ops::transcript::push_agent_message(
+                    self.app.state_mut(),
+                    format!(
+                        "Safety model set to `{}` with `{}` reasoning and saved to the active config.",
+                        model_name,
+                        reasoning_effort.as_str()
+                    ),
+                );
                 Ok(())
             }
             Effect::RunPlanningWorkflow {
@@ -291,10 +312,13 @@ impl EffectExecutor<'_> {
                 )?;
                 self.terminal.backend_mut().flush()?;
                 let line_count = text.lines().count().max(1);
-                self.app.push_agent_message(format!(
-                    "Copied {line_count} line{} to the terminal clipboard.",
-                    if line_count == 1 { "" } else { "s" }
-                ));
+                app::ops::transcript::push_agent_message(
+                    self.app.state_mut(),
+                    format!(
+                        "Copied {line_count} line{} to the terminal clipboard.",
+                        if line_count == 1 { "" } else { "s" }
+                    ),
+                );
                 Ok(())
             }
             Effect::CancelPendingReply => {

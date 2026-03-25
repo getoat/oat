@@ -6,12 +6,15 @@ use ratatui::{
     widgets::{Block, Borders, Padding, Paragraph, Wrap},
 };
 
-use crate::{app::App, ui::wrap::wrap_text};
+use crate::{
+    app::{App, query},
+    ui::wrap::wrap_text,
+};
 
 use super::helpers::composer_content_width;
 
 pub(super) fn render_plan_review_prompt(frame: &mut Frame, app: &App, area: Rect, accent: Color) {
-    let selected_index = app.selected_plan_review_index().unwrap_or(0);
+    let selected_index = query::selected_plan_review_index(app.state()).unwrap_or(0);
     let selected_style = Style::default().fg(accent).add_modifier(Modifier::BOLD);
     let unselected_style = Style::default().fg(Color::Gray);
     let lines = vec![
