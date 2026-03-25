@@ -9,40 +9,28 @@ mod transcript;
 
 use std::path::Path;
 
-use ratatui::{layout::Rect, style::Color, text::Line};
-use ratatui_textarea::{CursorMove, TextArea};
+use ratatui_textarea::TextArea;
 
 use crate::{
-    ask_user::{AskUserRequest, AskUserResponse},
-    composer::ComposerLayout,
     config::ReasoningEffort,
-    features::planning::{
-        PlanReviewState, PlanningAgentConfig, PlanningStage, accept_brief_and_start_fanout,
-        cancel_draft, clear_planning, default_planning_reasoning, request_review_changes,
-        show_review, start_conversation, start_finalization,
-    },
+    features::planning::{PlanReviewState, PlanningAgentConfig, PlanningStage},
     model_registry,
     stats::StatsTotals,
-    tools::{mutation_preview, write_approval_summary},
 };
 
-use super::session::{latest_proposed_plan_message, pending_stream_text_is_visible};
-use super::ui::{AskUserUiState, HistoryRenderCache, ShellApprovalUiState, split_command_query};
+use super::session::latest_proposed_plan_message;
+use super::ui::{ShellApprovalUiState, split_command_query};
 use super::{
-    AccessMode, ApprovalMode, ChatMessage, CommandRisk, EditorInput, MessageStyle, ModelPickerTab,
-    PendingAskUser, PendingReplyKind, PendingReplyReplaySeed, PendingShellApproval,
-    PendingWriteApproval, PickerSelection, ReasoningPickerTarget, SelectionPicker,
-    SessionHistoryMessage, SessionState, ShellApprovalDecision, ShellApprovalEditMode,
-    SlashCommand, Speaker, SubagentDisplayState, SubagentStatusEntry, SubagentStatusKind, ToolCall,
-    ToolResultEntry, TranscriptEntry, UiState, WriteApprovalDecision,
+    AccessMode, ApprovalMode, PendingReplyKind, PendingReplyReplaySeed, PendingWriteApproval,
+    SelectionPicker, SessionHistoryMessage, SessionState, SlashCommand, TranscriptEntry, UiState,
 };
 
-pub struct AppShell {
+pub struct App {
     pub session: SessionState,
     pub ui: UiState,
 }
 
-impl AppShell {
+impl App {
     pub fn new(
         show_thinking: bool,
         show_tool_output: bool,
@@ -81,6 +69,14 @@ impl AppShell {
             ),
             ui: UiState::default(),
         }
+    }
+
+    pub fn apply(&mut self, action: super::Action) -> Option<super::Effect> {
+        crate::app::session::apply(&mut self.session, &mut self.ui, action)
+    }
+
+    fn reducer_context(&mut self) -> crate::app::ReducerContext<'_> {
+        crate::app::ReducerContext::new(&mut self.session, &mut self.ui)
     }
 
     pub fn mode(&self) -> AccessMode {

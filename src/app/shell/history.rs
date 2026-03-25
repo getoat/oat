@@ -1,6 +1,9 @@
-use super::*;
+use ratatui::{layout::Rect, style::Color, text::Line};
 
-impl AppShell {
+use super::App;
+use crate::app::ui::HistoryRenderCache;
+
+impl App {
     pub(crate) fn sync_history_viewport(
         &mut self,
         total_lines: usize,
@@ -77,42 +80,6 @@ impl AppShell {
 
     pub(crate) fn clear_history_render_cache(&mut self) {
         self.ui.history_render_cache = None;
-    }
-
-    pub(crate) fn scroll_history_page_up(&mut self) {
-        self.scroll_history_up(self.ui.history.page_rows());
-    }
-
-    pub(crate) fn scroll_history_page_down(&mut self) {
-        self.scroll_history_down(self.ui.history.page_rows());
-    }
-
-    pub(crate) fn scroll_history_up(&mut self, lines: usize) {
-        self.ui.history.scroll_up(lines);
-    }
-
-    pub(crate) fn scroll_history_down(&mut self, lines: usize) {
-        self.ui.history.scroll_down(lines);
-    }
-
-    pub(crate) fn scroll_history_to_top(&mut self) {
-        self.ui.history.scroll_to_top();
-    }
-
-    pub(crate) fn resume_history_follow(&mut self) {
-        self.ui.history.resume_follow();
-    }
-
-    pub(crate) fn start_history_selection(&mut self, column: u16, row: u16) {
-        self.ui.history.start_selection(column, row);
-    }
-
-    pub(crate) fn update_history_selection(&mut self, column: u16, row: u16) {
-        self.ui.history.update_selection(column, row);
-    }
-
-    pub(crate) fn finish_history_selection(&mut self, column: u16, row: u16) -> Option<String> {
-        self.ui.history.finish_selection(column, row)
     }
 
     pub(crate) fn history_selection_span_for_row(&self, row: usize) -> Option<(usize, usize)> {

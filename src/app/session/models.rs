@@ -278,9 +278,33 @@ pub enum StreamEvent {
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::{ask_user::AskUserRequest, token_counting::count_text_tokens};
+use crate::{
+    ask_user::AskUserRequest, config::ReasoningEffort, model_registry,
+    token_counting::count_text_tokens,
+};
 
 use super::CommandRisk;
 
 const ESTIMATED_MESSAGE_OVERHEAD_TOKENS: u64 = 4;
 const ESTIMATED_CONTENT_OVERHEAD_TOKENS: u64 = 2;
+
+pub(crate) fn compatible_reasoning_effort(
+    model_name: &str,
+    current: ReasoningEffort,
+) -> ReasoningEffort {
+    if let Some(model) = model_registry::find_model(model_name) {
+        if model.supports_reasoning(current) {
+            current
+        } else {
+            model
+                .supported_reasoning_levels
+                .iter()
+                .find(|level| **level == ReasoningEffort::Medium)
+                .copied()
+                .or_else(|| model.supported_reasoning_levels.first().copied())
+                .unwrap_or(current)
+        }
+    } else {
+        current
+    }
+}

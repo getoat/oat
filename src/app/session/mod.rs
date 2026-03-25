@@ -17,11 +17,12 @@ pub use approvals::{
 };
 pub use ask_user::{PendingAskUser, PendingAskUserAnswer, PendingAskUserQuestion};
 pub use effects::Effect;
+pub(crate) use models::compatible_reasoning_effort;
 pub use models::{
     AccessMode, ApprovalMode, EditorInput, EditorKey, SessionHistoryMessage, SlashCommand, Speaker,
     StreamEvent,
 };
-pub(crate) use reducer::compatible_reasoning_effort;
+pub(crate) use reducer::apply;
 pub use selectors::*;
 pub use state::SessionState;
 pub use transcript::{

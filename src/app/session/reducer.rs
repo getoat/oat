@@ -2,246 +2,226 @@ use super::events::{
     apply_write_approval, on_stream_event, on_subagent_event, resolve_write_approval,
 };
 use super::submit::{submit_message, submit_plan_acceptance};
-use super::{Action, Effect, WriteApprovalDecision};
-use crate::app::AppShell as App;
-use crate::config::ReasoningEffort;
-use crate::model_registry;
+use super::{Action, Effect, SessionState, WriteApprovalDecision};
+use crate::app::{ReducerContext, UiState};
 
-impl App {
-    pub fn apply(&mut self, action: Action) -> Option<Effect> {
-        match action {
-            Action::ClearComposerOrQuit => {
-                if self.has_pending_reply() {
-                    self.cancel_pending_reply();
-                    Some(Effect::CancelPendingReply)
-                } else if self.composer_has_content() {
-                    self.clear_composer();
-                    None
-                } else {
-                    self.session.should_quit = true;
-                    None
-                }
-            }
-            Action::CancelPendingReply => {
-                if self.cancel_shell_approval_editing() {
-                    None
-                } else if self.has_pending_reply() {
-                    self.cancel_pending_reply();
-                    Some(Effect::CancelPendingReply)
-                } else if self.cancel_picker() {
-                    None
-                } else if self.cancel_planning_draft_mode() {
-                    self.push_agent_message("Planning draft cancelled.");
-                    None
-                } else {
-                    None
-                }
-            }
-            Action::ToggleMode => {
-                self.session.mode.toggle();
-                Some(Effect::RebuildLlm {
-                    access_mode: self.mode(),
-                })
-            }
-            Action::SelectPreviousCommand => {
-                if self.has_pending_shell_approval() {
-                    self.move_shell_approval_selection(-1);
-                } else if self.has_pending_ask_user() {
-                    self.move_ask_user_answer_up();
-                } else if self.plan_review_selection_active() {
-                    self.move_plan_review_selection(-1);
-                } else if self.selection_picker_visible() {
-                    self.move_picker_selection_up();
-                } else if self.command_palette_visible() {
-                    self.move_command_selection_up();
-                } else if self.should_recall_previous_input() && self.recall_previous_input() {
-                } else {
-                    self.move_composer_cursor_up();
-                }
+pub(crate) fn apply(
+    session: &mut SessionState,
+    ui: &mut UiState,
+    action: Action,
+) -> Option<Effect> {
+    let mut ctx = ReducerContext::new(session, ui);
+    match action {
+        Action::ClearComposerOrQuit => {
+            if ctx.has_pending_reply() {
+                ctx.cancel_pending_reply();
+                Some(Effect::CancelPendingReply)
+            } else if ctx.composer_has_content() {
+                ctx.clear_composer();
                 None
-            }
-            Action::SelectNextCommand => {
-                if self.has_pending_shell_approval() {
-                    self.move_shell_approval_selection(1);
-                } else if self.has_pending_ask_user() {
-                    self.move_ask_user_answer_down();
-                } else if self.plan_review_selection_active() {
-                    self.move_plan_review_selection(1);
-                } else if self.selection_picker_visible() {
-                    self.move_picker_selection_down();
-                } else if self.command_palette_visible() {
-                    self.move_command_selection_down();
-                } else if self.should_recall_next_input() && self.recall_next_input() {
-                } else {
-                    self.move_composer_cursor_down();
-                }
-                None
-            }
-            Action::ScrollHistoryPageUp => {
-                self.scroll_history_page_up();
-                None
-            }
-            Action::ScrollHistoryPageDown => {
-                self.scroll_history_page_down();
-                None
-            }
-            Action::ScrollHistoryToTop => {
-                self.scroll_history_to_top();
-                None
-            }
-            Action::ScrollHistoryToBottom => {
-                self.resume_history_follow();
-                None
-            }
-            Action::ScrollHistoryUp { lines } => {
-                self.scroll_history_up(lines);
-                None
-            }
-            Action::ScrollHistoryDown { lines } => {
-                self.scroll_history_down(lines);
-                None
-            }
-            Action::InsertComposerNewline => {
-                if self.has_pending_write_approval()
-                    || self.has_pending_shell_approval()
-                    || self.plan_review_selection_active()
-                {
-                    return None;
-                }
-                self.insert_composer_newline();
-                None
-            }
-            Action::SubmitMessage => submit_message(self),
-            Action::TogglePickerSelection => self
-                .toggle_picker_selection()
-                .map(|planning_agents| Effect::SetPlanningAgents { planning_agents }),
-            Action::PickerTabLeft => {
-                self.move_picker_tab_left();
-                None
-            }
-            Action::PickerTabRight => {
-                self.move_picker_tab_right();
-                None
-            }
-            Action::AskUserTabLeft => {
-                self.move_ask_user_tab_left();
-                None
-            }
-            Action::AskUserTabRight => {
-                self.move_ask_user_tab_right();
-                None
-            }
-            Action::AskUserToggleDetailEditor => {
-                self.toggle_ask_user_detail_editing();
-                None
-            }
-            Action::ShellApprovalToggleDetailEditor => {
-                self.toggle_shell_approval_detail_editing();
-                None
-            }
-            Action::ApproveWriteOnce => resolve_write_approval(
-                apply_write_approval(self, WriteApprovalDecision::AllowOnce),
-                WriteApprovalDecision::AllowOnce,
-            ),
-            Action::ApproveWriteAllSession => resolve_write_approval(
-                apply_write_approval(self, WriteApprovalDecision::AllowAllSession),
-                WriteApprovalDecision::AllowAllSession,
-            ),
-            Action::DenyWrite => resolve_write_approval(
-                apply_write_approval(self, WriteApprovalDecision::Deny),
-                WriteApprovalDecision::Deny,
-            ),
-            Action::AcceptPlanAndImplement => submit_plan_acceptance(self),
-            Action::SuggestPlanChanges => {
-                if self.plan_review_selection_active() {
-                    self.begin_plan_review_feedback();
-                }
-                None
-            }
-            Action::Editor(input) => {
-                if self.has_pending_write_approval() || self.plan_review_selection_active() {
-                    return None;
-                }
-                if self.shell_approval_editing() {
-                    self.apply_shell_approval_input(input);
-                    return None;
-                }
-                if self.has_pending_shell_approval() {
-                    return None;
-                }
-                if self.ask_user_detail_editing() {
-                    self.apply_ask_user_input(input);
-                    return None;
-                }
-                if self.has_pending_ask_user() {
-                    return None;
-                }
-                self.apply_composer_input(input);
-                None
-            }
-            Action::Paste(text) => {
-                if self.has_pending_write_approval() || self.plan_review_selection_active() {
-                    return None;
-                }
-                if self.shell_approval_editing() {
-                    self.paste_into_shell_approval_detail(&text);
-                    return None;
-                }
-                if self.has_pending_shell_approval() {
-                    return None;
-                }
-                if self.ask_user_detail_editing() {
-                    self.paste_into_ask_user_detail(&text);
-                    return None;
-                }
-                if self.has_pending_ask_user() {
-                    return None;
-                }
-                self.paste_into_composer(&text);
-                None
-            }
-            Action::StartHistorySelection { column, row } => {
-                self.start_history_selection(column, row);
-                None
-            }
-            Action::UpdateHistorySelection { column, row } => {
-                self.update_history_selection(column, row);
-                None
-            }
-            Action::FinishHistorySelection { column, row } => self
-                .finish_history_selection(column, row)
-                .map(|text| Effect::CopyToClipboard { text }),
-            Action::StreamEvent { reply_id, event } => on_stream_event(self, reply_id, event),
-            Action::SubagentEvent(event) => {
-                on_subagent_event(self, event);
-                None
-            }
-            Action::Tick => {
-                self.session.tick_count = self.session.tick_count.wrapping_add(1);
+            } else {
+                ctx.set_should_quit();
                 None
             }
         }
-    }
-}
-
-pub(crate) fn compatible_reasoning_effort(
-    model_name: &str,
-    current: ReasoningEffort,
-) -> ReasoningEffort {
-    if let Some(model) = model_registry::find_model(model_name) {
-        if model.supports_reasoning(current) {
-            current
-        } else {
-            model
-                .supported_reasoning_levels
-                .iter()
-                .find(|level| **level == ReasoningEffort::Medium)
-                .copied()
-                .or_else(|| model.supported_reasoning_levels.first().copied())
-                .unwrap_or(current)
+        Action::CancelPendingReply => {
+            if ctx.cancel_shell_approval_editing() {
+                None
+            } else if ctx.has_pending_reply() {
+                ctx.cancel_pending_reply();
+                Some(Effect::CancelPendingReply)
+            } else if ctx.cancel_picker() {
+                None
+            } else if ctx.cancel_planning_draft_mode() {
+                ctx.push_agent_message("Planning draft cancelled.");
+                None
+            } else {
+                None
+            }
         }
-    } else {
-        current
+        Action::ToggleMode => {
+            ctx.session.mode.toggle();
+            Some(Effect::RebuildLlm {
+                access_mode: ctx.mode(),
+            })
+        }
+        Action::SelectPreviousCommand => {
+            if ctx.has_pending_shell_approval() {
+                ctx.move_shell_approval_selection(-1);
+            } else if ctx.has_pending_ask_user() {
+                ctx.move_ask_user_answer_up();
+            } else if ctx.plan_review_selection_active() {
+                ctx.move_plan_review_selection(-1);
+            } else if ctx.selection_picker_visible() {
+                ctx.move_picker_selection_up();
+            } else if ctx.command_palette_visible() {
+                ctx.move_command_selection_up();
+            } else if ctx.should_recall_previous_input() && ctx.recall_previous_input() {
+            } else {
+                ctx.move_composer_cursor_up();
+            }
+            None
+        }
+        Action::SelectNextCommand => {
+            if ctx.has_pending_shell_approval() {
+                ctx.move_shell_approval_selection(1);
+            } else if ctx.has_pending_ask_user() {
+                ctx.move_ask_user_answer_down();
+            } else if ctx.plan_review_selection_active() {
+                ctx.move_plan_review_selection(1);
+            } else if ctx.selection_picker_visible() {
+                ctx.move_picker_selection_down();
+            } else if ctx.command_palette_visible() {
+                ctx.move_command_selection_down();
+            } else if ctx.should_recall_next_input() && ctx.recall_next_input() {
+            } else {
+                ctx.move_composer_cursor_down();
+            }
+            None
+        }
+        Action::ScrollHistoryPageUp => {
+            ctx.scroll_history_page_up();
+            None
+        }
+        Action::ScrollHistoryPageDown => {
+            ctx.scroll_history_page_down();
+            None
+        }
+        Action::ScrollHistoryToTop => {
+            ctx.scroll_history_to_top();
+            None
+        }
+        Action::ScrollHistoryToBottom => {
+            ctx.resume_history_follow();
+            None
+        }
+        Action::ScrollHistoryUp { lines } => {
+            ctx.scroll_history_up(lines);
+            None
+        }
+        Action::ScrollHistoryDown { lines } => {
+            ctx.scroll_history_down(lines);
+            None
+        }
+        Action::InsertComposerNewline => {
+            if ctx.has_pending_write_approval()
+                || ctx.has_pending_shell_approval()
+                || ctx.plan_review_selection_active()
+            {
+                return None;
+            }
+            ctx.insert_composer_newline();
+            None
+        }
+        Action::SubmitMessage => submit_message(&mut ctx),
+        Action::TogglePickerSelection => ctx
+            .toggle_picker_selection()
+            .map(|planning_agents| Effect::SetPlanningAgents { planning_agents }),
+        Action::PickerTabLeft => {
+            ctx.move_picker_tab_left();
+            None
+        }
+        Action::PickerTabRight => {
+            ctx.move_picker_tab_right();
+            None
+        }
+        Action::AskUserTabLeft => {
+            ctx.move_ask_user_tab_left();
+            None
+        }
+        Action::AskUserTabRight => {
+            ctx.move_ask_user_tab_right();
+            None
+        }
+        Action::AskUserToggleDetailEditor => {
+            ctx.toggle_ask_user_detail_editing();
+            None
+        }
+        Action::ShellApprovalToggleDetailEditor => {
+            ctx.toggle_shell_approval_detail_editing();
+            None
+        }
+        Action::ApproveWriteOnce => resolve_write_approval(
+            apply_write_approval(&mut ctx, WriteApprovalDecision::AllowOnce),
+            WriteApprovalDecision::AllowOnce,
+        ),
+        Action::ApproveWriteAllSession => resolve_write_approval(
+            apply_write_approval(&mut ctx, WriteApprovalDecision::AllowAllSession),
+            WriteApprovalDecision::AllowAllSession,
+        ),
+        Action::DenyWrite => resolve_write_approval(
+            apply_write_approval(&mut ctx, WriteApprovalDecision::Deny),
+            WriteApprovalDecision::Deny,
+        ),
+        Action::AcceptPlanAndImplement => submit_plan_acceptance(&mut ctx),
+        Action::SuggestPlanChanges => {
+            if ctx.plan_review_selection_active() {
+                ctx.begin_plan_review_feedback();
+            }
+            None
+        }
+        Action::Editor(input) => {
+            if ctx.has_pending_write_approval() || ctx.plan_review_selection_active() {
+                return None;
+            }
+            if ctx.shell_approval_editing() {
+                ctx.apply_shell_approval_input(input);
+                return None;
+            }
+            if ctx.has_pending_shell_approval() {
+                return None;
+            }
+            if ctx.ask_user_detail_editing() {
+                ctx.apply_ask_user_input(input);
+                return None;
+            }
+            if ctx.has_pending_ask_user() {
+                return None;
+            }
+            ctx.apply_composer_input(input);
+            None
+        }
+        Action::Paste(text) => {
+            if ctx.has_pending_write_approval() || ctx.plan_review_selection_active() {
+                return None;
+            }
+            if ctx.shell_approval_editing() {
+                ctx.paste_into_shell_approval_detail(&text);
+                return None;
+            }
+            if ctx.has_pending_shell_approval() {
+                return None;
+            }
+            if ctx.ask_user_detail_editing() {
+                ctx.paste_into_ask_user_detail(&text);
+                return None;
+            }
+            if ctx.has_pending_ask_user() {
+                return None;
+            }
+            ctx.paste_into_composer(&text);
+            None
+        }
+        Action::StartHistorySelection { column, row } => {
+            ctx.start_history_selection(column, row);
+            None
+        }
+        Action::UpdateHistorySelection { column, row } => {
+            ctx.update_history_selection(column, row);
+            None
+        }
+        Action::FinishHistorySelection { column, row } => ctx
+            .finish_history_selection(column, row)
+            .map(|text| Effect::CopyToClipboard { text }),
+        Action::StreamEvent { reply_id, event } => on_stream_event(&mut ctx, reply_id, event),
+        Action::SubagentEvent(event) => {
+            on_subagent_event(&mut ctx, event);
+            None
+        }
+        Action::Tick => {
+            ctx.session.tick_count = ctx.session.tick_count.wrapping_add(1);
+            None
+        }
     }
 }
 
@@ -250,10 +230,12 @@ mod tests {
     use super::*;
     use crate::{
         app::{
-            ChatMessage, MessageStyle, PendingReply, PendingReplyKind, SessionHistoryMessage,
+            App, ChatMessage, MessageStyle, PendingReply, PendingReplyKind, SessionHistoryMessage,
             SlashCommand, Speaker, StreamEvent, SubagentDisplayState, TranscriptEntry,
+            compatible_reasoning_effort,
         },
         ask_user::{AskUserAnswer, AskUserQuestion, AskUserRequest},
+        config::ReasoningEffort,
         features::planning::{PlanningAgentConfig, PlanningStage, planning_conversation_prompt},
         subagents::{SubagentActivityKind, SubagentUiEvent},
     };
