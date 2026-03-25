@@ -116,10 +116,6 @@ impl ReasoningEffort {
             _ => None,
         }
     }
-
-    pub fn supported_values() -> &'static [&'static str] {
-        &["minimal", "low", "medium", "high", "xhigh"]
-    }
 }
 
 pub(super) fn default_show_thinking() -> bool {

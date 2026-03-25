@@ -13,9 +13,9 @@ use crate::{
 
 use super::{
     ApplyPatchesTool, AskUserTool, CommentaryTool, DeletePathTool, GrepTool,
-    INSPECT_SUBAGENT_TOOL_NAME, InspectSubagentTool, ListTool, RUN_SHELL_SCRIPT_TOOL_NAME,
-    ReadFileTool, ReadFilesTool, RunShellScriptTool, SPAWN_SUBAGENT_TOOL_NAME, SpawnSubagentTool,
-    WAIT_SUBAGENT_TOOL_NAME, WaitSubagentTool, WriteFileTool, output_limit::OutputLimitedTool,
+    INSPECT_SUBAGENT_TOOL_NAME, InspectSubagentTool, ListTool, ReadFileTool, ReadFilesTool,
+    RunShellScriptTool, SPAWN_SUBAGENT_TOOL_NAME, SpawnSubagentTool, WAIT_SUBAGENT_TOOL_NAME,
+    WaitSubagentTool, WriteFileTool, output_limit::OutputLimitedTool,
 };
 
 #[derive(Clone)]
@@ -201,8 +201,9 @@ pub fn is_mutation_tool(tool_name: &str) -> bool {
     })
 }
 
-pub fn is_shell_tool(tool_name: &str) -> bool {
-    tool_name.eq_ignore_ascii_case(RUN_SHELL_SCRIPT_TOOL_NAME)
+#[cfg(test)]
+fn is_shell_tool(tool_name: &str) -> bool {
+    tool_name.eq_ignore_ascii_case(RunShellScriptTool::NAME)
 }
 
 #[cfg(test)]

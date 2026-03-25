@@ -8,14 +8,6 @@ pub enum ModelPickerTab {
 }
 
 impl ModelPickerTab {
-    pub fn title(self) -> &'static str {
-        match self {
-            Self::NormalAgent => "Normal agent",
-            Self::PlanningAgents => "Planning agents",
-            Self::SafetyModel => "Safety model",
-        }
-    }
-
     pub fn toggle(&mut self, direction: isize) {
         let tabs = [Self::NormalAgent, Self::PlanningAgents, Self::SafetyModel];
         let current = tabs.iter().position(|tab| *tab == *self).unwrap_or(0);

@@ -427,3 +427,72 @@ fn prefix_marker(speaker: Speaker, accent: Color) -> (&'static str, Style) {
         Speaker::Agent => ("◦", Style::default().fg(Color::Gray)),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use ratatui::style::Modifier;
+
+    use super::{MarkdownSegment, markdown_segments, message_style, normalized_highlight_language};
+    use crate::app::MessageStyle;
+
+    #[test]
+    fn markdown_segments_leave_plain_text_unchanged() {
+        assert_eq!(
+            markdown_segments("plain text"),
+            vec![MarkdownSegment::Markdown("plain text".into())]
+        );
+    }
+
+    #[test]
+    fn markdown_segments_extract_fenced_code_blocks_with_language() {
+        assert_eq!(
+            markdown_segments("Before\n```rust\nlet value = 1;\n```\nAfter"),
+            vec![
+                MarkdownSegment::Markdown("Before\n".into()),
+                MarkdownSegment::CodeBlock {
+                    language: Some("rust".into()),
+                    code: "let value = 1;\n".into(),
+                },
+                MarkdownSegment::Markdown("After".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn markdown_segments_extract_fenced_code_blocks_without_language() {
+        assert_eq!(
+            markdown_segments("```\nplain text\n```"),
+            vec![MarkdownSegment::CodeBlock {
+                language: None,
+                code: "plain text\n".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn markdown_segments_fall_back_to_plain_markdown_for_unclosed_fences() {
+        assert_eq!(
+            markdown_segments("Before\n```rust\nlet value = 1;\n"),
+            vec![MarkdownSegment::Markdown(
+                "Before\n```rust\nlet value = 1;\n".into()
+            )]
+        );
+    }
+
+    #[test]
+    fn normalized_highlight_language_maps_csharp_aliases() {
+        assert_eq!(normalized_highlight_language(Some("csharp")), Some("C#"));
+        assert_eq!(normalized_highlight_language(Some("c#")), Some("C#"));
+        assert_eq!(normalized_highlight_language(Some("c sharp")), Some("C#"));
+        assert_eq!(normalized_highlight_language(Some("rust")), Some("rust"));
+    }
+
+    #[test]
+    fn message_style_marks_thinking_as_italic() {
+        assert!(
+            message_style(MessageStyle::Thinking)
+                .add_modifier
+                .contains(Modifier::ITALIC)
+        );
+    }
+}

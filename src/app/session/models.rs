@@ -1,3 +1,13 @@
+use serde::{Deserialize, Serialize};
+#[cfg(test)]
+use serde_json::json;
+
+#[cfg(test)]
+use crate::token_counting::count_text_tokens;
+use crate::{ask_user::AskUserRequest, config::ReasoningEffort, model_registry};
+
+use super::CommandRisk;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SlashCommand {
     NewSession,
@@ -46,27 +56,13 @@ impl SlashCommand {
         }
     }
 
-    pub fn usage(self) -> Option<&'static str> {
-        match self {
-            Self::Model => Some("/model"),
-            Self::Compact => Some("/compact"),
-            Self::Effort => Some("/effort <minimal|low|medium|high|xhigh>"),
-            Self::Plan => Some("/plan"),
-            Self::NewSession | Self::Stats | Self::Quit => None,
-        }
-    }
-
     pub fn all_names(self) -> impl Iterator<Item = &'static str> {
         std::iter::once(self.canonical_name()).chain(self.aliases().iter().copied())
     }
 
-    pub fn display_name(self) -> String {
-        let aliases = self.aliases();
-        if aliases.is_empty() {
-            self.canonical_name().to_string()
-        } else {
-            format!("{} ({})", self.canonical_name(), aliases.join(", "))
-        }
+    pub fn matches_exact(self, query: &str) -> bool {
+        self.all_names()
+            .any(|name| name.eq_ignore_ascii_case(query))
     }
 
     fn matches_prefix(self, query: &str) -> bool {
@@ -75,23 +71,11 @@ impl SlashCommand {
             .any(|name| name.to_ascii_lowercase().starts_with(&query))
     }
 
-    pub fn matches_exact(self, query: &str) -> bool {
-        let query = query.to_ascii_lowercase();
-        self.all_names()
-            .any(|name| name.eq_ignore_ascii_case(&query))
-    }
-
     pub fn filtered(query: &str) -> Vec<Self> {
         COMMANDS
             .into_iter()
             .filter(|command| command.matches_prefix(query))
             .collect()
-    }
-
-    pub fn parse(query: &str) -> Option<Self> {
-        COMMANDS
-            .into_iter()
-            .find(|command| command.matches_exact(query))
     }
 }
 
@@ -183,21 +167,12 @@ pub struct SessionHistoryMessage {
 }
 
 impl SessionHistoryMessage {
-    pub fn system(text: impl Into<String>) -> Self {
-        let text = text.into();
-        Self {
-            payload: json!({
-                "role": "system",
-                "content": text,
-            }),
-            estimated_tokens: ESTIMATED_MESSAGE_OVERHEAD_TOKENS + count_text_tokens(&text),
-        }
-    }
-
+    #[cfg(test)]
     pub fn user(text: impl Into<String>) -> Self {
         Self::text_message("user", text.into())
     }
 
+    #[cfg(test)]
     pub fn assistant(text: impl Into<String>) -> Self {
         let text = text.into();
         Self {
@@ -215,6 +190,7 @@ impl SessionHistoryMessage {
         }
     }
 
+    #[cfg(test)]
     fn text_message(role: &str, text: String) -> Self {
         Self {
             payload: json!({
@@ -231,6 +207,7 @@ impl SessionHistoryMessage {
     }
 }
 
+#[cfg(test)]
 fn estimated_text_content_message_tokens(text: &str) -> u64 {
     ESTIMATED_MESSAGE_OVERHEAD_TOKENS + ESTIMATED_CONTENT_OVERHEAD_TOKENS + count_text_tokens(text)
 }
@@ -275,17 +252,10 @@ pub enum StreamEvent {
     },
     Failed(String),
 }
-use serde::{Deserialize, Serialize};
-use serde_json::json;
 
-use crate::{
-    ask_user::AskUserRequest, config::ReasoningEffort, model_registry,
-    token_counting::count_text_tokens,
-};
-
-use super::CommandRisk;
-
+#[cfg(test)]
 const ESTIMATED_MESSAGE_OVERHEAD_TOKENS: u64 = 4;
+#[cfg(test)]
 const ESTIMATED_CONTENT_OVERHEAD_TOKENS: u64 = 2;
 
 pub(crate) fn compatible_reasoning_effort(

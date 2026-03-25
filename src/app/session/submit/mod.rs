@@ -13,24 +13,21 @@ use planning::{
 };
 
 use super::{Effect, PendingReplyKind};
-use crate::app::{AppState, InputTarget, ops, query};
+use crate::app::{AppState, InputContext, ops, query};
 use crate::features::planning::PlanningStage;
 
 pub(crate) fn submit_message(state: &mut AppState) -> Option<Effect> {
-    if query::has_pending_write_approval(state) {
-        return None;
-    }
-
-    match query::active_input_target(state) {
-        InputTarget::ShellApprovalSelection | InputTarget::ShellApprovalEditor => {
+    match query::input_context(state) {
+        InputContext::WriteApproval => return None,
+        InputContext::ShellApproval { .. } => {
             return submit_shell_approval(state);
         }
-        InputTarget::PlanReviewSelection => return submit_plan_review_selection(state),
-        InputTarget::AskUserSelection | InputTarget::AskUserEditor => {
+        InputContext::PlanReview => return submit_plan_review_selection(state),
+        InputContext::AskUser { .. } => {
             return submit_ask_user(state);
         }
-        InputTarget::Picker => return submit_picker_selection(state),
-        InputTarget::Composer | InputTarget::CommandPalette => {}
+        InputContext::Picker => return submit_picker_selection(state),
+        InputContext::Composer | InputContext::CommandPalette => {}
     }
 
     let submitted = ops::composer::submitted_composer_text(state);

@@ -17,6 +17,7 @@ pub fn shows_startup_banner(session: &SessionState) -> bool {
         )
 }
 
+#[cfg(test)]
 pub fn has_visible_pending_content(session: &SessionState) -> bool {
     session
         .pending_reply

@@ -47,7 +47,6 @@ pub type EventCallback = Arc<dyn Fn(u64, StreamEvent) -> bool + Send + Sync>;
 
 pub struct PromptRunResult {
     pub output: String,
-    pub history: Option<Vec<SessionHistoryMessage>>,
 }
 
 #[derive(Clone, Debug)]

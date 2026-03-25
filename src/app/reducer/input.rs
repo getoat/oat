@@ -1,22 +1,21 @@
 use crate::app::session::submit::submit_message;
-use crate::app::{Action, AppState, Effect, InputTarget, ops, query};
+use crate::app::{Action, AppState, Effect, InputContext, ops, query};
 
 pub(super) fn handle(state: &mut AppState, action: Action) -> Option<Effect> {
     match action {
         Action::SelectPreviousCommand => {
-            match query::active_input_target(state) {
-                InputTarget::ShellApprovalSelection | InputTarget::ShellApprovalEditor => {
+            match query::input_context(state) {
+                InputContext::WriteApproval => {}
+                InputContext::ShellApproval { .. } => {
                     ops::approvals::move_shell_approval_selection(state, -1);
                 }
-                InputTarget::AskUserSelection | InputTarget::AskUserEditor => {
+                InputContext::AskUser { .. } => {
                     ops::ask_user::move_ask_user_answer_up(state);
                 }
-                InputTarget::PlanReviewSelection => {
-                    ops::planning::move_plan_review_selection(state, -1)
-                }
-                InputTarget::Picker => ops::picker::move_picker_selection_up(state),
-                InputTarget::CommandPalette => ops::composer::move_command_selection_up(state),
-                InputTarget::Composer => {
+                InputContext::PlanReview => ops::planning::move_plan_review_selection(state, -1),
+                InputContext::Picker => ops::picker::move_picker_selection_up(state),
+                InputContext::CommandPalette => ops::composer::move_command_selection_up(state),
+                InputContext::Composer => {
                     if !(ops::composer::should_recall_previous_input(state)
                         && ops::composer::recall_previous_input(state))
                     {
@@ -27,19 +26,18 @@ pub(super) fn handle(state: &mut AppState, action: Action) -> Option<Effect> {
             None
         }
         Action::SelectNextCommand => {
-            match query::active_input_target(state) {
-                InputTarget::ShellApprovalSelection | InputTarget::ShellApprovalEditor => {
+            match query::input_context(state) {
+                InputContext::WriteApproval => {}
+                InputContext::ShellApproval { .. } => {
                     ops::approvals::move_shell_approval_selection(state, 1);
                 }
-                InputTarget::AskUserSelection | InputTarget::AskUserEditor => {
+                InputContext::AskUser { .. } => {
                     ops::ask_user::move_ask_user_answer_down(state);
                 }
-                InputTarget::PlanReviewSelection => {
-                    ops::planning::move_plan_review_selection(state, 1)
-                }
-                InputTarget::Picker => ops::picker::move_picker_selection_down(state),
-                InputTarget::CommandPalette => ops::composer::move_command_selection_down(state),
-                InputTarget::Composer => {
+                InputContext::PlanReview => ops::planning::move_plan_review_selection(state, 1),
+                InputContext::Picker => ops::picker::move_picker_selection_down(state),
+                InputContext::CommandPalette => ops::composer::move_command_selection_down(state),
+                InputContext::Composer => {
                     if !(ops::composer::should_recall_next_input(state)
                         && ops::composer::recall_next_input(state))
                     {
@@ -50,10 +48,12 @@ pub(super) fn handle(state: &mut AppState, action: Action) -> Option<Effect> {
             None
         }
         Action::InsertComposerNewline => {
-            if query::has_pending_write_approval(state)
-                || query::has_pending_shell_approval(state)
-                || query::plan_review_selection_active(state)
-            {
+            if matches!(
+                query::input_context(state),
+                InputContext::WriteApproval
+                    | InputContext::ShellApproval { .. }
+                    | InputContext::PlanReview
+            ) {
                 return None;
             }
             ops::composer::insert_composer_newline(state);
@@ -87,36 +87,34 @@ pub(super) fn handle(state: &mut AppState, action: Action) -> Option<Effect> {
             None
         }
         Action::Editor(input) => {
-            if query::has_pending_write_approval(state) {
-                return None;
-            }
-            match query::active_input_target(state) {
-                InputTarget::ShellApprovalEditor => {
+            match query::input_context(state) {
+                InputContext::WriteApproval => return None,
+                InputContext::ShellApproval { editing: true, .. } => {
                     ops::approvals::apply_shell_approval_input(state, input)
                 }
-                InputTarget::ShellApprovalSelection | InputTarget::PlanReviewSelection => {}
-                InputTarget::AskUserEditor => ops::ask_user::apply_ask_user_input(state, input),
-                InputTarget::AskUserSelection => {}
-                InputTarget::Composer | InputTarget::CommandPalette | InputTarget::Picker => {
+                InputContext::ShellApproval { .. } | InputContext::PlanReview => {}
+                InputContext::AskUser { editing: true } => {
+                    ops::ask_user::apply_ask_user_input(state, input)
+                }
+                InputContext::AskUser { editing: false } => {}
+                InputContext::Composer | InputContext::CommandPalette | InputContext::Picker => {
                     ops::composer::apply_composer_input(state, input);
                 }
             }
             None
         }
         Action::Paste(text) => {
-            if query::has_pending_write_approval(state) {
-                return None;
-            }
-            match query::active_input_target(state) {
-                InputTarget::ShellApprovalEditor => {
+            match query::input_context(state) {
+                InputContext::WriteApproval => return None,
+                InputContext::ShellApproval { editing: true, .. } => {
                     ops::approvals::paste_into_shell_approval_detail(state, &text)
                 }
-                InputTarget::ShellApprovalSelection | InputTarget::PlanReviewSelection => {}
-                InputTarget::AskUserEditor => {
+                InputContext::ShellApproval { .. } | InputContext::PlanReview => {}
+                InputContext::AskUser { editing: true } => {
                     ops::ask_user::paste_into_ask_user_detail(state, &text)
                 }
-                InputTarget::AskUserSelection => {}
-                InputTarget::Composer | InputTarget::CommandPalette | InputTarget::Picker => {
+                InputContext::AskUser { editing: false } => {}
+                InputContext::Composer | InputContext::CommandPalette | InputContext::Picker => {
                     ops::composer::paste_into_composer(state, &text);
                 }
             }

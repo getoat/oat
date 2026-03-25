@@ -19,15 +19,20 @@ use super::{
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum InputTarget {
-    Composer,
-    CommandPalette,
+pub(crate) enum InputContext {
+    WriteApproval,
+    ShellApproval {
+        editing: bool,
+        can_move_up: bool,
+        can_move_down: bool,
+    },
+    AskUser {
+        editing: bool,
+    },
+    PlanReview,
     Picker,
-    ShellApprovalSelection,
-    ShellApprovalEditor,
-    AskUserSelection,
-    AskUserEditor,
-    PlanReviewSelection,
+    CommandPalette,
+    Composer,
 }
 
 pub fn mode(state: &AppState) -> AccessMode {
@@ -59,10 +64,6 @@ pub fn main_pending_write_approval_request_id(state: &AppState) -> Option<&str> 
         .map(|pending| pending.request_id.as_str())
 }
 
-pub fn has_pending_write_approval(state: &AppState) -> bool {
-    !state.session.pending_write_approvals.is_empty()
-}
-
 pub fn main_pending_shell_approval_request_id(state: &AppState) -> Option<&str> {
     state
         .session
@@ -82,18 +83,6 @@ pub fn shell_approval_session(state: &AppState) -> Option<&PendingShellApproval>
 
 pub fn shell_approval_ui(state: &AppState) -> Option<&ShellApprovalUiState> {
     state.ui.pending_shell_approval.as_ref()
-}
-
-pub fn shell_approval_editing(state: &AppState) -> bool {
-    shell_approval_ui(state).is_some_and(ShellApprovalUiState::is_editing)
-}
-
-pub fn shell_approval_editor_can_move_up(state: &AppState) -> bool {
-    shell_approval_ui(state).is_some_and(ShellApprovalUiState::editor_can_move_up)
-}
-
-pub fn shell_approval_editor_can_move_down(state: &AppState) -> bool {
-    shell_approval_ui(state).is_some_and(ShellApprovalUiState::editor_can_move_down)
 }
 
 pub fn pending_ask_user(state: &AppState) -> Option<&PendingAskUser> {
@@ -215,6 +204,7 @@ pub fn selection_picker(state: &AppState) -> Option<&SelectionPicker> {
     state.ui.picker.as_ref()
 }
 
+#[cfg(test)]
 pub fn selection_picker_visible(state: &AppState) -> bool {
     state.ui.picker.is_some()
 }
@@ -304,45 +294,52 @@ pub fn overlay_height(state: &AppState) -> u16 {
     command_palette_height(state)
 }
 
-pub fn active_input_target(state: &AppState) -> InputTarget {
-    active_input_target_parts(&state.session, &state.ui)
+pub(crate) fn input_context(state: &AppState) -> InputContext {
+    input_context_parts(&state.session, &state.ui)
 }
 
-pub(crate) fn active_input_target_parts(session: &SessionState, ui: &UiState) -> InputTarget {
-    if !session.pending_shell_approvals.is_empty() {
-        if ui
+pub(crate) fn input_context_parts(session: &SessionState, ui: &UiState) -> InputContext {
+    if !session.pending_write_approvals.is_empty() {
+        InputContext::WriteApproval
+    } else if !session.pending_shell_approvals.is_empty() {
+        let editing = ui
             .pending_shell_approval
             .as_ref()
-            .is_some_and(ShellApprovalUiState::is_editing)
-        {
-            InputTarget::ShellApprovalEditor
-        } else {
-            InputTarget::ShellApprovalSelection
+            .is_some_and(ShellApprovalUiState::is_editing);
+        InputContext::ShellApproval {
+            editing,
+            can_move_up: editing
+                && ui
+                    .pending_shell_approval
+                    .as_ref()
+                    .is_some_and(ShellApprovalUiState::editor_can_move_up),
+            can_move_down: editing
+                && ui
+                    .pending_shell_approval
+                    .as_ref()
+                    .is_some_and(ShellApprovalUiState::editor_can_move_down),
         }
     } else if session.pending_ask_user.is_some() {
-        if ui
-            .pending_ask_user
-            .as_ref()
-            .is_some_and(|pending| pending.detail_editing)
-        {
-            InputTarget::AskUserEditor
-        } else {
-            InputTarget::AskUserSelection
+        InputContext::AskUser {
+            editing: ui
+                .pending_ask_user
+                .as_ref()
+                .is_some_and(|pending| pending.detail_editing),
         }
     } else if session.planning.stage == PlanningStage::Review
         && session.planning.review == Some(PlanReviewState::Selection)
     {
-        InputTarget::PlanReviewSelection
+        InputContext::PlanReview
     } else if ui.picker.is_some() {
-        InputTarget::Picker
+        InputContext::Picker
     } else {
         let [line] = ui.composer.composer.lines() else {
-            return InputTarget::Composer;
+            return InputContext::Composer;
         };
         if ui.picker.is_none() && line.starts_with('/') {
-            InputTarget::CommandPalette
+            InputContext::CommandPalette
         } else {
-            InputTarget::Composer
+            InputContext::Composer
         }
     }
 }
@@ -383,9 +380,23 @@ mod tests {
     }
 
     #[test]
-    fn active_input_target_prefers_overlays_before_picker_and_composer() {
+    fn input_context_prefers_overlays_before_picker_and_composer() {
         let mut state = state();
         state.ui.composer.composer.insert_str("/model");
+
+        state
+            .session
+            .pending_write_approvals
+            .push_back(crate::app::PendingWriteApproval {
+                request_id: "write-1".into(),
+                tool_name: "WriteFile".into(),
+                arguments: "{}".into(),
+                summary: "write".into(),
+                target: Some("src/lib.rs".into()),
+                source_label: None,
+            });
+        assert_eq!(input_context(&state), InputContext::WriteApproval);
+        state.session.pending_write_approvals.clear();
 
         state
             .session
@@ -406,8 +417,12 @@ mod tests {
             .map(ShellApprovalUiState::new);
 
         assert_eq!(
-            active_input_target(&state),
-            InputTarget::ShellApprovalSelection
+            input_context(&state),
+            InputContext::ShellApproval {
+                editing: false,
+                can_move_up: false,
+                can_move_down: false,
+            }
         );
 
         state
@@ -417,8 +432,12 @@ mod tests {
             .expect("shell ui")
             .edit_mode = Some(ShellApprovalEditMode::Deny);
         assert_eq!(
-            active_input_target(&state),
-            InputTarget::ShellApprovalEditor
+            input_context(&state),
+            InputContext::ShellApproval {
+                editing: true,
+                can_move_up: false,
+                can_move_down: false,
+            }
         );
 
         state.session.pending_shell_approvals.clear();
@@ -430,7 +449,10 @@ mod tests {
             .pending_ask_user
             .as_ref()
             .map(AskUserUiState::new);
-        assert_eq!(active_input_target(&state), InputTarget::AskUserSelection);
+        assert_eq!(
+            input_context(&state),
+            InputContext::AskUser { editing: false }
+        );
 
         state
             .ui
@@ -438,20 +460,20 @@ mod tests {
             .as_mut()
             .expect("ask user ui")
             .detail_editing = true;
-        assert_eq!(active_input_target(&state), InputTarget::AskUserEditor);
+        assert_eq!(
+            input_context(&state),
+            InputContext::AskUser { editing: true }
+        );
     }
 
     #[test]
-    fn active_input_target_prefers_review_then_picker_then_command_palette() {
+    fn input_context_prefers_review_then_picker_then_command_palette() {
         let mut state = state();
         state.ui.composer.composer.insert_str("/plan");
 
         state.session.planning.stage = PlanningStage::Review;
         state.session.planning.review = Some(PlanReviewState::Selection);
-        assert_eq!(
-            active_input_target(&state),
-            InputTarget::PlanReviewSelection
-        );
+        assert_eq!(input_context(&state), InputContext::PlanReview);
 
         state.session.planning.stage = PlanningStage::Idle;
         state.session.planning.review = None;
@@ -461,12 +483,12 @@ mod tests {
             planning_selected_index: 0,
             safety_selected_index: 0,
         });
-        assert_eq!(active_input_target(&state), InputTarget::Picker);
+        assert_eq!(input_context(&state), InputContext::Picker);
 
         state.ui.picker = None;
-        assert_eq!(active_input_target(&state), InputTarget::CommandPalette);
+        assert_eq!(input_context(&state), InputContext::CommandPalette);
 
         state.ui.composer.composer = crate::app::ui::new_composer_with_text("plain text");
-        assert_eq!(active_input_target(&state), InputTarget::Composer);
+        assert_eq!(input_context(&state), InputContext::Composer);
     }
 }

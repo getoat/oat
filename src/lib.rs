@@ -1,21 +1,21 @@
-pub mod agent;
-pub mod app;
-pub mod ask_user;
+mod agent;
+mod app;
+mod ask_user;
 mod command_history;
-pub mod completion_request;
+mod completion_request;
 mod composer;
-pub mod config;
-pub mod features;
-pub mod input;
-pub mod llm;
-pub mod model_registry;
+mod config;
+mod features;
+mod input;
+mod llm;
+mod model_registry;
 mod runtime;
-pub mod stats;
-pub mod subagents;
-pub mod token_counting;
-pub mod tool_policy;
-pub mod tools;
-pub mod ui;
+mod stats;
+mod subagents;
+mod token_counting;
+mod tool_policy;
+mod tools;
+mod ui;
 
 use std::{
     error::Error,
@@ -33,8 +33,8 @@ pub type Tui = Terminal<CrosstermBackend<Stdout>>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StartupOptions {
-    pub access_mode: app::AccessMode,
-    pub approval_mode: app::ApprovalMode,
+    access_mode: app::AccessMode,
+    approval_mode: app::ApprovalMode,
 }
 
 impl Default for StartupOptions {
@@ -46,23 +46,25 @@ impl Default for StartupOptions {
     }
 }
 
-pub fn run(terminal: &mut Tui, config: config::AppConfig) -> Result<(), Box<dyn Error>> {
-    run_with_options(terminal, config, StartupOptions::default())
+impl StartupOptions {
+    pub fn dangerous() -> Self {
+        Self {
+            access_mode: app::AccessMode::ReadWrite,
+            approval_mode: app::ApprovalMode::Disabled,
+        }
+    }
 }
 
-pub fn run_with_options(
-    terminal: &mut Tui,
-    config: config::AppConfig,
-    startup: StartupOptions,
-) -> Result<(), Box<dyn Error>> {
+pub fn run_default_tui(terminal: &mut Tui, startup: StartupOptions) -> Result<(), Box<dyn Error>> {
+    let config = config::AppConfig::load_from_default_path()?;
     runtime::tui::run_with_options(terminal, config, startup)
 }
 
-pub fn run_headless(
-    config: config::AppConfig,
+pub fn run_default_headless(
     startup: StartupOptions,
     prompt: String,
 ) -> Result<String, Box<dyn Error>> {
+    let config = config::AppConfig::load_from_default_path()?;
     runtime::headless::run_headless(config, startup, prompt)
 }
 

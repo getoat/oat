@@ -8,15 +8,15 @@ use rig::{
     completion::CompletionModel,
 };
 
-pub use ask_user::AskUserController;
+pub(crate) use ask_user::AskUserController;
 pub(crate) use ask_user::AskUserHook;
 pub(crate) use capture::{
     CompletionCaptureHook, STEP_BOUNDARY_REASON, StepBoundaryCapture, StepBoundaryHook,
     StepBoundaryState,
 };
-pub use shell_approval::ShellApprovalController;
+pub(crate) use shell_approval::ShellApprovalController;
 pub(crate) use shell_approval::ShellApprovalHook;
-pub use write_approval::WriteApprovalController;
+pub(crate) use write_approval::WriteApprovalController;
 pub(crate) use write_approval::WriteApprovalHook;
 
 #[derive(Clone)]

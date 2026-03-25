@@ -2,80 +2,31 @@ use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 
-use crate::app::{Action, EditorInput, EditorKey};
+use crate::app::{Action, EditorInput, EditorKey, InputContext};
 
 const MOUSE_SCROLL_LINES: usize = 3;
 
+#[cfg(test)]
 pub fn map_event(event: Event) -> Option<Action> {
-    map_event_with_state(event, false, false, false, false, false, false)
+    map_event_with_context(event, InputContext::Composer)
 }
 
-pub fn map_event_with_state(
-    event: Event,
-    awaiting_write_approval: bool,
-    awaiting_shell_approval: bool,
-    shell_approval_editing: bool,
-    awaiting_ask_user: bool,
-    selection_picker_visible: bool,
-    awaiting_plan_review: bool,
-) -> Option<Action> {
-    map_event_with_shell_editor_state(
-        event,
-        awaiting_write_approval,
-        awaiting_shell_approval,
-        shell_approval_editing,
-        false,
-        false,
-        awaiting_ask_user,
-        selection_picker_visible,
-        awaiting_plan_review,
-    )
-}
-
-pub fn map_event_with_shell_editor_state(
-    event: Event,
-    awaiting_write_approval: bool,
-    awaiting_shell_approval: bool,
-    shell_approval_editing: bool,
-    shell_approval_can_move_up: bool,
-    shell_approval_can_move_down: bool,
-    awaiting_ask_user: bool,
-    selection_picker_visible: bool,
-    awaiting_plan_review: bool,
-) -> Option<Action> {
+pub(crate) fn map_event_with_context(event: Event, context: InputContext) -> Option<Action> {
     match event {
-        Event::Key(key) if key.kind == KeyEventKind::Press => Some(map_key_event(
-            key,
-            awaiting_write_approval,
-            awaiting_shell_approval,
-            shell_approval_editing,
-            shell_approval_can_move_up,
-            shell_approval_can_move_down,
-            awaiting_ask_user,
-            selection_picker_visible,
-            awaiting_plan_review,
-        )),
+        Event::Key(key) if key.kind == KeyEventKind::Press => Some(map_key_event(key, context)),
         Event::Mouse(mouse) => map_mouse_event(mouse),
-        Event::Paste(text) => {
-            (!awaiting_write_approval && !awaiting_plan_review).then_some(Action::Paste(text))
-        }
+        Event::Paste(text) => (!matches!(
+            context,
+            InputContext::WriteApproval | InputContext::PlanReview
+        ))
+        .then_some(Action::Paste(text)),
         _ => None,
     }
 }
 
-fn map_key_event(
-    key: KeyEvent,
-    awaiting_write_approval: bool,
-    awaiting_shell_approval: bool,
-    shell_approval_editing: bool,
-    shell_approval_can_move_up: bool,
-    shell_approval_can_move_down: bool,
-    awaiting_ask_user: bool,
-    selection_picker_visible: bool,
-    awaiting_plan_review: bool,
-) -> Action {
-    if awaiting_write_approval {
-        return match (key.code, key.modifiers) {
+fn map_key_event(key: KeyEvent, context: InputContext) -> Action {
+    match context {
+        InputContext::WriteApproval => match (key.code, key.modifiers) {
             (KeyCode::Esc, _) => Action::CancelPendingReply,
             (KeyCode::Char('c'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
                 Action::ClearComposerOrQuit
@@ -88,24 +39,21 @@ fn map_key_event(
             (KeyCode::Home, _) => Action::ScrollHistoryToTop,
             (KeyCode::End, _) => Action::ScrollHistoryToBottom,
             _ => Action::Tick,
-        };
-    }
-
-    if awaiting_shell_approval {
-        return match (key.code, key.modifiers) {
+        },
+        InputContext::ShellApproval {
+            editing,
+            can_move_up,
+            can_move_down,
+        } => match (key.code, key.modifiers) {
             (KeyCode::Esc, _) => Action::CancelPendingReply,
             (KeyCode::Char('c'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
                 Action::ClearComposerOrQuit
             }
             (KeyCode::Tab, _) => Action::ShellApprovalToggleDetailEditor,
-            (KeyCode::Up, KeyModifiers::NONE)
-                if shell_approval_editing && shell_approval_can_move_up =>
-            {
+            (KeyCode::Up, KeyModifiers::NONE) if editing && can_move_up => {
                 Action::Editor(editor_input_from_key(key))
             }
-            (KeyCode::Down, KeyModifiers::NONE)
-                if shell_approval_editing && shell_approval_can_move_down =>
-            {
+            (KeyCode::Down, KeyModifiers::NONE) if editing && can_move_down => {
                 Action::Editor(editor_input_from_key(key))
             }
             (KeyCode::Up, KeyModifiers::NONE) => Action::SelectPreviousCommand,
@@ -115,13 +63,10 @@ fn map_key_event(
             (KeyCode::PageDown, _) => Action::ScrollHistoryPageDown,
             (KeyCode::Home, _) => Action::ScrollHistoryToTop,
             (KeyCode::End, _) => Action::ScrollHistoryToBottom,
-            _ if shell_approval_editing => Action::Editor(editor_input_from_key(key)),
+            _ if editing => Action::Editor(editor_input_from_key(key)),
             _ => Action::Tick,
-        };
-    }
-
-    if awaiting_ask_user {
-        return match (key.code, key.modifiers) {
+        },
+        InputContext::AskUser { .. } => match (key.code, key.modifiers) {
             (KeyCode::Esc, _) => Action::CancelPendingReply,
             (KeyCode::Char('c'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
                 Action::ClearComposerOrQuit
@@ -137,11 +82,8 @@ fn map_key_event(
             (KeyCode::End, _) => Action::ScrollHistoryToBottom,
             (KeyCode::Enter, _) => Action::SubmitMessage,
             _ => Action::Editor(editor_input_from_key(key)),
-        };
-    }
-
-    if awaiting_plan_review {
-        return match (key.code, key.modifiers) {
+        },
+        InputContext::PlanReview => match (key.code, key.modifiers) {
             (KeyCode::Char('1'), KeyModifiers::NONE) => Action::AcceptPlanAndImplement,
             (KeyCode::Char('2'), KeyModifiers::NONE) => Action::SuggestPlanChanges,
             (KeyCode::Up, KeyModifiers::NONE) => Action::SelectPreviousCommand,
@@ -152,34 +94,37 @@ fn map_key_event(
             (KeyCode::Home, _) => Action::ScrollHistoryToTop,
             (KeyCode::End, _) => Action::ScrollHistoryToBottom,
             _ => Action::Tick,
-        };
-    }
-
-    match (key.code, key.modifiers) {
-        (KeyCode::Esc, _) => Action::CancelPendingReply,
-        (KeyCode::Char('c'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
-            Action::ClearComposerOrQuit
-        }
-        (KeyCode::Tab, _) => Action::ToggleMode,
-        (KeyCode::Left, KeyModifiers::NONE) if selection_picker_visible => Action::PickerTabLeft,
-        (KeyCode::Right, KeyModifiers::NONE) if selection_picker_visible => Action::PickerTabRight,
-        (KeyCode::Char(' '), KeyModifiers::NONE) if selection_picker_visible => {
-            Action::TogglePickerSelection
-        }
-        (KeyCode::Up, KeyModifiers::NONE) => Action::SelectPreviousCommand,
-        (KeyCode::Down, KeyModifiers::NONE) => Action::SelectNextCommand,
-        (KeyCode::PageUp, _) => Action::ScrollHistoryPageUp,
-        (KeyCode::PageDown, _) => Action::ScrollHistoryPageDown,
-        (KeyCode::Home, _) => Action::ScrollHistoryToTop,
-        (KeyCode::End, _) => Action::ScrollHistoryToBottom,
-        (KeyCode::Enter, modifiers) if modifiers.contains(KeyModifiers::ALT) => {
-            Action::InsertComposerNewline
-        }
-        (KeyCode::Char('j'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
-            Action::InsertComposerNewline
-        }
-        (KeyCode::Enter, _) => Action::SubmitMessage,
-        _ => Action::Editor(editor_input_from_key(key)),
+        },
+        context => match (key.code, key.modifiers) {
+            (KeyCode::Esc, _) => Action::CancelPendingReply,
+            (KeyCode::Char('c'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
+                Action::ClearComposerOrQuit
+            }
+            (KeyCode::Tab, _) => Action::ToggleMode,
+            (KeyCode::Left, KeyModifiers::NONE) if context == InputContext::Picker => {
+                Action::PickerTabLeft
+            }
+            (KeyCode::Right, KeyModifiers::NONE) if context == InputContext::Picker => {
+                Action::PickerTabRight
+            }
+            (KeyCode::Char(' '), KeyModifiers::NONE) if context == InputContext::Picker => {
+                Action::TogglePickerSelection
+            }
+            (KeyCode::Up, KeyModifiers::NONE) => Action::SelectPreviousCommand,
+            (KeyCode::Down, KeyModifiers::NONE) => Action::SelectNextCommand,
+            (KeyCode::PageUp, _) => Action::ScrollHistoryPageUp,
+            (KeyCode::PageDown, _) => Action::ScrollHistoryPageDown,
+            (KeyCode::Home, _) => Action::ScrollHistoryToTop,
+            (KeyCode::End, _) => Action::ScrollHistoryToBottom,
+            (KeyCode::Enter, modifiers) if modifiers.contains(KeyModifiers::ALT) => {
+                Action::InsertComposerNewline
+            }
+            (KeyCode::Char('j'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
+                Action::InsertComposerNewline
+            }
+            (KeyCode::Enter, _) => Action::SubmitMessage,
+            _ => Action::Editor(editor_input_from_key(key)),
+        },
     }
 }
 
@@ -289,38 +234,23 @@ mod tests {
     #[test]
     fn picker_visible_remaps_left_right_and_space() {
         assert_eq!(
-            map_event_with_state(
+            map_event_with_context(
                 Event::Key(key(KeyCode::Left, KeyModifiers::NONE)),
-                false,
-                false,
-                false,
-                false,
-                true,
-                false
+                InputContext::Picker,
             ),
             Some(Action::PickerTabLeft)
         );
         assert_eq!(
-            map_event_with_state(
+            map_event_with_context(
                 Event::Key(key(KeyCode::Right, KeyModifiers::NONE)),
-                false,
-                false,
-                false,
-                false,
-                true,
-                false
+                InputContext::Picker,
             ),
             Some(Action::PickerTabRight)
         );
         assert_eq!(
-            map_event_with_state(
+            map_event_with_context(
                 Event::Key(key(KeyCode::Char(' '), KeyModifiers::NONE)),
-                false,
-                false,
-                false,
-                false,
-                true,
-                false
+                InputContext::Picker,
             ),
             Some(Action::TogglePickerSelection)
         );
@@ -359,38 +289,23 @@ mod tests {
     #[test]
     fn approval_prompt_maps_a_s_d_keys_to_write_decisions() {
         assert_eq!(
-            map_event_with_state(
+            map_event_with_context(
                 Event::Key(key(KeyCode::Char('a'), KeyModifiers::NONE)),
-                true,
-                false,
-                false,
-                false,
-                false,
-                false,
+                InputContext::WriteApproval,
             ),
             Some(Action::ApproveWriteOnce)
         );
         assert_eq!(
-            map_event_with_state(
+            map_event_with_context(
                 Event::Key(key(KeyCode::Char('s'), KeyModifiers::NONE)),
-                true,
-                false,
-                false,
-                false,
-                false,
-                false,
+                InputContext::WriteApproval,
             ),
             Some(Action::ApproveWriteAllSession)
         );
         assert_eq!(
-            map_event_with_state(
+            map_event_with_context(
                 Event::Key(key(KeyCode::Char('d'), KeyModifiers::NONE)),
-                true,
-                false,
-                false,
-                false,
-                false,
-                false,
+                InputContext::WriteApproval,
             ),
             Some(Action::DenyWrite)
         );
@@ -399,67 +314,35 @@ mod tests {
     #[test]
     fn approval_prompt_ignores_regular_typing_and_paste() {
         assert_eq!(
-            map_event_with_state(
+            map_event_with_context(
                 Event::Key(key(KeyCode::Char('x'), KeyModifiers::NONE)),
-                true,
-                false,
-                false,
-                false,
-                false,
-                false,
+                InputContext::WriteApproval,
             ),
             Some(Action::Tick)
         );
         assert_eq!(
-            map_event_with_state(
-                Event::Paste("hello".into()),
-                true,
-                false,
-                false,
-                false,
-                false,
-                false
-            ),
+            map_event_with_context(Event::Paste("hello".into()), InputContext::WriteApproval),
             None
         );
     }
 
     #[test]
     fn shell_approval_prompt_maps_navigation_and_submit() {
+        let context = InputContext::ShellApproval {
+            editing: false,
+            can_move_up: false,
+            can_move_down: false,
+        };
         assert_eq!(
-            map_event_with_state(
-                Event::Key(key(KeyCode::Up, KeyModifiers::NONE)),
-                false,
-                true,
-                false,
-                false,
-                false,
-                false,
-            ),
+            map_event_with_context(Event::Key(key(KeyCode::Up, KeyModifiers::NONE)), context),
             Some(Action::SelectPreviousCommand)
         );
         assert_eq!(
-            map_event_with_state(
-                Event::Key(key(KeyCode::Enter, KeyModifiers::NONE)),
-                false,
-                true,
-                false,
-                false,
-                false,
-                false,
-            ),
+            map_event_with_context(Event::Key(key(KeyCode::Enter, KeyModifiers::NONE)), context),
             Some(Action::SubmitMessage)
         );
         assert_eq!(
-            map_event_with_state(
-                Event::Key(key(KeyCode::Tab, KeyModifiers::NONE)),
-                false,
-                true,
-                false,
-                false,
-                false,
-                false,
-            ),
+            map_event_with_context(Event::Key(key(KeyCode::Tab, KeyModifiers::NONE)), context),
             Some(Action::ShellApprovalToggleDetailEditor)
         );
     }
@@ -468,32 +351,26 @@ mod tests {
     fn shell_approval_editor_uses_up_down_for_multiline_navigation_when_possible() {
         let up = key(KeyCode::Up, KeyModifiers::NONE);
         assert_eq!(
-            map_event_with_shell_editor_state(
+            map_event_with_context(
                 Event::Key(up),
-                false,
-                true,
-                true,
-                true,
-                false,
-                false,
-                false,
-                false,
+                InputContext::ShellApproval {
+                    editing: true,
+                    can_move_up: true,
+                    can_move_down: false,
+                },
             ),
             Some(Action::Editor(editor_input_from_key(up)))
         );
 
         let down = key(KeyCode::Down, KeyModifiers::NONE);
         assert_eq!(
-            map_event_with_shell_editor_state(
+            map_event_with_context(
                 Event::Key(down),
-                false,
-                true,
-                true,
-                false,
-                true,
-                false,
-                false,
-                false,
+                InputContext::ShellApproval {
+                    editing: true,
+                    can_move_up: false,
+                    can_move_down: true,
+                },
             ),
             Some(Action::Editor(editor_input_from_key(down)))
         );
@@ -502,30 +379,24 @@ mod tests {
     #[test]
     fn shell_approval_editor_uses_option_navigation_at_text_bounds() {
         assert_eq!(
-            map_event_with_shell_editor_state(
+            map_event_with_context(
                 Event::Key(key(KeyCode::Up, KeyModifiers::NONE)),
-                false,
-                true,
-                true,
-                false,
-                true,
-                false,
-                false,
-                false,
+                InputContext::ShellApproval {
+                    editing: true,
+                    can_move_up: false,
+                    can_move_down: true,
+                },
             ),
             Some(Action::SelectPreviousCommand)
         );
         assert_eq!(
-            map_event_with_shell_editor_state(
+            map_event_with_context(
                 Event::Key(key(KeyCode::Down, KeyModifiers::NONE)),
-                false,
-                true,
-                true,
-                true,
-                false,
-                false,
-                false,
-                false,
+                InputContext::ShellApproval {
+                    editing: true,
+                    can_move_up: true,
+                    can_move_down: false,
+                },
             ),
             Some(Action::SelectNextCommand)
         );
@@ -534,62 +405,37 @@ mod tests {
     #[test]
     fn plan_review_prompt_maps_numeric_choices() {
         assert_eq!(
-            map_event_with_state(
+            map_event_with_context(
                 Event::Key(key(KeyCode::Char('1'), KeyModifiers::NONE)),
-                false,
-                false,
-                false,
-                false,
-                false,
-                true,
+                InputContext::PlanReview,
             ),
             Some(Action::AcceptPlanAndImplement)
         );
         assert_eq!(
-            map_event_with_state(
+            map_event_with_context(
                 Event::Key(key(KeyCode::Char('2'), KeyModifiers::NONE)),
-                false,
-                false,
-                false,
-                false,
-                false,
-                true,
+                InputContext::PlanReview,
             ),
             Some(Action::SuggestPlanChanges)
         );
         assert_eq!(
-            map_event_with_state(
+            map_event_with_context(
                 Event::Key(key(KeyCode::Up, KeyModifiers::NONE)),
-                false,
-                false,
-                false,
-                false,
-                false,
-                true,
+                InputContext::PlanReview,
             ),
             Some(Action::SelectPreviousCommand)
         );
         assert_eq!(
-            map_event_with_state(
+            map_event_with_context(
                 Event::Key(key(KeyCode::Down, KeyModifiers::NONE)),
-                false,
-                false,
-                false,
-                false,
-                false,
-                true,
+                InputContext::PlanReview,
             ),
             Some(Action::SelectNextCommand)
         );
         assert_eq!(
-            map_event_with_state(
+            map_event_with_context(
                 Event::Key(key(KeyCode::Enter, KeyModifiers::NONE)),
-                false,
-                false,
-                false,
-                false,
-                false,
-                true,
+                InputContext::PlanReview,
             ),
             Some(Action::SubmitMessage)
         );
@@ -598,67 +444,31 @@ mod tests {
     #[test]
     fn plan_review_prompt_ignores_regular_typing_and_paste() {
         assert_eq!(
-            map_event_with_state(
+            map_event_with_context(
                 Event::Key(key(KeyCode::Char('x'), KeyModifiers::NONE)),
-                false,
-                false,
-                false,
-                false,
-                false,
-                true,
+                InputContext::PlanReview,
             ),
             Some(Action::Tick)
         );
         assert_eq!(
-            map_event_with_state(
-                Event::Paste("hello".into()),
-                false,
-                false,
-                false,
-                false,
-                false,
-                true
-            ),
+            map_event_with_context(Event::Paste("hello".into()), InputContext::PlanReview),
             None
         );
     }
 
     #[test]
     fn ask_user_mode_remaps_tab_and_horizontal_arrows() {
+        let context = InputContext::AskUser { editing: false };
         assert_eq!(
-            map_event_with_state(
-                Event::Key(key(KeyCode::Left, KeyModifiers::NONE)),
-                false,
-                false,
-                false,
-                true,
-                false,
-                false,
-            ),
+            map_event_with_context(Event::Key(key(KeyCode::Left, KeyModifiers::NONE)), context),
             Some(Action::AskUserTabLeft)
         );
         assert_eq!(
-            map_event_with_state(
-                Event::Key(key(KeyCode::Right, KeyModifiers::NONE)),
-                false,
-                false,
-                false,
-                true,
-                false,
-                false,
-            ),
+            map_event_with_context(Event::Key(key(KeyCode::Right, KeyModifiers::NONE)), context),
             Some(Action::AskUserTabRight)
         );
         assert_eq!(
-            map_event_with_state(
-                Event::Key(key(KeyCode::Tab, KeyModifiers::NONE)),
-                false,
-                false,
-                false,
-                true,
-                false,
-                false,
-            ),
+            map_event_with_context(Event::Key(key(KeyCode::Tab, KeyModifiers::NONE)), context),
             Some(Action::AskUserToggleDetailEditor)
         );
     }

@@ -32,10 +32,6 @@ impl HistoryViewState {
         self.scroll_top.is_some()
     }
 
-    pub fn reset(&mut self) {
-        *self = Self::default();
-    }
-
     pub fn sync_viewport(&mut self, total_lines: usize, viewport_rows: usize) -> usize {
         self.total_lines = total_lines;
         self.viewport_rows = viewport_rows.max(1);

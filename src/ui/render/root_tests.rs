@@ -10,23 +10,17 @@ use std::{
 };
 
 use crate::{
-    app::{Action, Effect, MessageStyle},
-    ask_user::{AskUserAnswer, AskUserQuestion, AskUserRequest},
+    app::{Action, Effect},
     config::ReasoningEffort,
     stats::StatsTotals,
     tools::{DiffKind, DiffPreviewLine, MutationPreview, mutation_preview},
 };
 
 use super::*;
-use crate::ui::{
-    history::scrollbar_thumb_bounds,
-    markdown::{
-        MarkdownSegment, markdown_segments, message_style, normalized_highlight_language,
-        rendered_line_text,
-    },
-    tool_activity::push_mutation_tool_call_lines,
-    wrap::wrap_text,
+use crate::ui::render::test_support::{
+    buffer_lines, buffer_string, word_has_foreground, word_has_modifier,
 };
+use crate::ui::{markdown::rendered_line_text, tool_activity::push_mutation_tool_call_lines};
 
 struct TempTree {
     root: PathBuf,
@@ -56,91 +50,6 @@ impl Drop for TempTree {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.root);
     }
-}
-
-fn ask_user_request() -> AskUserRequest {
-    AskUserRequest {
-        title: Some("Clarify implementation".into()),
-        questions: vec![AskUserQuestion {
-            id: "scope".into(),
-            prompt: "Which scope should this change cover?".into(),
-            answers: vec![
-                AskUserAnswer {
-                    id: "narrow".into(),
-                    label: "Only the parser".into(),
-                },
-                AskUserAnswer {
-                    id: "broad".into(),
-                    label: "The full pipeline".into(),
-                },
-            ],
-        }],
-    }
-}
-
-#[test]
-fn wrap_text_respects_width_and_newlines() {
-    assert_eq!(wrap_text("", 4), vec![String::new()]);
-    assert_eq!(wrap_text("abcde", 2), vec!["ab", "cd", "e"]);
-    assert_eq!(wrap_text("ab\ncd", 2), vec!["ab", "cd"]);
-}
-
-#[test]
-fn wrap_text_keeps_punctuation_with_the_word_before_it() {
-    assert_eq!(wrap_text("flight style .", 13), vec!["flight style", "."]);
-    assert_eq!(wrap_text("flight style.", 13), vec!["flight style."]);
-}
-
-#[test]
-fn markdown_segments_leave_plain_text_unchanged() {
-    assert_eq!(
-        markdown_segments("plain text"),
-        vec![MarkdownSegment::Markdown("plain text".into())]
-    );
-}
-
-#[test]
-fn markdown_segments_extract_fenced_code_blocks_with_language() {
-    assert_eq!(
-        markdown_segments("Before\n```rust\nlet value = 1;\n```\nAfter"),
-        vec![
-            MarkdownSegment::Markdown("Before\n".into()),
-            MarkdownSegment::CodeBlock {
-                language: Some("rust".into()),
-                code: "let value = 1;\n".into(),
-            },
-            MarkdownSegment::Markdown("After".into()),
-        ]
-    );
-}
-
-#[test]
-fn markdown_segments_extract_fenced_code_blocks_without_language() {
-    assert_eq!(
-        markdown_segments("```\nplain text\n```"),
-        vec![MarkdownSegment::CodeBlock {
-            language: None,
-            code: "plain text\n".into(),
-        }]
-    );
-}
-
-#[test]
-fn markdown_segments_fall_back_to_plain_markdown_for_unclosed_fences() {
-    assert_eq!(
-        markdown_segments("Before\n```rust\nlet value = 1;\n"),
-        vec![MarkdownSegment::Markdown(
-            "Before\n```rust\nlet value = 1;\n".into()
-        )]
-    );
-}
-
-#[test]
-fn normalized_highlight_language_maps_csharp_aliases() {
-    assert_eq!(normalized_highlight_language(Some("csharp")), Some("C#"));
-    assert_eq!(normalized_highlight_language(Some("c#")), Some("C#"));
-    assert_eq!(normalized_highlight_language(Some("c sharp")), Some("C#"));
-    assert_eq!(normalized_highlight_language(Some("rust")), Some("rust"));
 }
 
 #[test]
@@ -241,231 +150,6 @@ fn render_keeps_startup_banner_sparkling() {
         before != after,
         "expected startup banner sparkle colors to change over time"
     );
-}
-
-#[test]
-fn render_shows_model_picker_details() {
-    let backend = TestBackend::new(160, 12);
-    let mut terminal = Terminal::new(backend).expect("test terminal");
-    let mut app = App::new(true, false, "gpt-5.4", ReasoningEffort::Medium);
-    app.open_model_picker();
-
-    terminal
-        .draw(|frame| render(frame, &mut app))
-        .expect("render succeeds");
-
-    let rendered = buffer_string(terminal.backend());
-    assert!(rendered.contains("Models"));
-    assert!(rendered.contains("gpt-5.4"));
-    assert!(rendered.contains("Azure OpenAI"));
-    assert!(rendered.contains("ctx 272K"));
-    assert!(!rendered.contains(">272K"));
-}
-
-#[test]
-fn render_shows_reasoning_picker() {
-    let backend = TestBackend::new(120, 12);
-    let mut terminal = Terminal::new(backend).expect("test terminal");
-    let mut app = App::new(true, false, "gpt-5.4", ReasoningEffort::Medium);
-    app.open_reasoning_picker();
-
-    terminal
-        .draw(|frame| render(frame, &mut app))
-        .expect("render succeeds");
-
-    let rendered = buffer_string(terminal.backend());
-    assert!(rendered.contains("Reasoning"));
-    assert!(rendered.contains("low"));
-    assert!(rendered.contains("medium"));
-    assert!(rendered.contains("high"));
-}
-
-#[test]
-fn mode_status_label_marks_session_preapproved_write_mode() {
-    assert_eq!(
-        helpers::mode_status_label(
-            crate::app::AccessMode::ReadWrite,
-            crate::app::ApprovalMode::Manual,
-            false,
-        ),
-        "Write"
-    );
-    assert_eq!(
-        helpers::mode_status_label(
-            crate::app::AccessMode::ReadWrite,
-            crate::app::ApprovalMode::Disabled,
-            false,
-        ),
-        "Write (!)"
-    );
-}
-
-#[test]
-fn mode_status_label_prefers_plan_state() {
-    assert_eq!(
-        helpers::mode_status_label(
-            crate::app::AccessMode::ReadOnly,
-            crate::app::ApprovalMode::Manual,
-            true,
-        ),
-        "Plan"
-    );
-    assert_eq!(
-        helpers::mode_status_label(
-            crate::app::AccessMode::ReadWrite,
-            crate::app::ApprovalMode::Disabled,
-            true,
-        ),
-        "Plan"
-    );
-}
-
-#[test]
-fn render_shows_plan_footer_and_accent_during_planning_draft() {
-    let backend = TestBackend::new(120, 12);
-    let mut terminal = Terminal::new(backend).expect("test terminal");
-    let mut app = App::new(true, false, "gpt-5.4-mini", ReasoningEffort::Medium);
-    app.enter_planning_draft_mode();
-
-    terminal
-        .draw(|frame| render(frame, &mut app))
-        .expect("render succeeds");
-
-    let rendered = buffer_string(terminal.backend());
-    assert!(rendered.contains("Plan"));
-    assert!(word_has_foreground(
-        terminal.backend().buffer(),
-        "Plan",
-        accent_color(app.mode(), true),
-    ));
-}
-
-#[test]
-fn render_shows_plan_footer_while_planning_run_is_pending() {
-    let backend = TestBackend::new(120, 12);
-    let mut terminal = Terminal::new(backend).expect("test terminal");
-    let mut app = App::new(true, false, "gpt-5.4-mini", ReasoningEffort::Medium);
-    app.enter_planning_draft_mode();
-    app.composer_mut().insert_str("Make a roadmap");
-    let effect = app.apply(Action::SubmitMessage);
-    assert!(matches!(effect, Some(Effect::PromptModel { .. })));
-
-    terminal
-        .draw(|frame| render(frame, &mut app))
-        .expect("render succeeds");
-
-    let rendered = buffer_string(terminal.backend());
-    assert!(rendered.contains("Plan"));
-    assert!(!app.planning_draft_mode());
-    assert!(app.plan_active());
-    assert!(word_has_foreground(
-        terminal.backend().buffer(),
-        "Plan",
-        accent_color(app.mode(), true),
-    ));
-}
-
-#[test]
-fn render_replaces_input_with_plan_review_prompt() {
-    let backend = TestBackend::new(120, 12);
-    let mut terminal = Terminal::new(backend).expect("test terminal");
-    let mut app = App::new(true, false, "gpt-5.4-mini", ReasoningEffort::Medium);
-    app.begin_plan_review();
-
-    terminal
-        .draw(|frame| render(frame, &mut app))
-        .expect("render succeeds");
-
-    let rendered = buffer_string(terminal.backend());
-    assert!(rendered.contains("Plan Ready"));
-    assert!(rendered.contains("Accept this plan and begin implementation"));
-    assert!(rendered.contains("Suggest changes to the plan"));
-    assert!(rendered.contains("› [1]"));
-}
-
-#[test]
-fn render_replaces_input_with_ask_user_panel() {
-    let backend = TestBackend::new(120, 14);
-    let mut terminal = Terminal::new(backend).expect("test terminal");
-    let mut app = App::new(true, false, "gpt-5.4-mini", ReasoningEffort::Medium);
-    app.begin_ask_user("call-1".into(), ask_user_request());
-
-    terminal
-        .draw(|frame| render(frame, &mut app))
-        .expect("render succeeds");
-
-    let rendered = buffer_string(terminal.backend());
-    assert!(rendered.contains("Clarify implementation"));
-    assert!(rendered.contains("Recommended"));
-    assert!(rendered.contains("Something else"));
-    assert!(rendered.contains("Review"));
-    assert!(rendered.contains("Tab to add optional details"));
-    assert!(rendered.contains("Which scope should this change cover?"));
-}
-
-#[test]
-fn render_shows_typed_ask_user_detail_text() {
-    let backend = TestBackend::new(120, 16);
-    let mut terminal = Terminal::new(backend).expect("test terminal");
-    let mut app = App::new(true, false, "gpt-5.4-mini", ReasoningEffort::Medium);
-    app.begin_ask_user("call-1".into(), ask_user_request());
-    app.apply(Action::AskUserToggleDetailEditor);
-    app.apply(Action::Paste("typed details".into()));
-
-    terminal
-        .draw(|frame| render(frame, &mut app))
-        .expect("render succeeds");
-
-    let rendered = buffer_string(terminal.backend());
-    assert!(rendered.contains("typed details"));
-    assert!(rendered.contains("Details (editing)"));
-}
-
-#[test]
-fn render_shows_multiline_shell_command_as_multiple_rows() {
-    let backend = TestBackend::new(120, 18);
-    let mut terminal = Terminal::new(backend).expect("test terminal");
-    let mut app = App::new(true, false, "gpt-5.4-mini", ReasoningEffort::Medium);
-    app.composer_mut().insert_str("run shell");
-    app.apply(Action::SubmitMessage);
-    app.apply(Action::StreamEvent {
-        reply_id: 1,
-        event: crate::app::StreamEvent::ShellApprovalRequested {
-            request_id: "call-1".into(),
-            risk: crate::app::CommandRisk::Low,
-            risk_explanation: "read-only inspection command with no obvious mutation".into(),
-            command: "printf 'one\\n'\nprintf 'two\\n'".into(),
-            working_directory: ".".into(),
-            reason: "inspect output".into(),
-        },
-    });
-
-    terminal
-        .draw(|frame| render(frame, &mut app))
-        .expect("render succeeds");
-
-    let rendered = buffer_string(terminal.backend());
-    let lines = buffer_lines(terminal.backend());
-    assert!(rendered.contains("Shell Approval Required"));
-    assert!(rendered.contains("Command:"));
-    assert!(lines.iter().any(|line| line.contains("printf 'one\\n'")));
-    assert!(lines.iter().any(|line| line.contains("printf 'two\\n'")));
-}
-
-#[test]
-fn render_highlights_selected_plan_review_option() {
-    let backend = TestBackend::new(120, 12);
-    let mut terminal = Terminal::new(backend).expect("test terminal");
-    let mut app = App::new(true, false, "gpt-5.4-mini", ReasoningEffort::Medium);
-    app.begin_plan_review();
-    app.apply(Action::SelectNextCommand);
-
-    terminal
-        .draw(|frame| render(frame, &mut app))
-        .expect("render succeeds");
-
-    let rendered = buffer_string(terminal.backend());
-    assert!(rendered.contains("› [2]"));
 }
 
 #[test]
@@ -637,109 +321,6 @@ fn render_approval_pending_takes_precedence_over_pinned_history_busy_indicator()
 }
 
 #[test]
-fn pending_write_approval_height_matches_wrapped_summary_lines() {
-    let short = crate::app::PendingWriteApproval {
-            request_id: "call-1".into(),
-            tool_name: "ApplyPatches".into(),
-            arguments: "{\"filename\":\"src/lib.rs\",\"patches\":[{\"old_text\":\"a\",\"new_text\":\"b\"}],\"intent\":\"Fix startup\"}".into(),
-            summary: "Fix startup".into(),
-            target: Some("src/lib.rs".into()),
-            source_label: None,
-        };
-    assert_eq!(pending_write_approval_height(&short, 120), 6);
-
-    let wrapped = crate::app::PendingWriteApproval {
-            request_id: "call-2".into(),
-            tool_name: "ApplyPatches".into(),
-            arguments: "{\"filename\":\"src/lib.rs\",\"patches\":[{\"old_text\":\"a\",\"new_text\":\"b\"}],\"intent\":\"Fix the broken startup path so the app launches again after config bootstrap changes\"}".into(),
-            summary:
-                "Fix the broken startup path so the app launches again after config bootstrap changes"
-                    .into(),
-            target: Some("src/lib.rs".into()),
-            source_label: None,
-        };
-    assert!(pending_write_approval_height(&wrapped, 36) > 6);
-}
-
-#[test]
-fn pending_shell_approval_height_grows_for_multiline_commands() {
-    let mut short = App::new(true, false, "gpt-5.4-mini", ReasoningEffort::Medium);
-    short
-        .session
-        .pending_shell_approvals
-        .push_back(crate::app::PendingShellApproval::new(
-            "call-1".into(),
-            crate::app::CommandRisk::Low,
-            "read-only inspection command with no obvious mutation".into(),
-            "pwd".into(),
-            ".".into(),
-            "inspect workspace".into(),
-            None,
-        ));
-    short.ui.pending_shell_approval = short
-        .session
-        .pending_shell_approvals
-        .front()
-        .map(crate::app::ui::ShellApprovalUiState::new);
-
-    let mut multiline = App::new(true, false, "gpt-5.4-mini", ReasoningEffort::Medium);
-    multiline
-        .session
-        .pending_shell_approvals
-        .push_back(crate::app::PendingShellApproval::new(
-            "call-2".into(),
-            crate::app::CommandRisk::Low,
-            "read-only inspection command with no obvious mutation".into(),
-            "printf one\nprintf two".into(),
-            ".".into(),
-            "inspect workspace".into(),
-            None,
-        ));
-    multiline.ui.pending_shell_approval = multiline
-        .session
-        .pending_shell_approvals
-        .front()
-        .map(crate::app::ui::ShellApprovalUiState::new);
-
-    assert!(
-        pending_shell_approval_height(&multiline, 120) > pending_shell_approval_height(&short, 120)
-    );
-}
-
-#[test]
-fn render_replaces_input_with_three_line_write_approval_panel() {
-    let backend = TestBackend::new(120, 12);
-    let mut terminal = Terminal::new(backend).expect("test terminal");
-    let mut app = App::new(true, false, "gpt-5-mini", ReasoningEffort::Medium);
-    app.composer_mut().insert_str("edit this file");
-    app.apply(Action::SubmitMessage);
-    app.apply(Action::StreamEvent {
-            reply_id: 1,
-            event: crate::app::StreamEvent::WriteApprovalRequested {
-                request_id: "call-1".into(),
-                tool_name: "ApplyPatches".into(),
-                arguments: "{\"filename\":\"src/lib.rs\",\"patches\":[{\"old_text\":\"a\",\"new_text\":\"b\"}],\"intent\":\"Fix the broken startup path so the app launches again\"}".into(),
-            },
-        });
-
-    terminal
-        .draw(|frame| render(frame, &mut app))
-        .expect("render succeeds");
-
-    let rendered = buffer_string(terminal.backend());
-    let lines = buffer_lines(terminal.backend());
-
-    assert!(rendered.contains("Fix the broken startup path so the app launches again"));
-    assert!(lines.iter().any(|line| line.contains("[a] allow once")));
-    assert!(
-        lines
-            .iter()
-            .any(|line| line.contains("[s] allow all this session"))
-    );
-    assert!(lines.iter().any(|line| line.contains("[d] deny")));
-}
-
-#[test]
 fn render_write_approval_panel_identifies_subagent_source() {
     let backend = TestBackend::new(120, 12);
     let mut terminal = Terminal::new(backend).expect("test terminal");
@@ -789,12 +370,6 @@ fn render_shows_latest_subagent_tool_name() {
     let lines = buffer_lines(terminal.backend());
     assert!(lines.iter().any(|line| line.contains("subagent-2")));
     assert!(lines.iter().any(|line| line.contains("tool: Grep")));
-}
-
-#[test]
-fn message_style_marks_thinking_as_italic() {
-    let style = message_style(MessageStyle::Thinking);
-    assert!(style.add_modifier.contains(Modifier::ITALIC));
 }
 
 #[test]
@@ -1480,48 +1055,6 @@ fn render_pads_shorter_code_block_lines_to_the_block_width() {
 }
 
 #[test]
-fn render_input_does_not_underline_the_cursor_line() {
-    let backend = TestBackend::new(60, 8);
-    let mut terminal = Terminal::new(backend).expect("test terminal");
-    let mut app = App::new(true, false, "gpt-5-mini", ReasoningEffort::Medium);
-    app.composer_mut().insert_str("draft");
-
-    terminal
-        .draw(|frame| render(frame, &mut app))
-        .expect("render succeeds");
-
-    let buffer = terminal.backend().buffer();
-    assert!(
-        !word_has_modifier(buffer, "draft", Modifier::UNDERLINED),
-        "expected input text not to render with underline"
-    );
-}
-
-#[test]
-fn render_wraps_composer_text_instead_of_horizontally_scrolling() {
-    let backend = TestBackend::new(16, 10);
-    let mut terminal = Terminal::new(backend).expect("test terminal");
-    let mut app = App::new(true, false, "gpt-5-mini", ReasoningEffort::Medium);
-    app.composer_mut().insert_str("alpha beta gamma");
-
-    terminal
-        .draw(|frame| render(frame, &mut app))
-        .expect("render succeeds");
-
-    let rendered_lines = buffer_lines(terminal.backend());
-    assert!(
-        rendered_lines
-            .iter()
-            .any(|line| line.contains("alpha beta")),
-        "expected first wrapped row in composer: {rendered_lines:?}"
-    );
-    assert!(
-        rendered_lines.iter().any(|line| line.contains("gamma")),
-        "expected later wrapped row in composer: {rendered_lines:?}"
-    );
-}
-
-#[test]
 fn render_scrollback_reveals_older_messages() {
     let backend = TestBackend::new(60, 8);
     let mut terminal = Terminal::new(backend).expect("test terminal");
@@ -1672,65 +1205,6 @@ fn render_draws_accented_scrollbar_for_overflowing_history() {
     );
 }
 
-#[test]
-fn scrollbar_thumb_reaches_bottom_at_max_scroll() {
-    let (start, len) = scrollbar_thumb_bounds(10, 30, 6, 24);
-
-    assert_eq!(start + len, 10);
-}
-
-#[test]
-fn scrollbar_thumb_size_stays_constant_while_scrolling() {
-    let positions = [0, 3, 6, 9, 12, 15, 18, 21, 24];
-    let lengths = positions
-        .into_iter()
-        .map(|position| scrollbar_thumb_bounds(10, 30, 6, position).1)
-        .collect::<Vec<_>>();
-
-    assert!(lengths.iter().all(|length| *length == lengths[0]));
-}
-
-fn buffer_string(backend: &TestBackend) -> String {
-    backend
-        .buffer()
-        .content
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect::<String>()
-}
-
-fn buffer_lines(backend: &TestBackend) -> Vec<String> {
-    let buffer = backend.buffer();
-    let width = buffer.area.width as usize;
-    buffer
-        .content
-        .chunks(width)
-        .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
-        .collect()
-}
-
-fn word_has_modifier(buffer: &ratatui::buffer::Buffer, word: &str, modifier: Modifier) -> bool {
-    let width = buffer.area.width as usize;
-    let symbols = word.chars().map(|ch| ch.to_string()).collect::<Vec<_>>();
-
-    for row in buffer.content.chunks(width) {
-        for start in 0..=row.len().saturating_sub(symbols.len()) {
-            if row[start..start + symbols.len()]
-                .iter()
-                .map(|cell| cell.symbol())
-                .eq(symbols.iter().map(String::as_str))
-                && row[start..start + symbols.len()]
-                    .iter()
-                    .all(|cell| cell.modifier.contains(modifier))
-            {
-                return true;
-            }
-        }
-    }
-
-    false
-}
-
 fn word_has_background(buffer: &ratatui::buffer::Buffer, word: &str, background: Color) -> bool {
     let width = buffer.area.width as usize;
     let symbols = word.chars().map(|ch| ch.to_string()).collect::<Vec<_>>();
@@ -1752,29 +1226,6 @@ fn word_has_background(buffer: &ratatui::buffer::Buffer, word: &str, background:
 
     false
 }
-
-fn word_has_foreground(buffer: &ratatui::buffer::Buffer, word: &str, foreground: Color) -> bool {
-    let width = buffer.area.width as usize;
-    let symbols = word.chars().map(|ch| ch.to_string()).collect::<Vec<_>>();
-
-    for row in buffer.content.chunks(width) {
-        for start in 0..=row.len().saturating_sub(symbols.len()) {
-            if row[start..start + symbols.len()]
-                .iter()
-                .map(|cell| cell.symbol())
-                .eq(symbols.iter().map(String::as_str))
-                && row[start..start + symbols.len()]
-                    .iter()
-                    .all(|cell| cell.fg == foreground)
-            {
-                return true;
-            }
-        }
-    }
-
-    false
-}
-
 fn word_has_foreground_not(
     buffer: &ratatui::buffer::Buffer,
     word: &str,

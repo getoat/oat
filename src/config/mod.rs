@@ -20,9 +20,9 @@ pub(crate) use paths::default_config_locations;
 use paths::{default_config_update_path, default_home_config_path};
 #[cfg(test)]
 use types::default_api_version;
-pub use types::{
-    AppConfig, AzureConfig, ReasoningEffort, SafetyConfig, SubagentConfig, ToolConfig, UiConfig,
-};
+pub(crate) use types::{AppConfig, ReasoningEffort};
+#[cfg(test)]
+pub(crate) use types::{AzureConfig, SafetyConfig, SubagentConfig, ToolConfig, UiConfig};
 use updates::write_config_updates_at_path;
 
 const DEFAULT_CONFIG_PATH: &str = "config.toml";
@@ -72,6 +72,7 @@ impl AppConfig {
         Ok(config)
     }
 
+    #[cfg(test)]
     pub fn load_from_path(path: &Path) -> Result<Self> {
         let raw = fs::read_to_string(path).with_context(|| {
             format!(
@@ -105,30 +106,13 @@ impl AppConfig {
         Self::load_from_default_path()
     }
 
+    #[cfg(test)]
     pub fn set_reasoning_effort_at_path(
         path: &Path,
         reasoning_effort: ReasoningEffort,
     ) -> Result<Self> {
         write_config_updates_at_path(path, None, Some(reasoning_effort), None, None, None)?;
         Self::load_from_path(path)
-    }
-
-    pub fn set_default_model_selection(
-        model_name: &str,
-        reasoning_effort: ReasoningEffort,
-    ) -> Result<Self> {
-        let home_path = default_home_config_path(HOME_CONFIG_RELATIVE_PATH);
-        let cwd_path = PathBuf::from(DEFAULT_CONFIG_PATH);
-        let target_path = default_config_update_path(home_path.as_deref(), Some(&cwd_path))?;
-        write_config_updates_at_path(
-            &target_path,
-            Some(model_name),
-            Some(reasoning_effort),
-            None,
-            None,
-            None,
-        )?;
-        Self::load_from_default_path()
     }
 
     pub fn set_default_model_selection_with_planning(
@@ -150,6 +134,7 @@ impl AppConfig {
         Self::load_from_default_path()
     }
 
+    #[cfg(test)]
     pub fn set_model_selection_at_path(
         path: &Path,
         model_name: &str,
@@ -174,6 +159,7 @@ impl AppConfig {
         Self::load_from_default_path()
     }
 
+    #[cfg(test)]
     pub fn set_planning_agents_at_path(
         path: &Path,
         planning_agents: &[PlanningAgentConfig],
@@ -200,6 +186,7 @@ impl AppConfig {
         Self::load_from_default_path()
     }
 
+    #[cfg(test)]
     pub fn set_safety_selection_at_path(
         path: &Path,
         model_name: &str,

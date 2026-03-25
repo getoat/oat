@@ -1,7 +1,7 @@
 use ratatui_textarea::{Input, Key, TextArea};
 
 use crate::{
-    app::session::{AccessMode, EditorInput, EditorKey},
+    app::session::{EditorInput, EditorKey},
     composer::ComposerLayout,
     model_registry,
 };
@@ -63,10 +63,6 @@ pub fn textarea_input(input: &EditorInput) -> Input {
 
 pub fn normalize_pasted_line_endings(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\r', "\n")
-}
-
-pub fn welcome_message(model_name: &str, mode: AccessMode) -> String {
-    crate::app::session::startup_banner_message(model_name, mode)
 }
 
 pub fn picker_height(picker: &SelectionPicker) -> u16 {

@@ -138,10 +138,6 @@ pub fn recommended_prompt_token_budget(name: &str) -> Option<usize> {
     find_model(name).map(|model| model.recommended_prompt_token_budget())
 }
 
-pub fn compaction_trigger_percent_used(name: &str) -> Option<u8> {
-    find_model(name).map(|model| model.compaction_trigger_percent_used())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

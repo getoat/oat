@@ -631,4 +631,17 @@ mod tests {
 
         assert_eq!(separator_index + 1, commentary_index);
     }
+
+    #[test]
+    fn scrollbar_thumb_reaches_bottom_at_max_scroll() {
+        let (start, len) = scrollbar_thumb_bounds(10, 30, 6, 24);
+        assert_eq!(start + len, 10);
+    }
+
+    #[test]
+    fn scrollbar_thumb_size_stays_constant_while_scrolling() {
+        assert_eq!(scrollbar_thumb_bounds(10, 30, 10, 0).1, 3);
+        assert_eq!(scrollbar_thumb_bounds(10, 30, 10, 10).1, 3);
+        assert_eq!(scrollbar_thumb_bounds(10, 30, 10, 20).1, 3);
+    }
 }

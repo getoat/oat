@@ -5,10 +5,7 @@ use std::{
     process,
 };
 
-use oat::{
-    StartupOptions,
-    app::{AccessMode, ApprovalMode},
-};
+use oat::StartupOptions;
 
 #[derive(Debug, PartialEq, Eq)]
 struct CliOptions {
@@ -20,10 +17,7 @@ struct CliOptions {
 impl CliOptions {
     fn startup_options(&self) -> StartupOptions {
         if self.dangerous {
-            StartupOptions {
-                access_mode: AccessMode::ReadWrite,
-                approval_mode: ApprovalMode::Disabled,
-            }
+            StartupOptions::dangerous()
         } else {
             StartupOptions::default()
         }
@@ -40,18 +34,17 @@ fn main() {
 fn try_main() -> Result<(), Box<dyn Error>> {
     let cli = parse_args(env::args().skip(1))
         .map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))?;
-    let config = oat::config::AppConfig::load_from_default_path()?;
     let startup = cli.startup_options();
 
     if cli.headless {
-        let output = oat::run_headless(config, startup, cli.prompt.expect("headless prompt"))?;
+        let output = oat::run_default_headless(startup, cli.prompt.expect("headless prompt"))?;
         print!("{output}");
         io::stdout().flush()?;
         return Ok(());
     }
 
     let mut terminal = oat::setup_terminal()?;
-    let result = oat::run_with_options(&mut terminal, config, startup);
+    let result = oat::run_default_tui(&mut terminal, startup);
     oat::restore_terminal(&mut terminal)?;
     result
 }

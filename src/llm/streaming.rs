@@ -266,10 +266,7 @@ pub(crate) async fn run_prompt_step(
                 if !(emit)(reply_id, event) {
                     return Err(anyhow::anyhow!("event sink unavailable"));
                 }
-                return Ok(PromptStepOutcome::Finished(PromptRunResult {
-                    output,
-                    history,
-                }));
+                return Ok(PromptStepOutcome::Finished(PromptRunResult { output }));
             }
             Ok(_) => None,
             Err(error) => {

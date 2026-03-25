@@ -212,3 +212,21 @@ fn push_split_word(word: &str, width: usize, lines: &mut Vec<String>, current: &
         current.push_str(&chunk);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::wrap_text;
+
+    #[test]
+    fn wrap_text_respects_width_and_newlines() {
+        assert_eq!(wrap_text("", 4), vec![String::new()]);
+        assert_eq!(wrap_text("abcde", 2), vec!["ab", "cd", "e"]);
+        assert_eq!(wrap_text("ab\ncd", 2), vec!["ab", "cd"]);
+    }
+
+    #[test]
+    fn wrap_text_keeps_punctuation_with_the_word_before_it() {
+        assert_eq!(wrap_text("flight style .", 13), vec!["flight style", "."]);
+        assert_eq!(wrap_text("flight style.", 13), vec!["flight style."]);
+    }
+}

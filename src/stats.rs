@@ -172,6 +172,7 @@ impl StatsStore {
         }
     }
 
+    #[cfg(test)]
     pub fn hook(&self) -> StatsHook {
         StatsHook {
             state: Arc::clone(&self.state),

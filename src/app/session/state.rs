@@ -1,7 +1,4 @@
-use std::{
-    collections::VecDeque,
-    path::{Path, PathBuf},
-};
+use std::{collections::VecDeque, path::PathBuf};
 
 use crate::{
     config::ReasoningEffort,
@@ -47,6 +44,7 @@ pub struct SessionState {
 }
 
 impl SessionState {
+    #[cfg(test)]
     pub fn new(
         show_thinking: bool,
         show_tool_output: bool,
@@ -106,10 +104,6 @@ impl SessionState {
             planning: PlanningFeatureState::default(),
             pending_ask_user: None,
         }
-    }
-
-    pub fn workspace_root(&self) -> &Path {
-        &self.workspace_root
     }
 
     pub fn replace_session_history(&mut self, history: Vec<SessionHistoryMessage>) {

@@ -59,16 +59,9 @@ pub(crate) fn run_with_options(
 
         let timeout = state.tick_rate.saturating_sub(state.last_tick.elapsed());
         if crossterm::event::poll(timeout)?
-            && let Some(action) = input::map_event_with_shell_editor_state(
+            && let Some(action) = input::map_event_with_context(
                 crossterm::event::read()?,
-                query::has_pending_write_approval(state.app.state()),
-                query::has_pending_shell_approval(state.app.state()),
-                query::shell_approval_editing(state.app.state()),
-                query::shell_approval_editor_can_move_up(state.app.state()),
-                query::shell_approval_editor_can_move_down(state.app.state()),
-                query::has_pending_ask_user(state.app.state()),
-                query::selection_picker_visible(state.app.state()),
-                query::plan_review_selection_active(state.app.state()),
+                query::input_context(state.app.state()),
             )
             && let Some(effect) = state.app.apply(action)
         {

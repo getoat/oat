@@ -9,6 +9,7 @@ pub struct App {
 }
 
 impl App {
+    #[cfg(test)]
     pub fn new(
         show_thinking: bool,
         show_tool_output: bool,
