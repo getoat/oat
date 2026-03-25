@@ -15,7 +15,10 @@ use super::{
         current_model_info, history_pending_status_label, next_request_context_percent,
         should_show_history_busy_indicator, shows_startup_banner, supported_reasoning_levels,
     },
-    ui::{AskUserUiState, ShellApprovalUiState, picker_height, split_command_query},
+    ui::{
+        AskUserUiState, HistoryRenderCache, ShellApprovalUiState, picker_height,
+        split_command_query,
+    },
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -192,12 +195,20 @@ pub fn session_stats(state: &AppState) -> StatsTotals {
     state.session.session_stats
 }
 
+pub fn transcript_revision(state: &AppState) -> u64 {
+    state.session.transcript_revision
+}
+
 pub fn next_request_context_percent_state(state: &AppState) -> u64 {
     next_request_context_percent(&state.session)
 }
 
 pub fn tick_count(state: &AppState) -> usize {
     state.session.tick_count
+}
+
+pub fn history_render_cache(state: &AppState) -> Option<&HistoryRenderCache> {
+    state.ui.history_render_cache.as_ref()
 }
 
 pub fn selection_picker(state: &AppState) -> Option<&SelectionPicker> {
@@ -211,6 +222,26 @@ pub fn selection_picker_visible(state: &AppState) -> bool {
 
 pub fn history_is_pinned(state: &AppState) -> bool {
     state.ui.history.is_pinned()
+}
+
+pub fn history_total_lines(state: &AppState) -> usize {
+    state.ui.history.total_lines()
+}
+
+pub fn history_viewport_rows(state: &AppState) -> usize {
+    state.ui.history.viewport_rows()
+}
+
+pub fn history_scroll_position(state: &AppState) -> usize {
+    state.ui.history.scroll_position()
+}
+
+pub fn history_selection_span(state: &AppState, row: usize) -> Option<(usize, usize)> {
+    state.ui.history.selection_span_for_row(row)
+}
+
+pub fn composer_wrap_width(state: &AppState) -> usize {
+    state.ui.composer.wrap_width
 }
 
 pub fn command_query(state: &AppState) -> Option<&str> {

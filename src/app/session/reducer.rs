@@ -1,8 +1,49 @@
+mod approvals;
+mod events;
+mod history;
+mod input;
+mod planning;
+mod system;
+
 use super::{Action, Effect};
 use crate::app::AppState;
 
 pub(crate) fn apply(state: &mut AppState, action: Action) -> Option<Effect> {
-    crate::app::reducer::apply(state, action)
+    match action {
+        Action::ClearComposerOrQuit
+        | Action::CancelPendingReply
+        | Action::ToggleMode
+        | Action::Tick => system::handle(state, action),
+        Action::SelectPreviousCommand
+        | Action::SelectNextCommand
+        | Action::InsertComposerNewline
+        | Action::SubmitMessage
+        | Action::TogglePickerSelection
+        | Action::PickerTabLeft
+        | Action::PickerTabRight
+        | Action::AskUserTabLeft
+        | Action::AskUserTabRight
+        | Action::AskUserToggleDetailEditor
+        | Action::ShellApprovalToggleDetailEditor
+        | Action::Editor(_)
+        | Action::Paste(_) => input::handle(state, action),
+        Action::ScrollHistoryPageUp
+        | Action::ScrollHistoryPageDown
+        | Action::ScrollHistoryToTop
+        | Action::ScrollHistoryToBottom
+        | Action::ScrollHistoryUp { .. }
+        | Action::ScrollHistoryDown { .. }
+        | Action::StartHistorySelection { .. }
+        | Action::UpdateHistorySelection { .. }
+        | Action::FinishHistorySelection { .. } => history::handle(state, action),
+        Action::ApproveWriteOnce | Action::ApproveWriteAllSession | Action::DenyWrite => {
+            approvals::handle(state, action)
+        }
+        Action::AcceptPlanAndImplement | Action::SuggestPlanChanges => {
+            planning::handle(state, action)
+        }
+        Action::StreamEvent { .. } | Action::SubagentEvent(_) => events::handle(state, action),
+    }
 }
 
 #[cfg(test)]
@@ -59,7 +100,7 @@ mod tests {
 
         app.apply(Action::ClearComposerOrQuit);
 
-        assert!(app.session.should_quit);
+        assert!(app.state_mut().session.should_quit);
     }
 
     #[test]
@@ -69,20 +110,21 @@ mod tests {
 
         app.apply(Action::ClearComposerOrQuit);
 
-        assert!(!app.session.should_quit);
+        assert!(!app.state_mut().session.should_quit);
         assert!(!app.composer_has_content());
     }
 
     #[test]
     fn clear_composer_or_quit_cancels_pending_reply_instead_of_quitting() {
         let mut app = new_app(true);
-        app.session.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(1, PendingReplyKind::Normal));
 
         let effect = app.apply(Action::ClearComposerOrQuit);
 
         assert_eq!(effect, Some(Effect::CancelPendingReply));
-        assert!(!app.session.should_quit);
-        assert!(app.session.pending_reply.is_none());
+        assert!(!app.state_mut().session.should_quit);
+        assert!(app.state_mut().session.pending_reply.is_none());
         let TranscriptEntry::Message(message) = app.entries().last().expect("cancel message")
         else {
             panic!("expected message entry");
@@ -94,12 +136,13 @@ mod tests {
     #[test]
     fn explicit_cancel_pending_reply_adds_cancellation_message() {
         let mut app = new_app(true);
-        app.session.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(1, PendingReplyKind::Normal));
 
         let effect = app.apply(Action::CancelPendingReply);
 
         assert_eq!(effect, Some(Effect::CancelPendingReply));
-        assert!(app.session.pending_reply.is_none());
+        assert!(app.state_mut().session.pending_reply.is_none());
         let TranscriptEntry::Message(message) = app.entries().last().expect("cancel message")
         else {
             panic!("expected message entry");
@@ -115,7 +158,7 @@ mod tests {
         let effect = app.apply(Action::SubmitMessage);
 
         assert_eq!(app.entries().len(), 1);
-        assert!(app.session.pending_reply.is_none());
+        assert!(app.state_mut().session.pending_reply.is_none());
         assert!(effect.is_none());
     }
 
@@ -143,14 +186,14 @@ mod tests {
             }
             entry => panic!("expected user message, got {entry:?}"),
         }
-        assert!(app.session.pending_reply.is_some());
+        assert!(app.state_mut().session.pending_reply.is_some());
         assert!(!app.composer_has_content());
     }
 
     #[test]
     fn submit_message_resumes_live_history_follow() {
         let mut app = new_app(true);
-        app.ui.history.scroll_top = Some(3);
+        app.state_mut().ui.history.scroll_top = Some(3);
         app.composer_mut().insert_str("hello");
 
         let _ = app.apply(Action::SubmitMessage);
@@ -161,7 +204,8 @@ mod tests {
     #[test]
     fn submit_message_does_nothing_while_reply_is_pending() {
         let mut app = new_app(true);
-        app.session.pending_reply = Some(PendingReply::new(5, PendingReplyKind::Normal));
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(5, PendingReplyKind::Normal));
         app.composer_mut().insert_str("new prompt");
 
         let effect = app.apply(Action::SubmitMessage);
@@ -299,12 +343,12 @@ mod tests {
         app.composer_mut().insert_str("boo");
         let first = app.apply(Action::SubmitMessage);
         assert!(matches!(first, Some(Effect::PromptModel { .. })));
-        app.session.pending_reply = None;
+        app.state_mut().session.pending_reply = None;
 
         app.composer_mut().insert_str("boo");
         let second = app.apply(Action::SubmitMessage);
         assert!(matches!(second, Some(Effect::PromptModel { .. })));
-        app.session.pending_reply = None;
+        app.state_mut().session.pending_reply = None;
 
         app.apply(Action::SelectPreviousCommand);
         assert_eq!(app.composer().lines(), ["boo"]);
@@ -315,7 +359,8 @@ mod tests {
     #[test]
     fn stream_text_creates_and_updates_agent_message() {
         let mut app = new_app(true);
-        app.session.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(1, PendingReplyKind::Normal));
 
         app.apply(Action::StreamEvent {
             reply_id: 1,
@@ -338,7 +383,8 @@ mod tests {
     #[test]
     fn whitespace_only_text_delta_stays_pending_without_visible_content() {
         let mut app = new_app(true);
-        app.session.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(1, PendingReplyKind::Normal));
 
         app.apply(Action::StreamEvent {
             reply_id: 1,
@@ -348,7 +394,8 @@ mod tests {
         assert_eq!(app.entries().len(), 1);
         assert!(!app.has_visible_pending_content());
         assert_eq!(
-            app.session
+            app.state_mut()
+                .session
                 .pending_reply
                 .as_ref()
                 .expect("pending reply")
@@ -360,7 +407,8 @@ mod tests {
     #[test]
     fn proposed_plan_wrapper_prefix_stays_pending_until_visible_text_arrives() {
         let mut app = registry_app(true);
-        app.session.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Planning));
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(1, PendingReplyKind::Planning));
 
         app.apply(Action::StreamEvent {
             reply_id: 1,
@@ -387,7 +435,8 @@ mod tests {
     #[test]
     fn planning_ready_wrapper_prefix_stays_pending_until_visible_text_arrives() {
         let mut app = registry_app(true);
-        app.session.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Planning));
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(1, PendingReplyKind::Planning));
 
         app.apply(Action::StreamEvent {
             reply_id: 1,
@@ -414,7 +463,8 @@ mod tests {
     #[test]
     fn stream_reasoning_is_hidden_when_config_disables_it() {
         let mut app = new_app(false);
-        app.session.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(1, PendingReplyKind::Normal));
 
         app.apply(Action::StreamEvent {
             reply_id: 1,
@@ -427,7 +477,8 @@ mod tests {
     #[test]
     fn stream_commentary_adds_agent_commentary_entry() {
         let mut app = new_app(true);
-        app.session.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(1, PendingReplyKind::Normal));
 
         app.apply(Action::StreamEvent {
             reply_id: 1,
@@ -445,7 +496,8 @@ mod tests {
     #[test]
     fn stream_tool_call_adds_transcript_entry() {
         let mut app = new_app(true);
-        app.session.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(1, PendingReplyKind::Normal));
 
         app.apply(Action::StreamEvent {
             reply_id: 1,
@@ -467,7 +519,8 @@ mod tests {
     #[test]
     fn stream_text_after_tool_call_starts_new_message_entry() {
         let mut app = new_app(true);
-        app.session.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(1, PendingReplyKind::Normal));
 
         app.apply(Action::StreamEvent {
             reply_id: 1,
@@ -503,7 +556,8 @@ mod tests {
     #[test]
     fn stream_tool_result_adds_transcript_entry() {
         let mut app = new_app(true);
-        app.session.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(1, PendingReplyKind::Normal));
 
         app.apply(Action::StreamEvent {
             reply_id: 1,
@@ -525,7 +579,8 @@ mod tests {
     #[test]
     fn commentary_between_text_segments_stays_separate_from_final_reply_text() {
         let mut app = new_app(true);
-        app.session.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(1, PendingReplyKind::Normal));
 
         app.apply(Action::StreamEvent {
             reply_id: 1,
@@ -557,7 +612,8 @@ mod tests {
                 if message.style == MessageStyle::Plain && message.text == "After"
         ));
         assert_eq!(
-            app.session
+            app.state_mut()
+                .session
                 .pending_reply
                 .as_ref()
                 .expect("pending reply")
@@ -569,7 +625,8 @@ mod tests {
     #[test]
     fn stream_text_after_tool_result_starts_new_message_entry() {
         let mut app = App::new(true, true, "gpt-5-mini", ReasoningEffort::Medium);
-        app.session.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(1, PendingReplyKind::Normal));
 
         app.apply(Action::StreamEvent {
             reply_id: 1,
@@ -605,7 +662,8 @@ mod tests {
     #[test]
     fn reasoning_followed_by_text_creates_distinct_entries_in_order() {
         let mut app = new_app(true);
-        app.session.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(1, PendingReplyKind::Normal));
 
         app.apply(Action::StreamEvent {
             reply_id: 1,
@@ -631,7 +689,8 @@ mod tests {
     #[test]
     fn text_reasoning_text_creates_three_ordered_segments() {
         let mut app = new_app(true);
-        app.session.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(1, PendingReplyKind::Normal));
 
         app.apply(Action::StreamEvent {
             reply_id: 1,
@@ -666,7 +725,8 @@ mod tests {
     #[test]
     fn ask_user_stream_event_starts_pending_interaction() {
         let mut app = new_app(true);
-        app.session.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(1, PendingReplyKind::Normal));
 
         app.apply(Action::StreamEvent {
             reply_id: 1,
@@ -687,7 +747,8 @@ mod tests {
     #[test]
     fn ask_user_review_submission_returns_resolve_effect() {
         let mut app = new_app(true);
-        app.session.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(1, PendingReplyKind::Normal));
         app.begin_ask_user("call-1".into(), ask_user_request());
 
         let first = app.apply(Action::SubmitMessage);
@@ -713,14 +774,15 @@ mod tests {
     #[test]
     fn stream_failure_appends_error_message() {
         let mut app = new_app(true);
-        app.session.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(1, PendingReplyKind::Normal));
 
         app.apply(Action::StreamEvent {
             reply_id: 1,
             event: StreamEvent::Failed("boom".into()),
         });
 
-        assert!(app.session.pending_reply.is_none());
+        assert!(app.state_mut().session.pending_reply.is_none());
         let TranscriptEntry::Message(message) = app.entries().last().expect("error entry exists")
         else {
             panic!("expected message entry");
@@ -732,7 +794,8 @@ mod tests {
     #[test]
     fn stream_failure_while_waiting_for_interaction_clears_pending_reply_at_app_layer() {
         let mut app = new_app(true);
-        app.session.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Normal));
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(1, PendingReplyKind::Normal));
         app.begin_ask_user("call-1".into(), ask_user_request());
 
         app.apply(Action::StreamEvent {
@@ -740,7 +803,7 @@ mod tests {
             event: StreamEvent::Failed("boom".into()),
         });
 
-        assert!(app.session.pending_reply.is_none());
+        assert!(app.state_mut().session.pending_reply.is_none());
         assert!(!app.has_pending_ask_user());
     }
 
@@ -843,7 +906,8 @@ mod tests {
         assert!(!app.planning_draft_mode());
         assert!(app.plan_active());
         assert_eq!(
-            app.session
+            app.state_mut()
+                .session
                 .pending_reply
                 .as_ref()
                 .map(|pending| pending.kind),
@@ -854,7 +918,8 @@ mod tests {
     #[test]
     fn finished_plan_response_enters_plan_review_selection_mode() {
         let mut app = registry_app(true);
-        app.session.pending_reply = Some(PendingReply::new(1, PendingReplyKind::Planning));
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(1, PendingReplyKind::Planning));
 
         app.apply(Action::StreamEvent {
             reply_id: 1,
@@ -874,10 +939,11 @@ mod tests {
     #[test]
     fn accepting_plan_starts_normal_prompt_model_turn() {
         let mut app = registry_app(true);
-        app.session.planning.proposed_plan = Some(crate::features::planning::ProposedPlan {
-            markdown: "# Test Plan\n\n- step one".into(),
-            raw_block: "<proposed_plan>\n# Test Plan\n\n- step one\n</proposed_plan>".into(),
-        });
+        app.state_mut().session.planning.proposed_plan =
+            Some(crate::features::planning::ProposedPlan {
+                markdown: "# Test Plan\n\n- step one".into(),
+                raw_block: "<proposed_plan>\n# Test Plan\n\n- step one\n</proposed_plan>".into(),
+            });
         app.begin_plan_review();
 
         let effect = app.apply(Action::AcceptPlanAndImplement);
@@ -894,10 +960,11 @@ mod tests {
                 && prompt.contains("# Test Plan")
                 && prompt.contains("step one")
         ));
-        assert!(app.session.pending_reply.is_some());
+        assert!(app.state_mut().session.pending_reply.is_some());
         assert!(!app.plan_review_selection_active());
         assert_eq!(
-            app.session
+            app.state_mut()
+                .session
                 .pending_reply
                 .as_ref()
                 .map(|pending| pending.kind),
@@ -960,9 +1027,10 @@ mod tests {
                 history_model_name: None,
             })
         );
-        assert!(app.session.pending_reply.is_some());
+        assert!(app.state_mut().session.pending_reply.is_some());
         assert_eq!(
-            app.session
+            app.state_mut()
+                .session
                 .pending_reply
                 .as_ref()
                 .map(|pending| pending.kind),
@@ -1173,14 +1241,16 @@ mod tests {
     #[test]
     fn clear_alias_starts_new_session() {
         let mut app = new_app(true);
-        app.session
+        app.state_mut()
+            .session
             .entries
             .push(TranscriptEntry::Message(ChatMessage {
                 speaker: Speaker::User,
                 text: "old".into(),
                 style: MessageStyle::Plain,
             }));
-        app.session.pending_reply = Some(PendingReply::new(8, PendingReplyKind::Normal));
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(8, PendingReplyKind::Normal));
         app.composer_mut().insert_str("/clear");
         app.sync_command_selection();
 
@@ -1188,7 +1258,7 @@ mod tests {
 
         assert_eq!(effect, Some(Effect::RotateSession));
         assert_eq!(app.entries().len(), 1);
-        assert!(app.session.pending_reply.is_none());
+        assert!(app.state_mut().session.pending_reply.is_none());
         assert!(!app.composer_has_content());
     }
 
@@ -1223,7 +1293,7 @@ mod tests {
 
         app.apply(Action::ScrollHistoryPageUp);
 
-        assert_eq!(app.ui.history.scroll_top, Some(20));
+        assert_eq!(app.state_mut().ui.history.scroll_top, Some(20));
         assert!(app.history_is_pinned());
     }
 
@@ -1231,18 +1301,18 @@ mod tests {
     fn page_down_clamps_at_bottom_without_resuming_follow() {
         let mut app = new_app(true);
         app.sync_history_viewport(30, 5);
-        app.ui.history.scroll_top = Some(24);
+        app.state_mut().ui.history.scroll_top = Some(24);
 
         app.apply(Action::ScrollHistoryPageDown);
 
-        assert_eq!(app.ui.history.scroll_top, Some(25));
+        assert_eq!(app.state_mut().ui.history.scroll_top, Some(25));
         assert!(app.history_is_pinned());
     }
 
     #[test]
     fn jump_to_bottom_resumes_live_follow() {
         let mut app = new_app(true);
-        app.ui.history.scroll_top = Some(7);
+        app.state_mut().ui.history.scroll_top = Some(7);
 
         app.apply(Action::ScrollHistoryToBottom);
 
@@ -1253,13 +1323,13 @@ mod tests {
     fn line_scroll_clamps_to_history_bounds() {
         let mut app = new_app(true);
         app.sync_history_viewport(18, 6);
-        app.ui.history.scroll_top = Some(2);
+        app.state_mut().ui.history.scroll_top = Some(2);
 
         app.apply(Action::ScrollHistoryUp { lines: 10 });
-        assert_eq!(app.ui.history.scroll_top, Some(0));
+        assert_eq!(app.state_mut().ui.history.scroll_top, Some(0));
 
         app.apply(Action::ScrollHistoryDown { lines: 20 });
-        assert_eq!(app.ui.history.scroll_top, Some(12));
+        assert_eq!(app.state_mut().ui.history.scroll_top, Some(12));
     }
 
     #[test]
@@ -1297,8 +1367,10 @@ mod tests {
     fn stale_stream_events_are_ignored_after_new_session() {
         let mut app = new_app(true);
         app.replace_session_history(vec![SessionHistoryMessage::assistant("previous")]);
-        app.session.pending_reply = Some(PendingReply::new(11, PendingReplyKind::Normal));
-        app.session
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(11, PendingReplyKind::Normal));
+        app.state_mut()
+            .session
             .entries
             .push(TranscriptEntry::Message(ChatMessage {
                 speaker: Speaker::User,
@@ -1321,7 +1393,8 @@ mod tests {
     #[test]
     fn finished_stream_replaces_canonical_history() {
         let mut app = new_app(true);
-        app.session.pending_reply = Some(PendingReply::new(2, PendingReplyKind::Normal));
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(2, PendingReplyKind::Normal));
         app.replace_session_history(vec![SessionHistoryMessage::assistant("old")]);
 
         app.apply(Action::StreamEvent {
@@ -1334,7 +1407,7 @@ mod tests {
             },
         });
 
-        assert!(app.session.pending_reply.is_none());
+        assert!(app.state_mut().session.pending_reply.is_none());
         assert_eq!(
             app.session_history(),
             &[
@@ -1347,14 +1420,15 @@ mod tests {
     #[test]
     fn finished_planning_stream_clears_plan_active_state() {
         let mut app = registry_app(true);
-        app.session.pending_reply = Some(PendingReply::new(2, PendingReplyKind::Planning));
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(2, PendingReplyKind::Planning));
 
         app.apply(Action::StreamEvent {
             reply_id: 2,
             event: StreamEvent::Finished { history: None },
         });
 
-        assert!(app.session.pending_reply.is_none());
+        assert!(app.state_mut().session.pending_reply.is_none());
         assert!(!app.plan_active());
     }
 
@@ -1362,7 +1436,8 @@ mod tests {
     fn planning_ready_response_starts_planner_fanout() {
         let mut app = registry_app(true);
         app.begin_planning_conversation();
-        app.session.pending_reply = Some(PendingReply::new(2, PendingReplyKind::Planning));
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(2, PendingReplyKind::Planning));
         app.replace_session_history(vec![SessionHistoryMessage::user("plan this")]);
 
         app.apply(Action::StreamEvent {
@@ -1394,7 +1469,8 @@ mod tests {
             }) if description == "## Summary\nStable brief" && history == vec![SessionHistoryMessage::user("plan this")]
         ));
         assert_eq!(
-            app.session
+            app.state_mut()
+                .session
                 .pending_reply
                 .as_ref()
                 .map(|pending| pending.kind),
@@ -1409,7 +1485,8 @@ mod tests {
     #[test]
     fn failed_stream_keeps_previous_canonical_history() {
         let mut app = new_app(true);
-        app.session.pending_reply = Some(PendingReply::new(2, PendingReplyKind::Normal));
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(2, PendingReplyKind::Normal));
         app.replace_session_history(vec![SessionHistoryMessage::assistant("stable")]);
 
         app.apply(Action::StreamEvent {

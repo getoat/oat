@@ -43,8 +43,8 @@ pub(crate) fn bootstrap_tui(config: AppConfig, startup: StartupOptions) -> Resul
         startup.access_mode,
         startup.approval_mode,
     );
-    app.state_mut().session.safety_model_name = config.safety.model_name.clone();
-    app.state_mut().session.safety_reasoning_effort = config.safety.reasoning_effort;
+    app.set_safety_model_name(config.safety.model_name.clone());
+    app.set_safety_reasoning_effort(config.safety.reasoning_effort);
     let stats = StatsStore::new();
     let (subagent_tx, subagent_rx) = mpsc::unbounded_channel();
     let subagents =

@@ -54,7 +54,7 @@ pub(crate) fn run_with_options(
             persist_command_history_if_needed(&mut state.app, &state.command_history);
         }
 
-        state.app.state_mut().session.session_stats = state.stats.current_totals();
+        state.app.set_session_stats(state.stats.current_totals());
         terminal.draw(|frame| ui::render(frame, &mut state.app))?;
 
         let timeout = state.tick_rate.saturating_sub(state.last_tick.elapsed());

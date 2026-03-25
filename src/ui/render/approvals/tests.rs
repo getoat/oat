@@ -39,10 +39,8 @@ fn pending_write_approval_height_matches_wrapped_summary_lines() {
 #[test]
 fn pending_shell_approval_height_grows_for_multiline_commands() {
     let mut short = App::new(true, false, "gpt-5.4-mini", ReasoningEffort::Medium);
-    short
-        .session
-        .pending_shell_approvals
-        .push_back(crate::app::PendingShellApproval::new(
+    short.state_mut().session.pending_shell_approvals.push_back(
+        crate::app::PendingShellApproval::new(
             "call-1".into(),
             crate::app::CommandRisk::Low,
             "read-only inspection command with no obvious mutation".into(),
@@ -50,8 +48,10 @@ fn pending_shell_approval_height_grows_for_multiline_commands() {
             ".".into(),
             "inspect workspace".into(),
             None,
-        ));
-    short.ui.pending_shell_approval = short
+        ),
+    );
+    short.state_mut().ui.pending_shell_approval = short
+        .state_mut()
         .session
         .pending_shell_approvals
         .front()
@@ -59,6 +59,7 @@ fn pending_shell_approval_height_grows_for_multiline_commands() {
 
     let mut multiline = App::new(true, false, "gpt-5.4-mini", ReasoningEffort::Medium);
     multiline
+        .state_mut()
         .session
         .pending_shell_approvals
         .push_back(crate::app::PendingShellApproval::new(
@@ -70,7 +71,8 @@ fn pending_shell_approval_height_grows_for_multiline_commands() {
             "inspect workspace".into(),
             None,
         ));
-    multiline.ui.pending_shell_approval = multiline
+    multiline.state_mut().ui.pending_shell_approval = multiline
+        .state_mut()
         .session
         .pending_shell_approvals
         .front()

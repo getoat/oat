@@ -112,13 +112,13 @@ impl EffectExecutor<'_> {
                 let rebuilt = self.rebuild_llm(&updated_config, query::mode(self.app.state()))?;
                 *self.config = updated_config;
                 *self.llm = rebuilt;
-                self.app.state_mut().session.model_name = model_name.clone();
-                self.app.state_mut().session.reasoning_effort = reasoning_effort;
-                self.app.state_mut().session.safety_model_name =
-                    self.config.safety.model_name.clone();
-                self.app.state_mut().session.safety_reasoning_effort =
-                    self.config.safety.reasoning_effort;
-                self.app.state_mut().session.planning_agents = planning_agents;
+                self.app.set_model_name(model_name.clone());
+                self.app.set_reasoning_effort(reasoning_effort);
+                self.app
+                    .set_safety_model_name(self.config.safety.model_name.clone());
+                self.app
+                    .set_safety_reasoning_effort(self.config.safety.reasoning_effort);
+                self.app.set_planning_agents(planning_agents);
                 app::ops::picker::open_reasoning_picker(self.app.state_mut());
                 app::ops::transcript::push_agent_message(
                     self.app.state_mut(),
@@ -134,11 +134,11 @@ impl EffectExecutor<'_> {
                 let rebuilt = self.rebuild_llm(&updated_config, query::mode(self.app.state()))?;
                 *self.config = updated_config;
                 *self.llm = rebuilt;
-                self.app.state_mut().session.reasoning_effort = reasoning_effort;
-                self.app.state_mut().session.safety_model_name =
-                    self.config.safety.model_name.clone();
-                self.app.state_mut().session.safety_reasoning_effort =
-                    self.config.safety.reasoning_effort;
+                self.app.set_reasoning_effort(reasoning_effort);
+                self.app
+                    .set_safety_model_name(self.config.safety.model_name.clone());
+                self.app
+                    .set_safety_reasoning_effort(self.config.safety.reasoning_effort);
                 let model_name = query::model_name(self.app.state()).to_string();
                 app::ops::transcript::push_agent_message(
                     self.app.state_mut(),
@@ -153,7 +153,7 @@ impl EffectExecutor<'_> {
             Effect::SetPlanningAgents { planning_agents } => {
                 let updated_config = AppConfig::set_default_planning_agents(&planning_agents)?;
                 *self.config = updated_config;
-                self.app.state_mut().session.planning_agents = planning_agents.clone();
+                self.app.set_planning_agents(planning_agents.clone());
                 app::ops::transcript::push_agent_message(
                     self.app.state_mut(),
                     format!(
@@ -173,8 +173,8 @@ impl EffectExecutor<'_> {
                 let rebuilt = self.rebuild_llm(&updated_config, query::mode(self.app.state()))?;
                 *self.config = updated_config;
                 *self.llm = rebuilt;
-                self.app.state_mut().session.safety_model_name = model_name.clone();
-                self.app.state_mut().session.safety_reasoning_effort = reasoning_effort;
+                self.app.set_safety_model_name(model_name.clone());
+                self.app.set_safety_reasoning_effort(reasoning_effort);
                 app::ops::transcript::push_agent_message(
                     self.app.state_mut(),
                     format!(

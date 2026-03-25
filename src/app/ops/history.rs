@@ -1,4 +1,6 @@
-use crate::app::AppState;
+use ratatui::{layout::Rect, style::Color, text::Line};
+
+use crate::app::{AppState, ui::HistoryRenderCache};
 
 pub(crate) fn scroll_history_page_up(state: &mut AppState) {
     scroll_history_up(state, state.ui.history.page_rows());
@@ -38,4 +40,35 @@ pub(crate) fn finish_history_selection(
     row: u16,
 ) -> Option<String> {
     state.ui.history.finish_selection(column, row)
+}
+
+pub(crate) fn sync_history_viewport(
+    state: &mut AppState,
+    total_lines: usize,
+    viewport_rows: usize,
+) -> usize {
+    state.ui.history.sync_viewport(total_lines, viewport_rows)
+}
+
+pub(crate) fn update_history_snapshot(state: &mut AppState, area: Rect, lines: Vec<String>) {
+    state.ui.history.update_snapshot(area, lines);
+}
+
+pub(crate) fn set_history_render_cache(
+    state: &mut AppState,
+    width: usize,
+    accent: Color,
+    transcript_revision: u64,
+    lines: Vec<Line<'static>>,
+) {
+    state.ui.history_render_cache = Some(HistoryRenderCache {
+        width,
+        accent,
+        transcript_revision,
+        lines,
+    });
+}
+
+pub(crate) fn clear_history_render_cache(state: &mut AppState) {
+    state.ui.history_render_cache = None;
 }

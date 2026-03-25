@@ -1,5 +1,3 @@
-use std::ops::{Deref, DerefMut};
-
 use crate::{config::ReasoningEffort, features::planning::PlanningAgentConfig};
 
 use super::{AccessMode, AppState, ApprovalMode, SessionState, UiState};
@@ -63,19 +61,42 @@ impl App {
     pub(crate) fn state_mut(&mut self) -> &mut AppState {
         &mut self.state
     }
-}
 
-impl Deref for App {
-    type Target = AppState;
-
-    fn deref(&self) -> &Self::Target {
-        &self.state
+    pub(crate) fn set_reasoning_effort(&mut self, reasoning_effort: ReasoningEffort) {
+        self.state.session.reasoning_effort = reasoning_effort;
     }
-}
 
-impl DerefMut for App {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.state
+    pub(crate) fn set_safety_reasoning_effort(&mut self, reasoning_effort: ReasoningEffort) {
+        self.state.session.safety_reasoning_effort = reasoning_effort;
+    }
+
+    pub(crate) fn set_session_stats(&mut self, session_stats: crate::stats::StatsTotals) {
+        self.state.session.session_stats = session_stats;
+    }
+
+    pub(crate) fn set_model_name(&mut self, model_name: impl Into<String>) {
+        self.state.session.model_name = model_name.into();
+    }
+
+    pub(crate) fn set_safety_model_name(&mut self, model_name: impl Into<String>) {
+        self.state.session.safety_model_name = model_name.into();
+    }
+
+    pub(crate) fn set_planning_agents(
+        &mut self,
+        planning_agents: Vec<crate::features::planning::PlanningAgentConfig>,
+    ) {
+        self.state.session.planning_agents = planning_agents;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_workspace_root(&mut self, workspace_root: std::path::PathBuf) {
+        self.state.session.workspace_root = workspace_root;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn push_agent_message(&mut self, text: impl Into<String>) {
+        crate::app::ops::transcript::push_agent_message(self.state_mut(), text);
     }
 }
 
@@ -183,7 +204,10 @@ impl App {
         total_lines: usize,
         viewport_rows: usize,
     ) -> usize {
-        self.ui.history.sync_viewport(total_lines, viewport_rows)
+        self.state
+            .ui
+            .history
+            .sync_viewport(total_lines, viewport_rows)
     }
 
     pub(crate) fn update_history_snapshot_for_test(
@@ -194,7 +218,7 @@ impl App {
         height: u16,
         lines: Vec<String>,
     ) {
-        self.ui.history.update_snapshot(
+        self.state.ui.history.update_snapshot(
             ratatui::layout::Rect {
                 x,
                 y,
@@ -254,45 +278,6 @@ impl App {
     }
 
     pub(crate) fn replace_session_history(&mut self, history: Vec<super::SessionHistoryMessage>) {
-        self.session.replace_session_history(history);
-    }
-
-    pub(crate) fn set_reasoning_effort(&mut self, reasoning_effort: ReasoningEffort) {
-        self.session.reasoning_effort = reasoning_effort;
-    }
-
-    pub(crate) fn set_safety_reasoning_effort(&mut self, reasoning_effort: ReasoningEffort) {
-        self.session.safety_reasoning_effort = reasoning_effort;
-    }
-
-    pub(crate) fn set_session_stats(&mut self, session_stats: crate::stats::StatsTotals) {
-        self.session.session_stats = session_stats;
-    }
-
-    pub(crate) fn set_model_name(&mut self, model_name: impl Into<String>) {
-        self.session.model_name = model_name.into();
-    }
-
-    pub(crate) fn set_safety_model_name(&mut self, model_name: impl Into<String>) {
-        self.session.safety_model_name = model_name.into();
-    }
-
-    pub(crate) fn set_planning_agents(
-        &mut self,
-        planning_agents: Vec<crate::features::planning::PlanningAgentConfig>,
-    ) {
-        self.session.planning_agents = planning_agents;
-    }
-
-    pub(crate) fn set_workspace_root(&mut self, workspace_root: std::path::PathBuf) {
-        self.session.workspace_root = workspace_root;
-    }
-
-    pub(crate) fn push_agent_message(&mut self, text: impl Into<String>) {
-        crate::app::ops::transcript::push_agent_message(self.state_mut(), text);
-    }
-
-    pub(crate) fn push_error_message(&mut self, text: impl Into<String>) {
-        crate::app::ops::transcript::push_error_message(self.state_mut(), text);
+        self.state.session.replace_session_history(history);
     }
 }

@@ -74,28 +74,29 @@ pub(super) fn render_history(
         && !query::should_show_history_busy_indicator_state(app.state());
     let mut owned_lines = None;
     let total_lines = if use_cache {
-        let cache_missing = app.ui.history_render_cache.as_ref().is_none_or(|cache| {
+        let transcript_revision = query::transcript_revision(app.state());
+        let cache_missing = query::history_render_cache(app.state()).is_none_or(|cache| {
             cache.width != content_width
                 || cache.accent != accent
-                || cache.transcript_revision != app.session.transcript_revision
+                || cache.transcript_revision != transcript_revision
         });
         if cache_missing {
             let lines = build_history_lines(app, content_width, accent, loading_frame);
-            app.ui.history_render_cache = Some(crate::app::ui::HistoryRenderCache {
-                width: content_width,
+            crate::app::ops::history::set_history_render_cache(
+                app.state_mut(),
+                content_width,
                 accent,
-                transcript_revision: app.session.transcript_revision,
+                transcript_revision,
                 lines,
-            });
+            );
         }
-        app.ui
-            .history_render_cache
+        query::history_render_cache(app.state())
             .as_ref()
             .expect("history cache should be populated")
             .lines
             .len()
     } else {
-        app.ui.history_render_cache = None;
+        crate::app::ops::history::clear_history_render_cache(app.state_mut());
         owned_lines = Some(build_history_lines(
             app,
             content_width,
@@ -105,11 +106,13 @@ pub(super) fn render_history(
         owned_lines.as_ref().expect("owned history lines").len()
     };
     let visible_count = content_area.height as usize;
-    let start = app.ui.history.sync_viewport(total_lines, visible_count);
+    let start = crate::app::ops::history::sync_history_viewport(
+        app.state_mut(),
+        total_lines,
+        visible_count,
+    );
     let mut visible_lines = if use_cache {
-        let lines = app
-            .ui
-            .history_render_cache
+        let lines = query::history_render_cache(app.state())
             .as_ref()
             .expect("history cache should be populated")
             .lines
@@ -129,13 +132,17 @@ pub(super) fn render_history(
         .iter()
         .map(rendered_line_text)
         .collect::<Vec<_>>();
-    app.ui
-        .history
-        .update_snapshot(content_area, history_snapshot);
+    crate::app::ops::history::update_history_snapshot(
+        app.state_mut(),
+        content_area,
+        history_snapshot,
+    );
     apply_history_selection_highlight(&mut visible_lines, app, accent);
     frame.render_widget(Paragraph::new(visible_lines), content_area);
 
-    if show_scrollbar && app.ui.history.total_lines() > app.ui.history.viewport_rows() {
+    if show_scrollbar
+        && query::history_total_lines(app.state()) > query::history_viewport_rows(app.state())
+    {
         render_history_scrollbar(frame, history_layout[1], app, accent);
     }
 }
@@ -148,7 +155,7 @@ fn build_history_lines(
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     if query::shows_startup_banner_state(app.state()) {
-        push_startup_banner_lines(&mut lines, accent, app.session.tick_count);
+        push_startup_banner_lines(&mut lines, accent, query::tick_count(app.state()));
         lines.push(Line::default());
     }
     let visible_entries = visible_entries(app);
@@ -228,7 +235,7 @@ fn history_viewport_lines(
 fn apply_history_selection_highlight(lines: &mut [Line<'static>], app: &App, accent: Color) {
     let highlight = Style::default().bg(accent);
     for (row, line) in lines.iter_mut().enumerate() {
-        if let Some((start, end)) = app.ui.history.selection_span_for_row(row) {
+        if let Some((start, end)) = query::history_selection_span(app.state(), row) {
             *line = highlight_line_range(line.clone(), start, end, highlight);
         }
     }
@@ -296,9 +303,9 @@ fn slice_chars(text: &str, start: usize, end: usize) -> String {
 fn render_history_scrollbar(frame: &mut Frame, area: Rect, app: &App, accent: Color) {
     let (thumb_start, thumb_len) = scrollbar_thumb_bounds(
         area.height as usize,
-        app.ui.history.total_lines(),
-        app.ui.history.viewport_rows(),
-        app.ui.history.scroll_position(),
+        query::history_total_lines(app.state()),
+        query::history_viewport_rows(app.state()),
+        query::history_scroll_position(app.state()),
     );
 
     let lines = (0..area.height as usize)

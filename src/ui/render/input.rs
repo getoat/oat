@@ -57,7 +57,7 @@ fn render_composer_lines(app: &mut App, accent: Color) -> Vec<Line<'static>> {
         let placeholder = query::composer(app.state()).placeholder_text().to_owned();
         let placeholder_style = Style::default().fg(Color::DarkGray);
         let cursor_style = Style::default().bg(accent).fg(Color::Black);
-        let content_width = app.ui.composer.wrap_width;
+        let content_width = query::composer_wrap_width(app.state());
         let placeholder_rows = if content_width <= 1 {
             vec![String::new()]
         } else {

@@ -3,7 +3,6 @@ pub mod ui;
 
 pub(crate) mod ops;
 pub(crate) mod query;
-mod reducer;
 mod shell;
 mod state;
 
