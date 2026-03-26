@@ -1,7 +1,7 @@
 use std::{collections::VecDeque, path::PathBuf};
 
 use crate::{
-    config::ReasoningEffort,
+    config::ReasoningSetting,
     features::planning::{PlanningAgentConfig, PlanningFeatureState},
     stats::StatsTotals,
 };
@@ -33,9 +33,9 @@ pub struct SessionState {
     pub show_tool_output: bool,
     pub model_name: String,
     pub last_history_model_name: Option<String>,
-    pub reasoning_effort: ReasoningEffort,
+    pub reasoning: ReasoningSetting,
     pub safety_model_name: String,
-    pub safety_reasoning_effort: ReasoningEffort,
+    pub safety_reasoning: ReasoningSetting,
     pub planning_agents: Vec<PlanningAgentConfig>,
     pub session_stats: StatsTotals,
     pub planning: PlanningFeatureState,
@@ -48,13 +48,13 @@ impl SessionState {
         show_thinking: bool,
         show_tool_output: bool,
         model_name: impl Into<String>,
-        reasoning_effort: ReasoningEffort,
+        reasoning: impl Into<ReasoningSetting>,
     ) -> Self {
         Self::with_startup(
             show_thinking,
             show_tool_output,
             model_name,
-            reasoning_effort,
+            reasoning.into(),
             Vec::new(),
             AccessMode::ReadOnly,
             ApprovalMode::Manual,
@@ -65,12 +65,13 @@ impl SessionState {
         show_thinking: bool,
         show_tool_output: bool,
         model_name: impl Into<String>,
-        reasoning_effort: ReasoningEffort,
+        reasoning: impl Into<ReasoningSetting>,
         planning_agents: Vec<PlanningAgentConfig>,
         initial_mode: AccessMode,
         initial_approval_mode: ApprovalMode,
     ) -> Self {
         let model_name = model_name.into();
+        let reasoning = reasoning.into();
         Self {
             workspace_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             initial_mode,
@@ -96,8 +97,8 @@ impl SessionState {
             safety_model_name: model_name.clone(),
             model_name,
             last_history_model_name: None,
-            reasoning_effort,
-            safety_reasoning_effort: reasoning_effort,
+            reasoning,
+            safety_reasoning: reasoning,
             planning_agents,
             session_stats: StatsTotals::default(),
             planning: PlanningFeatureState::default(),

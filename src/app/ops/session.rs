@@ -63,11 +63,11 @@ pub(crate) fn set_last_history_model_name(
 
 pub(crate) fn reset_session(state: &mut AppState) {
     let model_name = state.session.model_name.clone();
-    let reasoning_effort = state.session.reasoning_effort;
+    let reasoning = state.session.reasoning;
     let planning_agents = state.session.planning_agents.clone();
     let workspace_root = state.session.workspace_root.clone();
     let safety_model_name = state.session.safety_model_name.clone();
-    let safety_reasoning_effort = state.session.safety_reasoning_effort;
+    let safety_reasoning = state.session.safety_reasoning;
     let session_stats = state.session.session_stats;
     let next_reply_id = state.session.next_reply_id;
     let mut command_history = std::mem::take(&mut state.ui.command_history);
@@ -77,14 +77,14 @@ pub(crate) fn reset_session(state: &mut AppState) {
         state.session.show_thinking,
         state.session.show_tool_output,
         model_name,
-        reasoning_effort,
+        reasoning,
         planning_agents,
         state.session.initial_mode,
         state.session.initial_approval_mode,
     );
     state.session.workspace_root = workspace_root;
     state.session.safety_model_name = safety_model_name;
-    state.session.safety_reasoning_effort = safety_reasoning_effort;
+    state.session.safety_reasoning = safety_reasoning;
     state.session.session_stats = session_stats;
     state.session.next_reply_id = next_reply_id;
     state.ui = UiState::default();

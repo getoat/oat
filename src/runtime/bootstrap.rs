@@ -38,13 +38,13 @@ pub(crate) fn bootstrap_tui(config: AppConfig, startup: StartupOptions) -> Resul
         config.ui.show_thinking,
         config.ui.show_tool_output,
         config.azure.model_name.clone(),
-        config.azure.reasoning_effort,
+        config.azure.reasoning,
         config.planning.agents.clone(),
         startup.access_mode,
         startup.approval_mode,
     );
     app.set_safety_model_name(config.safety.model_name.clone());
-    app.set_safety_reasoning_effort(config.safety.reasoning_effort);
+    app.set_safety_reasoning(config.safety.reasoning);
     let stats = StatsStore::new();
     let (subagent_tx, subagent_rx) = mpsc::unbounded_channel();
     let subagents =

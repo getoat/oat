@@ -34,7 +34,8 @@ use crate::{
     },
     completion_request::CompletionRequestSnapshot,
     config::{
-        AppConfig, AzureConfig, ReasoningEffort, SafetyConfig, SubagentConfig, ToolConfig, UiConfig,
+        AppConfig, AzureConfig, KimiThinkingMode, ReasoningEffort, ReasoningSetting, SafetyConfig,
+        SubagentConfig, ToolConfig, UiConfig,
     },
     features::planning::PlanningConfig,
 };
@@ -45,12 +46,12 @@ fn sample_config() -> AppConfig {
             resource_name: "demo-resource".into(),
             api_key: "secret".into(),
             model_name: "gpt-5-mini".into(),
-            reasoning_effort: ReasoningEffort::Minimal,
+            reasoning: ReasoningEffort::Minimal.into(),
             api_version: "2025-01-01-preview".into(),
         },
         safety: SafetyConfig {
             model_name: "gpt-5-mini".into(),
-            reasoning_effort: ReasoningEffort::Low,
+            reasoning: ReasoningEffort::Low.into(),
         },
         ui: UiConfig {
             show_thinking: true,
@@ -65,8 +66,20 @@ fn sample_config() -> AppConfig {
 
 #[test]
 fn reasoning_params_match_requested_effort() {
-    let params = reasoning_params(sample_config().azure.reasoning_effort);
+    let params = reasoning_params(
+        &sample_config().azure.model_name,
+        sample_config().azure.reasoning,
+    );
     assert_eq!(params, json!({ "reasoning_effort": "minimal" }));
+}
+
+#[test]
+fn kimi_reasoning_params_match_requested_mode() {
+    let on = reasoning_params("kimi-k2.5", ReasoningSetting::Kimi(KimiThinkingMode::On));
+    let off = reasoning_params("kimi-k2.5", ReasoningSetting::Kimi(KimiThinkingMode::Off));
+
+    assert_eq!(on, json!({}));
+    assert_eq!(off, json!({ "thinking": { "type": "disabled" } }));
 }
 
 #[test]

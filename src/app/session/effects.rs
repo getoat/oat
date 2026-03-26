@@ -1,5 +1,5 @@
 use crate::{
-    ask_user::AskUserResponse, config::ReasoningEffort, features::planning::PlanningAgentConfig,
+    ask_user::AskUserResponse, config::ReasoningSetting, features::planning::PlanningAgentConfig,
 };
 
 use super::{AccessMode, SessionHistoryMessage, ShellApprovalDecision, WriteApprovalDecision};
@@ -18,15 +18,15 @@ pub enum Effect {
     SetModelSelection {
         model_name: String,
     },
-    SetReasoningEffort {
-        reasoning_effort: ReasoningEffort,
+    SetReasoning {
+        reasoning: ReasoningSetting,
     },
     SetPlanningAgents {
         planning_agents: Vec<PlanningAgentConfig>,
     },
     SetSafetySelection {
         model_name: String,
-        reasoning_effort: ReasoningEffort,
+        reasoning: ReasoningSetting,
     },
     RunPlanningWorkflow {
         reply_id: u64,

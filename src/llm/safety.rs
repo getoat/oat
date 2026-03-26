@@ -52,7 +52,10 @@ impl SafetyClassifier {
         let agent = client
             .agent(config.safety.model_name.clone())
             .preamble(safety_classifier_preamble())
-            .additional_params(reasoning_params(config.safety.reasoning_effort))
+            .additional_params(reasoning_params(
+                &config.safety.model_name,
+                config.safety.reasoning,
+            ))
             .build();
         Self { agent }
     }

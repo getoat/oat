@@ -1,6 +1,6 @@
 use super::super::{Effect, PendingReplyKind, SlashCommand};
 use crate::app::{AppState, ops, query};
-use crate::config::ReasoningEffort;
+use crate::model_registry::{self, ParseReasoningSettingError};
 
 pub(super) fn submit_command(
     state: &mut AppState,
@@ -98,66 +98,66 @@ fn submit_plan_command(state: &mut AppState, arguments: &str) -> Option<Effect> 
 
 fn submit_effort_command(state: &mut AppState, arguments: &str) -> Option<Effect> {
     let value = arguments.trim();
-    let supported_levels = query::supported_reasoning_levels_state(state);
-    let supported = supported_levels
+    let supported_settings = query::supported_reasoning_settings_state(state);
+    let supported = supported_settings
         .iter()
-        .map(|level| level.as_str())
+        .map(|setting| setting.as_str())
         .collect::<Vec<_>>()
         .join(", ");
     if value.is_empty() {
         ops::transcript::push_error_message(
             state,
             format!(
-                "Usage: /effort <{supported}>. Current effort is `{}`.",
-                state.session.reasoning_effort.as_str()
+                "Usage: /effort <{supported}>. Current reasoning is `{}`.",
+                state.session.reasoning.as_str()
             ),
         );
         return None;
     }
 
-    let Some(reasoning_effort) = ReasoningEffort::parse(value) else {
-        ops::transcript::push_error_message(
-            state,
-            format!("Unknown reasoning effort `{value}`. Choose one of: {supported}."),
-        );
-        return None;
-    };
+    let reasoning =
+        match model_registry::parse_reasoning_setting_for_model(&state.session.model_name, value) {
+            Ok(reasoning) => reasoning,
+            Err(ParseReasoningSettingError::Unknown) => {
+                ops::transcript::push_error_message(
+                    state,
+                    format!("Unknown reasoning setting `{value}`. Choose one of: {supported}."),
+                );
+                return None;
+            }
+            Err(ParseReasoningSettingError::UnsupportedForModel { .. }) => {
+                ops::transcript::push_error_message(
+                    state,
+                    format!(
+                        "Model `{}` supports reasoning settings: {supported}.",
+                        state.session.model_name
+                    ),
+                );
+                return None;
+            }
+            Err(ParseReasoningSettingError::UnknownModel) => {
+                ops::transcript::push_error_message(
+                    state,
+                    model_registry::unknown_model_message(
+                        "session.model_name",
+                        &state.session.model_name,
+                    ),
+                );
+                return None;
+            }
+        };
 
-    if !supported_levels.contains(&reasoning_effort) {
-        if let Some(model) = query::current_model_info_state(state) {
-            ops::transcript::push_error_message(
-                state,
-                format!(
-                    "Model `{}` supports reasoning efforts: {supported}.",
-                    model.name
-                ),
-            );
-        } else {
-            ops::transcript::push_error_message(
-                state,
-                format!(
-                    "Reasoning effort `{}` is not supported. Choose one of: {supported}.",
-                    reasoning_effort.as_str()
-                ),
-            );
-        }
-        return None;
-    }
-
-    if reasoning_effort == state.session.reasoning_effort {
+    if reasoning == state.session.reasoning {
         ops::composer::clear_composer(state);
         ops::transcript::push_agent_message(
             state,
-            format!(
-                "Reasoning effort is already set to `{}`.",
-                reasoning_effort.as_str()
-            ),
+            format!("Reasoning is already set to `{}`.", reasoning.as_str()),
         );
         return None;
     }
 
     ops::composer::clear_composer(state);
-    Some(Effect::SetReasoningEffort { reasoning_effort })
+    Some(Effect::SetReasoning { reasoning })
 }
 
 #[cfg(test)]
@@ -168,6 +168,7 @@ mod tests {
         TranscriptEntry,
         session::test_support::{new_app, registry_app},
     };
+    use crate::config::{KimiThinkingMode, ReasoningEffort, ReasoningSetting};
 
     #[test]
     fn partial_command_completes_before_execution() {
@@ -275,7 +276,7 @@ mod tests {
 
     #[test]
     fn effort_command_returns_effect_for_valid_value() {
-        let mut app = new_app(true);
+        let mut app = registry_app(true);
         app.composer_mut().insert_str("/effort high");
         app.sync_command_selection();
 
@@ -283,8 +284,8 @@ mod tests {
 
         assert_eq!(
             effect,
-            Some(Effect::SetReasoningEffort {
-                reasoning_effort: ReasoningEffort::High,
+            Some(Effect::SetReasoning {
+                reasoning: ReasoningSetting::Gpt(ReasoningEffort::High),
             })
         );
         assert!(!app.composer_has_content());
@@ -292,23 +293,39 @@ mod tests {
 
     #[test]
     fn effort_alias_returns_effect_for_valid_value() {
-        let mut app = new_app(true);
-        app.composer_mut().insert_str("/thinking xhigh");
+        let mut app = registry_app(true);
+        app.composer_mut().insert_str("/thinking high");
         app.sync_command_selection();
 
         let effect = app.apply(crate::app::Action::SubmitMessage);
 
         assert_eq!(
             effect,
-            Some(Effect::SetReasoningEffort {
-                reasoning_effort: ReasoningEffort::XHigh,
+            Some(Effect::SetReasoning {
+                reasoning: ReasoningSetting::Gpt(ReasoningEffort::High),
+            })
+        );
+    }
+
+    #[test]
+    fn effort_command_returns_kimi_toggle_for_kimi_models() {
+        let mut app = crate::app::App::new(true, false, "kimi-k2.5", KimiThinkingMode::On);
+        app.composer_mut().insert_str("/effort off");
+        app.sync_command_selection();
+
+        let effect = app.apply(crate::app::Action::SubmitMessage);
+
+        assert_eq!(
+            effect,
+            Some(Effect::SetReasoning {
+                reasoning: ReasoningSetting::Kimi(KimiThinkingMode::Off),
             })
         );
     }
 
     #[test]
     fn effort_command_rejects_invalid_value() {
-        let mut app = new_app(true);
+        let mut app = registry_app(true);
         app.composer_mut().insert_str("/effort turbo");
         app.sync_command_selection();
 
@@ -320,8 +337,29 @@ mod tests {
             panic!("expected message entry");
         };
         assert_eq!(message.style, MessageStyle::Error);
-        assert!(message.text.contains("Unknown reasoning effort"));
+        assert!(message.text.contains("Unknown reasoning setting"));
         assert!(app.composer_has_content());
+    }
+
+    #[test]
+    fn effort_command_rejects_gpt_value_for_kimi_model() {
+        let mut app = crate::app::App::new(true, false, "kimi-k2.5", KimiThinkingMode::On);
+        app.composer_mut().insert_str("/effort medium");
+        app.sync_command_selection();
+
+        let effect = app.apply(crate::app::Action::SubmitMessage);
+
+        assert!(effect.is_none());
+        let TranscriptEntry::Message(message) = app.entries().last().expect("error entry exists")
+        else {
+            panic!("expected message entry");
+        };
+        assert_eq!(message.style, MessageStyle::Error);
+        assert!(
+            message
+                .text
+                .contains("supports reasoning settings: on, off")
+        );
     }
 
     #[test]
@@ -338,12 +376,12 @@ mod tests {
             panic!("expected message entry");
         };
         assert_eq!(message.style, MessageStyle::Error);
-        assert!(message.text.contains("supports reasoning efforts"));
+        assert!(message.text.contains("supports reasoning settings"));
     }
 
     #[test]
     fn effort_command_reports_noop_when_value_is_unchanged() {
-        let mut app = new_app(true);
+        let mut app = registry_app(true);
         app.composer_mut().insert_str("/effort medium");
         app.sync_command_selection();
 

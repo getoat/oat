@@ -1,14 +1,15 @@
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 
 use crate::{
     features::planning::{PlanningAgentConfig, PlanningConfig},
+    model_registry::{self, ParseReasoningSettingError},
     tool_policy,
 };
 
 use super::types::{
-    AppConfig, AzureConfig, ReasoningEffort, SafetyConfig, SubagentConfig, ToolConfig, UiConfig,
-    default_api_version, default_command_history_limit, default_max_concurrent_subagents,
+    AppConfig, AzureConfig, RawReasoningSetting, SafetyConfig, SubagentConfig, ToolConfig,
+    UiConfig, default_api_version, default_command_history_limit, default_max_concurrent_subagents,
     default_show_thinking,
 };
 
@@ -67,7 +68,7 @@ impl PartialAppConfig {
             .context("config is missing the [azure] table")?
             .finalize()?;
         Ok(AppConfig {
-            safety: self.safety.unwrap_or_default().finalize(&azure),
+            safety: self.safety.unwrap_or_default().finalize(&azure)?,
             azure,
             ui: self.ui.unwrap_or_default().finalize(),
             subagents: self.subagents.unwrap_or_default().finalize(),
@@ -77,13 +78,39 @@ impl PartialAppConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default)]
 struct PartialAzureConfig {
     resource_name: Option<String>,
     api_key: Option<String>,
     model_name: Option<String>,
-    reasoning_effort: Option<ReasoningEffort>,
+    reasoning: Option<String>,
     api_version: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct RawPartialAzureConfig {
+    resource_name: Option<String>,
+    api_key: Option<String>,
+    model_name: Option<String>,
+    #[serde(flatten)]
+    reasoning_fields: RawReasoningSetting,
+    api_version: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for PartialAzureConfig {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = RawPartialAzureConfig::deserialize(deserializer)?;
+        Ok(Self {
+            resource_name: raw.resource_name,
+            api_key: raw.api_key,
+            model_name: raw.model_name,
+            reasoning: raw.reasoning_fields.resolve(),
+            api_version: raw.api_version,
+        })
+    }
 }
 
 impl PartialAzureConfig {
@@ -97,8 +124,8 @@ impl PartialAzureConfig {
         if other.model_name.is_some() {
             self.model_name = other.model_name;
         }
-        if other.reasoning_effort.is_some() {
-            self.reasoning_effort = other.reasoning_effort;
+        if other.reasoning.is_some() {
+            self.reasoning = other.reasoning;
         }
         if other.api_version.is_some() {
             self.api_version = other.api_version;
@@ -106,17 +133,23 @@ impl PartialAzureConfig {
     }
 
     fn finalize(self) -> Result<AzureConfig> {
+        let model_name = self
+            .model_name
+            .context("config is missing azure.model_name")?;
+        let reasoning = parse_reasoning_value(
+            "azure.model_name",
+            "azure.reasoning",
+            &model_name,
+            self.reasoning
+                .context("config is missing azure.reasoning")?,
+        )?;
         Ok(AzureConfig {
             resource_name: self
                 .resource_name
                 .context("config is missing azure.resource_name")?,
             api_key: self.api_key.context("config is missing azure.api_key")?,
-            model_name: self
-                .model_name
-                .context("config is missing azure.model_name")?,
-            reasoning_effort: self
-                .reasoning_effort
-                .context("config is missing azure.reasoning_effort")?,
+            model_name,
+            reasoning,
             api_version: self.api_version.unwrap_or_else(default_api_version),
         })
     }
@@ -219,10 +252,30 @@ impl PartialToolConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default)]
 struct PartialSafetyConfig {
     model_name: Option<String>,
-    reasoning_effort: Option<ReasoningEffort>,
+    reasoning: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct RawPartialSafetyConfig {
+    model_name: Option<String>,
+    #[serde(flatten)]
+    reasoning_fields: RawReasoningSetting,
+}
+
+impl<'de> Deserialize<'de> for PartialSafetyConfig {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = RawPartialSafetyConfig::deserialize(deserializer)?;
+        Ok(Self {
+            model_name: raw.model_name,
+            reasoning: raw.reasoning_fields.resolve(),
+        })
+    }
 }
 
 impl PartialSafetyConfig {
@@ -230,15 +283,40 @@ impl PartialSafetyConfig {
         if other.model_name.is_some() {
             self.model_name = other.model_name;
         }
-        if other.reasoning_effort.is_some() {
-            self.reasoning_effort = other.reasoning_effort;
+        if other.reasoning.is_some() {
+            self.reasoning = other.reasoning;
         }
     }
 
-    fn finalize(self, azure: &AzureConfig) -> SafetyConfig {
-        SafetyConfig {
-            model_name: self.model_name.unwrap_or_else(|| azure.model_name.clone()),
-            reasoning_effort: self.reasoning_effort.unwrap_or(azure.reasoning_effort),
-        }
+    fn finalize(self, azure: &AzureConfig) -> Result<SafetyConfig> {
+        let model_name = self.model_name.unwrap_or_else(|| azure.model_name.clone());
+        let reasoning = self
+            .reasoning
+            .map(|value| {
+                parse_reasoning_value("safety.model_name", "safety.reasoning", &model_name, value)
+            })
+            .transpose()?
+            .unwrap_or(azure.reasoning);
+        Ok(SafetyConfig {
+            model_name,
+            reasoning,
+        })
+    }
+}
+
+fn parse_reasoning_value(
+    model_field_name: &str,
+    field_name: &str,
+    model_name: &str,
+    value: String,
+) -> Result<super::ReasoningSetting> {
+    match model_registry::parse_reasoning_setting_for_model(model_name, &value) {
+        Ok(reasoning) => Ok(reasoning),
+        Err(ParseReasoningSettingError::UnknownModel) => Err(anyhow::anyhow!(
+            model_registry::unknown_model_message(model_field_name, model_name,)
+        )),
+        Err(error) => Err(anyhow::anyhow!(
+            error.message(field_name, model_name, &value)
+        )),
     }
 }

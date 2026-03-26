@@ -4,7 +4,11 @@ use serde_json::json;
 
 #[cfg(test)]
 use crate::token_counting::count_text_tokens;
-use crate::{ask_user::AskUserRequest, config::ReasoningEffort, model_registry};
+use crate::{
+    ask_user::AskUserRequest,
+    config::{ReasoningEffort, ReasoningSetting},
+    model_registry,
+};
 
 use super::CommandRisk;
 
@@ -49,8 +53,8 @@ impl SlashCommand {
             Self::NewSession => "Start a new session",
             Self::Compact => "Compact the internal model history",
             Self::Stats => "Show session and historical usage stats",
-            Self::Model => "Select the model and reasoning effort",
-            Self::Effort => "Set reasoning effort for the current model",
+            Self::Model => "Select the model and reasoning setting",
+            Self::Effort => "Set reasoning for the current model",
             Self::Plan => "Start an interactive planning session",
             Self::Quit => "Exit the app",
         }
@@ -258,20 +262,20 @@ const ESTIMATED_MESSAGE_OVERHEAD_TOKENS: u64 = 4;
 #[cfg(test)]
 const ESTIMATED_CONTENT_OVERHEAD_TOKENS: u64 = 2;
 
-pub(crate) fn compatible_reasoning_effort(
+pub(crate) fn compatible_reasoning_setting(
     model_name: &str,
-    current: ReasoningEffort,
-) -> ReasoningEffort {
+    current: ReasoningSetting,
+) -> ReasoningSetting {
     if let Some(model) = model_registry::find_model(model_name) {
         if model.supports_reasoning(current) {
             current
         } else {
             model
-                .supported_reasoning_levels
+                .supported_reasoning_settings
                 .iter()
-                .find(|level| **level == ReasoningEffort::Medium)
+                .find(|setting| **setting == ReasoningSetting::Gpt(ReasoningEffort::Medium))
                 .copied()
-                .or_else(|| model.supported_reasoning_levels.first().copied())
+                .or_else(|| model.supported_reasoning_settings.first().copied())
                 .unwrap_or(current)
         }
     } else {
@@ -284,18 +288,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn compatible_reasoning_effort_preserves_supported_level() {
+    fn compatible_reasoning_setting_preserves_supported_level() {
         assert_eq!(
-            compatible_reasoning_effort("gpt-5.4", ReasoningEffort::High),
-            ReasoningEffort::High
+            compatible_reasoning_setting("gpt-5.4", ReasoningSetting::Gpt(ReasoningEffort::High)),
+            ReasoningSetting::Gpt(ReasoningEffort::High)
         );
     }
 
     #[test]
-    fn compatible_reasoning_effort_downgrades_to_medium_when_needed() {
+    fn compatible_reasoning_setting_downgrades_to_medium_when_needed() {
         assert_eq!(
-            compatible_reasoning_effort("gpt-5.4-mini", ReasoningEffort::Minimal),
-            ReasoningEffort::Medium
+            compatible_reasoning_setting(
+                "gpt-5.4-mini",
+                ReasoningSetting::Gpt(ReasoningEffort::Minimal),
+            ),
+            ReasoningSetting::Gpt(ReasoningEffort::Medium)
         );
     }
 }

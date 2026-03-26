@@ -65,7 +65,7 @@ pub(crate) fn toggle_picker_selection(state: &mut AppState) -> Option<Vec<Planni
     } else {
         state.session.planning_agents.push(PlanningAgentConfig {
             model_name,
-            reasoning_effort: default_planning_reasoning(
+            reasoning: default_planning_reasoning(
                 planning_models(&state.session.model_name)
                     .get(planning_selected_index)
                     .map(|model| model.name)
@@ -117,7 +117,7 @@ pub(crate) fn apply_picker_selection(state: &mut AppState) -> Option<PickerSelec
                 ReasoningPickerTarget::PlanningAgent => {
                     let planning_agent = PlanningAgentConfig {
                         model_name,
-                        reasoning_effort,
+                        reasoning: reasoning_effort,
                     };
                     if let Some(existing) = state
                         .session
@@ -133,10 +133,10 @@ pub(crate) fn apply_picker_selection(state: &mut AppState) -> Option<PickerSelec
                 }
                 ReasoningPickerTarget::SafetyModel => {
                     state.session.safety_model_name = model_name.clone();
-                    state.session.safety_reasoning_effort = reasoning_effort;
+                    state.session.safety_reasoning = reasoning_effort;
                     PickerSelection::SafetySelection {
                         model_name,
-                        reasoning_effort,
+                        reasoning: reasoning_effort,
                     }
                 }
             }),
@@ -156,7 +156,7 @@ pub(crate) fn open_reasoning_picker_for(
     target: ReasoningPickerTarget,
     model_name: String,
 ) {
-    let Some(options) = model_registry::reasoning_levels_for_model(&model_name) else {
+    let Some(options) = model_registry::reasoning_settings_for_model(&model_name) else {
         state.ui.picker = None;
         return;
     };
@@ -164,7 +164,7 @@ pub(crate) fn open_reasoning_picker_for(
     let selected_index = match target {
         ReasoningPickerTarget::NormalAgent => options
             .iter()
-            .position(|level| *level == state.session.reasoning_effort)
+            .position(|level| *level == state.session.reasoning)
             .unwrap_or(0),
         ReasoningPickerTarget::PlanningAgent => options
             .iter()
@@ -174,7 +174,7 @@ pub(crate) fn open_reasoning_picker_for(
                     .planning_agents
                     .iter()
                     .find(|agent| agent.model_name == model_name)
-                    .map(|agent| *level == agent.reasoning_effort)
+                    .map(|agent| *level == agent.reasoning)
                     .unwrap_or(false)
             })
             .unwrap_or_else(|| {
@@ -187,7 +187,7 @@ pub(crate) fn open_reasoning_picker_for(
             .iter()
             .position(|level| {
                 model_name == state.session.safety_model_name
-                    && *level == state.session.safety_reasoning_effort
+                    && *level == state.session.safety_reasoning
             })
             .unwrap_or_else(|| {
                 options

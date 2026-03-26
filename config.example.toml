@@ -6,8 +6,10 @@ api_key = "paste-your-azure-openai-api-key-here"
 # In many setups it matches the model name, but Azure routes by deployment.
 model_name = "gpt-5.4-mini"
 
-# One of: minimal, low, medium, high, xhigh
-reasoning_effort = "medium"
+# Model-specific reasoning setting.
+# GPT models: minimal, low, medium, high, xhigh
+# kimi-k2.5: on, off
+reasoning = "medium"
 
 # Override only if your deployment needs a different Azure OpenAI API version.
 api_version = "2025-01-01-preview"
@@ -31,18 +33,18 @@ agents = []
 # Example:
 # [[planning.agents]]
 # model_name = "gpt-5.4"
-# reasoning_effort = "high"
+# reasoning = "high"
 #
 # [[planning.agents]]
-# model_name = "gpt-5.4-nano"
-# reasoning_effort = "medium"
+# model_name = "kimi-k2.5"
+# reasoning = "on"
 
 [safety]
 # Optional dedicated model used to classify shell commands as low, medium, or
 # high risk before they can run. If omitted in an existing config, oat will
-# fall back to the main agent model and reasoning effort.
+# fall back to the main agent model and reasoning setting.
 model_name = "gpt-5.4-mini"
-reasoning_effort = "medium"
+reasoning = "medium"
 
 [tools]
 # Tool outputs are truncated after approximately this many tokens.

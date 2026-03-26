@@ -1,4 +1,7 @@
-use crate::{config::ReasoningEffort, model_registry};
+use crate::{
+    config::{ReasoningEffort, ReasoningSetting},
+    model_registry,
+};
 
 use super::{
     MessageStyle, PendingReplyKind, SessionState, TranscriptEntry, startup_banner_message,
@@ -49,16 +52,16 @@ pub fn current_model_info(session: &SessionState) -> Option<&'static model_regis
     model_registry::find_model(&session.model_name)
 }
 
-pub fn supported_reasoning_levels(session: &SessionState) -> Vec<ReasoningEffort> {
-    model_registry::reasoning_levels_for_model(&session.model_name)
-        .map(|levels| levels.to_vec())
+pub fn supported_reasoning_settings(session: &SessionState) -> Vec<ReasoningSetting> {
+    model_registry::reasoning_settings_for_model(&session.model_name)
+        .map(|settings| settings.to_vec())
         .unwrap_or_else(|| {
             vec![
-                ReasoningEffort::Minimal,
-                ReasoningEffort::Low,
-                ReasoningEffort::Medium,
-                ReasoningEffort::High,
-                ReasoningEffort::XHigh,
+                ReasoningSetting::Gpt(ReasoningEffort::Minimal),
+                ReasoningSetting::Gpt(ReasoningEffort::Low),
+                ReasoningSetting::Gpt(ReasoningEffort::Medium),
+                ReasoningSetting::Gpt(ReasoningEffort::High),
+                ReasoningSetting::Gpt(ReasoningEffort::XHigh),
             ]
         })
 }

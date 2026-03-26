@@ -233,7 +233,7 @@ pub(super) fn render_mode(
     spans.push(Span::raw(format!(
         "  {} • {}  in {}  out {}  ctx {}  ${:.6}",
         query::model_name(app.state()),
-        query::reasoning_effort(app.state()).as_str(),
+        query::reasoning(app.state()).as_str(),
         format_compact_tokens(session_stats.input_tokens),
         format_compact_tokens(session_stats.output_tokens),
         format!("{context_percent}%"),
@@ -327,7 +327,10 @@ pub(super) fn model_picker_detail(model: &crate::model_registry::ModelInfo) -> S
     let standard = format!(
         "{}  ctx {}  in {}  cache {}  out {}",
         model.provider.display_name(),
-        format_context_length(model.context_length),
+        model
+            .display_context_length()
+            .map(str::to_string)
+            .unwrap_or_else(|| format_context_length(model.context_length)),
         format_price(model.pricing.input_per_million_tokens),
         format_price(model.pricing.cache_read_per_million_tokens),
         format_price(model.pricing.output_per_million_tokens),

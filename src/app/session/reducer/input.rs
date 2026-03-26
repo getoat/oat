@@ -263,7 +263,7 @@ mod tests {
             Some(crate::app::Effect::SetPlanningAgents {
                 planning_agents: vec![PlanningAgentConfig {
                     model_name: "gpt-5.4".into(),
-                    reasoning_effort: ReasoningEffort::Low,
+                    reasoning: ReasoningEffort::Low.into(),
                 }],
             })
         );

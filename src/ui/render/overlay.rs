@@ -96,13 +96,10 @@ fn render_selection_picker(
                                     .find(|agent| agent.model_name == model.name);
                                 let detail = planning_agent
                                     .map(|agent| {
-                                        format!(
-                                            "selected  effort: {}",
-                                            agent.reasoning_effort.as_str()
-                                        )
+                                        format!("selected  reasoning: {}", agent.reasoning.as_str())
                                     })
                                     .unwrap_or_else(|| {
-                                        "not selected  Space toggles  Enter sets effort".into()
+                                        "not selected  Space toggles  Enter sets reasoning".into()
                                     });
                                 selection_picker_line(
                                     index == *planning_selected_index,
@@ -123,11 +120,11 @@ fn render_selection_picker(
                                 let detail = if query::safety_model_name(app.state()) == model.name
                                 {
                                     format!(
-                                        "selected  effort: {}",
-                                        query::safety_reasoning_effort(app.state()).as_str()
+                                        "selected  reasoning: {}",
+                                        query::safety_reasoning(app.state()).as_str()
                                     )
                                 } else {
-                                    "Enter sets effort".into()
+                                    "Enter sets reasoning".into()
                                 };
                                 selection_picker_line(
                                     index == *safety_selected_index,

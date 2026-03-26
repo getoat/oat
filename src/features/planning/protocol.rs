@@ -1,9 +1,9 @@
 use std::collections::HashSet;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::{
-    config::ReasoningEffort,
+    config::{RawReasoningSetting, ReasoningEffort, ReasoningSetting},
     features::planning::state::{PlanningBrief, PlanningReply, ProposedPlan},
     model_registry,
 };
@@ -16,10 +16,53 @@ pub const PROPOSED_PLAN_END_TAG: &str = "</proposed_plan>";
 const MAIN_PLANNING_PROMPT: &str = include_str!("../../../prompts/plan.md");
 const SUBAGENT_PLANNING_PROMPT: &str = include_str!("../../../prompts/plan_subagent.md");
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct PlanningAgentConfig {
     pub model_name: String,
-    pub reasoning_effort: ReasoningEffort,
+    pub reasoning: ReasoningSetting,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RawPlanningAgentConfig {
+    model_name: String,
+    #[serde(flatten)]
+    reasoning_fields: RawReasoningSetting,
+}
+
+impl<'de> Deserialize<'de> for PlanningAgentConfig {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = RawPlanningAgentConfig::deserialize(deserializer)?;
+        let model_name = raw.model_name;
+        let reasoning_value = raw
+            .reasoning_fields
+            .resolve()
+            .ok_or_else(|| serde::de::Error::missing_field("reasoning"))?;
+        let reasoning =
+            model_registry::parse_reasoning_setting_for_model(&model_name, &reasoning_value)
+                .map_err(|error| {
+                    let message = match error {
+                        model_registry::ParseReasoningSettingError::UnknownModel => {
+                            model_registry::unknown_model_message(
+                                "planning.agents[].model_name",
+                                &model_name,
+                            )
+                        }
+                        other => other.message(
+                            "planning.agents[].reasoning",
+                            &model_name,
+                            &reasoning_value,
+                        ),
+                    };
+                    serde::de::Error::custom(message)
+                })?;
+        Ok(Self {
+            model_name,
+            reasoning,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -31,7 +74,7 @@ pub struct PlanningConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlanningJob {
     pub model_name: String,
-    pub reasoning_effort: ReasoningEffort,
+    pub reasoning: ReasoningSetting,
 }
 
 pub fn sanitize_planning_agents(
@@ -49,7 +92,7 @@ pub fn sanitize_planning_agents(
         let Some(model) = model_registry::find_model(&agent.model_name) else {
             continue;
         };
-        if !model.supports_reasoning(agent.reasoning_effort) {
+        if !model.supports_reasoning(agent.reasoning) {
             continue;
         }
         if !seen.insert(agent.model_name.clone()) {
@@ -62,25 +105,26 @@ pub fn sanitize_planning_agents(
     sanitized
 }
 
-pub fn default_planning_reasoning(model_name: &str) -> ReasoningEffort {
-    model_registry::default_reasoning_for_model(model_name).unwrap_or(ReasoningEffort::Medium)
+pub fn default_planning_reasoning(model_name: &str) -> ReasoningSetting {
+    model_registry::default_reasoning_setting_for_model(model_name)
+        .unwrap_or(ReasoningSetting::Gpt(ReasoningEffort::Medium))
 }
 
 pub fn planning_jobs(
     current_main_model: &str,
-    current_main_reasoning: ReasoningEffort,
+    current_main_reasoning: ReasoningSetting,
     agents: &[PlanningAgentConfig],
 ) -> Vec<PlanningJob> {
     let mut jobs = vec![PlanningJob {
         model_name: current_main_model.to_string(),
-        reasoning_effort: current_main_reasoning,
+        reasoning: current_main_reasoning,
     }];
     jobs.extend(
         sanitize_planning_agents(current_main_model, agents)
             .into_iter()
             .map(|agent| PlanningJob {
                 model_name: agent.model_name,
-                reasoning_effort: agent.reasoning_effort,
+                reasoning: agent.reasoning,
             }),
     );
     jobs
@@ -136,10 +180,10 @@ pub fn planning_finalization_prompt(
         .enumerate()
         .map(|(index, (job, plan))| {
             format!(
-                "Planner {}: model `{}` effort `{}`\n{}\n",
+                "Planner {}: model `{}` reasoning `{}`\n{}\n",
                 index + 1,
                 job.model_name,
-                job.reasoning_effort.as_str(),
+                job.reasoning.as_str(),
                 plan.trim()
             )
         })
@@ -234,6 +278,31 @@ fn extract_tagged_block(text: &str, start_tag: &str, end_tag: &str) -> Option<St
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde::Deserialize;
+
+    #[derive(Debug, Deserialize)]
+    struct PlanningAgentsWrapper {
+        #[allow(dead_code)]
+        planning: PlanningConfig,
+    }
+
+    #[test]
+    fn planning_agent_parse_rejects_cross_family_reasoning_value() {
+        let error = toml::from_str::<PlanningAgentsWrapper>(
+            r#"
+                [[planning.agents]]
+                model_name = "kimi-k2.5"
+                reasoning = "medium"
+                "#,
+        )
+        .expect_err("planning config should fail to parse");
+
+        assert!(
+            error
+                .to_string()
+                .contains("reasoning `medium` is not supported by model `kimi-k2.5`")
+        );
+    }
 
     #[test]
     fn sanitize_removes_current_main_model_invalid_entries_and_duplicates() {
@@ -242,19 +311,19 @@ mod tests {
             &[
                 PlanningAgentConfig {
                     model_name: "gpt-5.4-mini".into(),
-                    reasoning_effort: ReasoningEffort::Medium,
+                    reasoning: ReasoningSetting::Gpt(ReasoningEffort::Medium),
                 },
                 PlanningAgentConfig {
                     model_name: "gpt-5.4".into(),
-                    reasoning_effort: ReasoningEffort::High,
+                    reasoning: ReasoningSetting::Gpt(ReasoningEffort::High),
                 },
                 PlanningAgentConfig {
                     model_name: "gpt-5.4".into(),
-                    reasoning_effort: ReasoningEffort::Low,
+                    reasoning: ReasoningSetting::Gpt(ReasoningEffort::Low),
                 },
                 PlanningAgentConfig {
                     model_name: "unknown".into(),
-                    reasoning_effort: ReasoningEffort::Medium,
+                    reasoning: ReasoningSetting::Gpt(ReasoningEffort::Medium),
                 },
             ],
         );
@@ -263,7 +332,7 @@ mod tests {
             sanitized,
             vec![PlanningAgentConfig {
                 model_name: "gpt-5.4".into(),
-                reasoning_effort: ReasoningEffort::High,
+                reasoning: ReasoningSetting::Gpt(ReasoningEffort::High),
             }]
         );
     }
@@ -272,10 +341,10 @@ mod tests {
     fn planning_jobs_always_include_main_model_first() {
         let jobs = planning_jobs(
             "gpt-5.4-mini",
-            ReasoningEffort::Medium,
+            ReasoningSetting::Gpt(ReasoningEffort::Medium),
             &[PlanningAgentConfig {
                 model_name: "gpt-5.4".into(),
-                reasoning_effort: ReasoningEffort::High,
+                reasoning: ReasoningSetting::Gpt(ReasoningEffort::High),
             }],
         );
 
@@ -284,11 +353,11 @@ mod tests {
             vec![
                 PlanningJob {
                     model_name: "gpt-5.4-mini".into(),
-                    reasoning_effort: ReasoningEffort::Medium,
+                    reasoning: ReasoningSetting::Gpt(ReasoningEffort::Medium),
                 },
                 PlanningJob {
                     model_name: "gpt-5.4".into(),
-                    reasoning_effort: ReasoningEffort::High,
+                    reasoning: ReasoningSetting::Gpt(ReasoningEffort::High),
                 },
             ]
         );
@@ -323,7 +392,7 @@ mod tests {
             &[(
                 PlanningJob {
                     model_name: "gpt-5.4-mini".into(),
-                    reasoning_effort: ReasoningEffort::Medium,
+                    reasoning: ReasoningSetting::Gpt(ReasoningEffort::Medium),
                 },
                 "High level description\n...".into(),
             )],

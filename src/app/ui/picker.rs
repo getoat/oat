@@ -1,4 +1,4 @@
-use crate::{config::ReasoningEffort, features::planning::PlanningAgentConfig};
+use crate::{config::ReasoningSetting, features::planning::PlanningAgentConfig};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ModelPickerTab {
@@ -34,7 +34,7 @@ pub enum SelectionPicker {
     Reasoning {
         target: ReasoningPickerTarget,
         model_name: String,
-        options: Vec<ReasoningEffort>,
+        options: Vec<ReasoningSetting>,
         selected_index: usize,
     },
 }
@@ -42,10 +42,10 @@ pub enum SelectionPicker {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PickerSelection {
     Model(String),
-    Reasoning(ReasoningEffort),
+    Reasoning(ReasoningSetting),
     PlanningAgent(PlanningAgentConfig),
     SafetySelection {
         model_name: String,
-        reasoning_effort: ReasoningEffort,
+        reasoning: ReasoningSetting,
     },
 }

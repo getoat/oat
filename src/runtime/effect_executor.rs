@@ -98,53 +98,51 @@ impl EffectExecutor<'_> {
                 Ok(())
             }
             Effect::SetModelSelection { model_name } => {
-                let reasoning_effort = app::compatible_reasoning_effort(
+                let reasoning = app::compatible_reasoning_setting(
                     &model_name,
-                    query::reasoning_effort(self.app.state()),
+                    query::reasoning(self.app.state()),
                 );
                 let planning_agents =
                     sanitize_planning_agents(&model_name, query::planning_agents(self.app.state()));
                 let updated_config = AppConfig::set_default_model_selection_with_planning(
                     &model_name,
-                    reasoning_effort,
+                    reasoning,
                     &planning_agents,
                 )?;
                 let rebuilt = self.rebuild_llm(&updated_config, query::mode(self.app.state()))?;
                 *self.config = updated_config;
                 *self.llm = rebuilt;
                 self.app.set_model_name(model_name.clone());
-                self.app.set_reasoning_effort(reasoning_effort);
+                self.app.set_reasoning(reasoning);
                 self.app
                     .set_safety_model_name(self.config.safety.model_name.clone());
-                self.app
-                    .set_safety_reasoning_effort(self.config.safety.reasoning_effort);
+                self.app.set_safety_reasoning(self.config.safety.reasoning);
                 self.app.set_planning_agents(planning_agents);
                 app::ops::picker::open_reasoning_picker(self.app.state_mut());
                 app::ops::transcript::push_agent_message(
                     self.app.state_mut(),
                     format!(
-                        "Model set to `{}` and saved to the active config. Select a reasoning effort.",
+                        "Model set to `{}` and saved to the active config. Select a reasoning setting.",
                         model_name
                     ),
                 );
                 Ok(())
             }
-            Effect::SetReasoningEffort { reasoning_effort } => {
-                let updated_config = AppConfig::set_default_reasoning_effort(reasoning_effort)?;
+            Effect::SetReasoning { reasoning } => {
+                let updated_config = AppConfig::set_default_reasoning(reasoning)?;
                 let rebuilt = self.rebuild_llm(&updated_config, query::mode(self.app.state()))?;
                 *self.config = updated_config;
                 *self.llm = rebuilt;
-                self.app.set_reasoning_effort(reasoning_effort);
+                self.app.set_reasoning(reasoning);
                 self.app
                     .set_safety_model_name(self.config.safety.model_name.clone());
-                self.app
-                    .set_safety_reasoning_effort(self.config.safety.reasoning_effort);
+                self.app.set_safety_reasoning(self.config.safety.reasoning);
                 let model_name = query::model_name(self.app.state()).to_string();
                 app::ops::transcript::push_agent_message(
                     self.app.state_mut(),
                     format!(
-                        "Reasoning effort set to `{}` for model `{}` and saved to the active config.",
-                        reasoning_effort.as_str(),
+                        "Reasoning set to `{}` for model `{}` and saved to the active config.",
+                        reasoning.as_str(),
                         model_name
                     ),
                 );
@@ -166,21 +164,21 @@ impl EffectExecutor<'_> {
             }
             Effect::SetSafetySelection {
                 model_name,
-                reasoning_effort,
+                reasoning,
             } => {
                 let updated_config =
-                    AppConfig::set_default_safety_selection(&model_name, reasoning_effort)?;
+                    AppConfig::set_default_safety_selection(&model_name, reasoning)?;
                 let rebuilt = self.rebuild_llm(&updated_config, query::mode(self.app.state()))?;
                 *self.config = updated_config;
                 *self.llm = rebuilt;
                 self.app.set_safety_model_name(model_name.clone());
-                self.app.set_safety_reasoning_effort(reasoning_effort);
+                self.app.set_safety_reasoning(reasoning);
                 app::ops::transcript::push_agent_message(
                     self.app.state_mut(),
                     format!(
                         "Safety model set to `{}` with `{}` reasoning and saved to the active config.",
                         model_name,
-                        reasoning_effort.as_str()
+                        reasoning.as_str()
                     ),
                 );
                 Ok(())

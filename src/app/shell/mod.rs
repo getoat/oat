@@ -1,4 +1,4 @@
-use crate::{config::ReasoningEffort, features::planning::PlanningAgentConfig};
+use crate::{config::ReasoningSetting, features::planning::PlanningAgentConfig};
 
 use super::{AccessMode, AppState, ApprovalMode, SessionState, UiState};
 
@@ -12,13 +12,13 @@ impl App {
         show_thinking: bool,
         show_tool_output: bool,
         model_name: impl Into<String>,
-        reasoning_effort: ReasoningEffort,
+        reasoning: impl Into<ReasoningSetting>,
     ) -> Self {
         Self::with_startup(
             show_thinking,
             show_tool_output,
             model_name,
-            reasoning_effort,
+            reasoning,
             Vec::new(),
             AccessMode::ReadOnly,
             ApprovalMode::Manual,
@@ -29,7 +29,7 @@ impl App {
         show_thinking: bool,
         show_tool_output: bool,
         model_name: impl Into<String>,
-        reasoning_effort: ReasoningEffort,
+        reasoning: impl Into<ReasoningSetting>,
         planning_agents: Vec<PlanningAgentConfig>,
         initial_mode: AccessMode,
         initial_approval_mode: ApprovalMode,
@@ -40,7 +40,7 @@ impl App {
                     show_thinking,
                     show_tool_output,
                     model_name,
-                    reasoning_effort,
+                    reasoning,
                     planning_agents,
                     initial_mode,
                     initial_approval_mode,
@@ -62,12 +62,12 @@ impl App {
         &mut self.state
     }
 
-    pub(crate) fn set_reasoning_effort(&mut self, reasoning_effort: ReasoningEffort) {
-        self.state.session.reasoning_effort = reasoning_effort;
+    pub(crate) fn set_reasoning(&mut self, reasoning: ReasoningSetting) {
+        self.state.session.reasoning = reasoning;
     }
 
-    pub(crate) fn set_safety_reasoning_effort(&mut self, reasoning_effort: ReasoningEffort) {
-        self.state.session.safety_reasoning_effort = reasoning_effort;
+    pub(crate) fn set_safety_reasoning(&mut self, reasoning: ReasoningSetting) {
+        self.state.session.safety_reasoning = reasoning;
     }
 
     pub(crate) fn set_session_stats(&mut self, session_stats: crate::stats::StatsTotals) {

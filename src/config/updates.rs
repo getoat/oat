@@ -4,15 +4,15 @@ use anyhow::{Context, Result};
 
 use crate::features::planning::{PlanningAgentConfig, sanitize_planning_agents};
 
-use super::ReasoningEffort;
+use super::ReasoningSetting;
 
 pub(super) fn write_config_updates_at_path(
     path: &Path,
     model_name: Option<&str>,
-    reasoning_effort: Option<ReasoningEffort>,
+    reasoning: Option<ReasoningSetting>,
     planning_agents: Option<&[PlanningAgentConfig]>,
     safety_model_name: Option<&str>,
-    safety_reasoning_effort: Option<ReasoningEffort>,
+    safety_reasoning: Option<ReasoningSetting>,
 ) -> Result<()> {
     let raw = fs::read_to_string(path).unwrap_or_default();
     let mut value: toml::Value = if raw.trim().is_empty() {
@@ -35,11 +35,12 @@ pub(super) fn write_config_updates_at_path(
             toml::Value::String(model_name.to_string()),
         );
     }
-    if let Some(reasoning_effort) = reasoning_effort {
+    if let Some(reasoning) = reasoning {
         azure.insert(
-            "reasoning_effort".into(),
-            toml::Value::String(reasoning_effort.as_str().to_string()),
+            "reasoning".into(),
+            toml::Value::String(reasoning.as_str().to_string()),
         );
+        azure.remove("reasoning_effort");
     }
     let current_main_model = azure
         .get("model_name")
@@ -61,7 +62,7 @@ pub(super) fn write_config_updates_at_path(
             .context("config planning value must be a TOML table")?;
         planning.insert("agents".into(), toml::Value::Array(serialized));
     }
-    if safety_model_name.is_some() || safety_reasoning_effort.is_some() {
+    if safety_model_name.is_some() || safety_reasoning.is_some() {
         let safety = root
             .entry("safety")
             .or_insert_with(|| toml::Value::Table(Default::default()))
@@ -73,11 +74,12 @@ pub(super) fn write_config_updates_at_path(
                 toml::Value::String(model_name.to_string()),
             );
         }
-        if let Some(reasoning_effort) = safety_reasoning_effort {
+        if let Some(reasoning) = safety_reasoning {
             safety.insert(
-                "reasoning_effort".into(),
-                toml::Value::String(reasoning_effort.as_str().to_string()),
+                "reasoning".into(),
+                toml::Value::String(reasoning.as_str().to_string()),
             );
+            safety.remove("reasoning_effort");
         }
     }
 

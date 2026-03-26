@@ -1,5 +1,8 @@
 use super::*;
-use crate::{features::planning::PlanningConfig, tool_policy};
+use crate::{
+    features::planning::{PlanningAgentConfig, PlanningConfig},
+    tool_policy,
+};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn unique_temp_path(name: &str) -> PathBuf {
@@ -20,8 +23,8 @@ fn parses_expected_config_shape() {
             [azure]
             resource_name = "demo-resource"
             api_key = "secret"
-            model_name = "gpt-5-mini"
-            reasoning_effort = "medium"
+            model_name = "gpt-5.4-mini"
+            reasoning = "medium"
 
             [ui]
             show_thinking = false
@@ -39,9 +42,15 @@ fn parses_expected_config_shape() {
     .expect("config parses");
 
     assert_eq!(config.azure.resource_name, "demo-resource");
-    assert_eq!(config.azure.reasoning_effort, ReasoningEffort::Medium);
-    assert_eq!(config.safety.model_name, "gpt-5-mini");
-    assert_eq!(config.safety.reasoning_effort, ReasoningEffort::Medium);
+    assert_eq!(
+        config.azure.reasoning,
+        ReasoningSetting::Gpt(ReasoningEffort::Medium)
+    );
+    assert_eq!(config.safety.model_name, "gpt-5.4-mini");
+    assert_eq!(
+        config.safety.reasoning,
+        ReasoningSetting::Gpt(ReasoningEffort::Medium)
+    );
     assert!(!config.ui.show_thinking);
     assert!(config.ui.show_tool_output);
     assert_eq!(config.ui.command_history_limit, 42);
@@ -58,8 +67,8 @@ fn ui_config_defaults_tool_output_to_hidden() {
             [azure]
             resource_name = "demo-resource"
             api_key = "secret"
-            model_name = "gpt-5-mini"
-            reasoning_effort = "medium"
+            model_name = "gpt-5.4-mini"
+            reasoning = "medium"
             "#,
     )
     .expect("config parses");
@@ -69,8 +78,11 @@ fn ui_config_defaults_tool_output_to_hidden() {
     assert_eq!(config.ui.command_history_limit, 20);
     assert_eq!(config.subagents.max_concurrent, 4);
     assert!(config.tools.search_include_patterns.is_empty());
-    assert_eq!(config.safety.model_name, "gpt-5-mini");
-    assert_eq!(config.safety.reasoning_effort, ReasoningEffort::Medium);
+    assert_eq!(config.safety.model_name, "gpt-5.4-mini");
+    assert_eq!(
+        config.safety.reasoning,
+        ReasoningSetting::Gpt(ReasoningEffort::Medium)
+    );
     assert_eq!(
         config.tools.max_output_tokens,
         tool_policy::default_tool_output_max_tokens()
@@ -82,8 +94,8 @@ fn endpoint_is_derived_from_resource_name() {
     let azure = AzureConfig {
         resource_name: "demo-resource".into(),
         api_key: "secret".into(),
-        model_name: "gpt-5-mini".into(),
-        reasoning_effort: ReasoningEffort::High,
+        model_name: "gpt-5.4-mini".into(),
+        reasoning: ReasoningEffort::High.into(),
         api_version: default_api_version(),
     };
 
@@ -96,13 +108,13 @@ fn validation_rejects_blank_required_fields() {
         azure: AzureConfig {
             resource_name: String::new(),
             api_key: "secret".into(),
-            model_name: "gpt-5-mini".into(),
-            reasoning_effort: ReasoningEffort::Low,
+            model_name: "gpt-5.4-mini".into(),
+            reasoning: ReasoningEffort::Low.into(),
             api_version: default_api_version(),
         },
         safety: SafetyConfig {
-            model_name: "gpt-5-mini".into(),
-            reasoning_effort: ReasoningEffort::Low,
+            model_name: "gpt-5.4-mini".into(),
+            reasoning: ReasoningEffort::Low.into(),
         },
         ui: UiConfig::default(),
         subagents: SubagentConfig::default(),
@@ -114,19 +126,113 @@ fn validation_rejects_blank_required_fields() {
 }
 
 #[test]
-fn parses_xhigh_reasoning_effort() {
+fn reasoning_setting_parser_still_supports_xhigh_literal() {
+    assert_eq!(
+        ReasoningSetting::parse_unscoped("xhigh"),
+        Some(ReasoningSetting::Gpt(ReasoningEffort::XHigh))
+    );
+}
+
+#[test]
+fn parses_legacy_reasoning_effort_key() {
     let config: AppConfig = toml::from_str(
         r#"
             [azure]
             resource_name = "demo-resource"
             api_key = "secret"
-            model_name = "gpt-5-mini"
-            reasoning_effort = "xhigh"
+            model_name = "gpt-5.4-mini"
+            reasoning_effort = "medium"
             "#,
     )
     .expect("config parses");
 
-    assert_eq!(config.azure.reasoning_effort, ReasoningEffort::XHigh);
+    assert_eq!(
+        config.azure.reasoning,
+        ReasoningSetting::Gpt(ReasoningEffort::Medium)
+    );
+}
+
+#[test]
+fn explicit_reasoning_key_overrides_legacy_alias() {
+    let config: AppConfig = toml::from_str(
+        r#"
+            [azure]
+            resource_name = "demo-resource"
+            api_key = "secret"
+            model_name = "gpt-5.4-mini"
+            reasoning_effort = "low"
+            reasoning = "high"
+            "#,
+    )
+    .expect("config parses");
+
+    assert_eq!(
+        config.azure.reasoning,
+        ReasoningSetting::Gpt(ReasoningEffort::High)
+    );
+}
+
+#[test]
+fn parses_kimi_reasoning_setting() {
+    let config: AppConfig = toml::from_str(
+        r#"
+            [azure]
+            resource_name = "demo-resource"
+            api_key = "secret"
+            model_name = "kimi-k2.5"
+            reasoning = "off"
+            "#,
+    )
+    .expect("config parses");
+
+    assert_eq!(
+        config.azure.reasoning,
+        ReasoningSetting::Kimi(KimiThinkingMode::Off)
+    );
+    assert_eq!(
+        config.safety.reasoning,
+        ReasoningSetting::Kimi(KimiThinkingMode::Off)
+    );
+}
+
+#[test]
+fn known_model_parse_rejects_cross_family_reasoning_value() {
+    let error = toml::from_str::<AppConfig>(
+        r#"
+            [azure]
+            resource_name = "demo-resource"
+            api_key = "secret"
+            model_name = "kimi-k2.5"
+            reasoning = "medium"
+            "#,
+    )
+    .expect_err("config should fail to parse");
+
+    assert!(
+        error
+            .to_string()
+            .contains("azure.reasoning `medium` is not supported by model `kimi-k2.5`")
+    );
+}
+
+#[test]
+fn unknown_model_parse_rejects_config_immediately() {
+    let error = toml::from_str::<AppConfig>(
+        r#"
+            [azure]
+            resource_name = "demo-resource"
+            api_key = "secret"
+            model_name = "mystery-model"
+            reasoning = "medium"
+            "#,
+    )
+    .expect_err("config should fail to parse");
+
+    assert!(
+        error
+            .to_string()
+            .contains("Warning: unknown azure.model_name `mystery-model`")
+    );
 }
 
 #[test]
@@ -136,12 +242,35 @@ fn known_registry_models_reject_unsupported_reasoning_effort() {
             resource_name: "demo-resource".into(),
             api_key: "secret".into(),
             model_name: "gpt-5.4-mini".into(),
-            reasoning_effort: ReasoningEffort::Minimal,
+            reasoning: ReasoningEffort::Minimal.into(),
             api_version: default_api_version(),
         },
         safety: SafetyConfig {
             model_name: "gpt-5.4-mini".into(),
-            reasoning_effort: ReasoningEffort::Medium,
+            reasoning: ReasoningEffort::Medium.into(),
+        },
+        ui: UiConfig::default(),
+        subagents: SubagentConfig::default(),
+        planning: PlanningConfig::default(),
+        tools: ToolConfig::default(),
+    };
+
+    assert!(config.validate().is_err());
+}
+
+#[test]
+fn kimi_model_rejects_gpt_reasoning_setting() {
+    let config = AppConfig {
+        azure: AzureConfig {
+            resource_name: "demo-resource".into(),
+            api_key: "secret".into(),
+            model_name: "kimi-k2.5".into(),
+            reasoning: ReasoningEffort::Medium.into(),
+            api_version: default_api_version(),
+        },
+        safety: SafetyConfig {
+            model_name: "kimi-k2.5".into(),
+            reasoning: KimiThinkingMode::On.into(),
         },
         ui: UiConfig::default(),
         subagents: SubagentConfig::default(),
@@ -163,8 +292,8 @@ fn default_load_merges_home_and_cwd_with_cwd_precedence() {
             [azure]
             resource_name = "home-resource"
             api_key = "home-secret"
-            model_name = "home-model"
-            reasoning_effort = "minimal"
+            model_name = "gpt-5.4"
+            reasoning = "low"
 
             [ui]
             show_thinking = true
@@ -184,8 +313,8 @@ fn default_load_merges_home_and_cwd_with_cwd_precedence() {
         &cwd_path,
         r#"
             [azure]
-            model_name = "cwd-model"
-            reasoning_effort = "high"
+            model_name = "gpt-5.4-mini"
+            reasoning = "high"
 
             [ui]
             show_tool_output = true
@@ -205,10 +334,16 @@ fn default_load_merges_home_and_cwd_with_cwd_precedence() {
 
     assert_eq!(config.azure.resource_name, "home-resource");
     assert_eq!(config.azure.api_key, "home-secret");
-    assert_eq!(config.azure.model_name, "cwd-model");
-    assert_eq!(config.azure.reasoning_effort, ReasoningEffort::High);
-    assert_eq!(config.safety.model_name, "cwd-model");
-    assert_eq!(config.safety.reasoning_effort, ReasoningEffort::High);
+    assert_eq!(config.azure.model_name, "gpt-5.4-mini");
+    assert_eq!(
+        config.azure.reasoning,
+        ReasoningSetting::Gpt(ReasoningEffort::High)
+    );
+    assert_eq!(config.safety.model_name, "gpt-5.4-mini");
+    assert_eq!(
+        config.safety.reasoning,
+        ReasoningSetting::Gpt(ReasoningEffort::High)
+    );
     assert!(config.ui.show_thinking);
     assert!(config.ui.show_tool_output);
     assert_eq!(config.ui.command_history_limit, 7);
@@ -231,8 +366,8 @@ fn default_load_accepts_cwd_only_partial_ui_override_when_home_has_required_fiel
             [azure]
             resource_name = "demo-resource"
             api_key = "secret"
-            model_name = "gpt-5-mini"
-            reasoning_effort = "medium"
+            model_name = "gpt-5.4-mini"
+            reasoning = "medium"
             "#,
     )
     .expect("write home config");
@@ -250,8 +385,8 @@ fn default_load_accepts_cwd_only_partial_ui_override_when_home_has_required_fiel
     let config =
         AppConfig::load_from_paths(Some(&home_path), Some(&cwd_path)).expect("merged config loads");
 
-    assert_eq!(config.azure.model_name, "gpt-5-mini");
-    assert_eq!(config.safety.model_name, "gpt-5-mini");
+    assert_eq!(config.azure.model_name, "gpt-5.4-mini");
+    assert_eq!(config.safety.model_name, "gpt-5.4-mini");
     assert!(!config.ui.show_thinking);
     assert!(!config.ui.show_tool_output);
     assert_eq!(config.ui.command_history_limit, 9);
@@ -266,7 +401,7 @@ fn default_load_accepts_cwd_only_partial_ui_override_when_home_has_required_fiel
 }
 
 #[test]
-fn set_reasoning_effort_updates_config_file() {
+fn set_reasoning_updates_config_file() {
     let path = std::env::temp_dir().join(format!(
         "oat-config-{}-{}.toml",
         std::process::id(),
@@ -282,8 +417,8 @@ fn set_reasoning_effort_updates_config_file() {
             [azure]
             resource_name = "demo-resource"
             api_key = "secret"
-            model_name = "gpt-5-mini"
-            reasoning_effort = "medium"
+            model_name = "gpt-5.4"
+            reasoning = "medium"
 
             [ui]
             show_thinking = true
@@ -292,12 +427,15 @@ fn set_reasoning_effort_updates_config_file() {
     )
     .expect("write temp config");
 
-    let updated = AppConfig::set_reasoning_effort_at_path(&path, ReasoningEffort::XHigh)
+    let updated = AppConfig::set_reasoning_at_path(&path, ReasoningEffort::High.into())
         .expect("update config");
 
-    assert_eq!(updated.azure.reasoning_effort, ReasoningEffort::XHigh);
+    assert_eq!(
+        updated.azure.reasoning,
+        ReasoningSetting::Gpt(ReasoningEffort::High)
+    );
     let raw = fs::read_to_string(&path).expect("read updated config");
-    assert!(raw.contains("reasoning_effort = \"xhigh\""));
+    assert!(raw.contains("reasoning = \"high\""));
 
     fs::remove_file(path).expect("remove temp config");
 }
@@ -320,7 +458,7 @@ fn set_planning_agents_updates_config_file() {
             resource_name = "demo-resource"
             api_key = "secret"
             model_name = "gpt-5.4-mini"
-            reasoning_effort = "medium"
+            reasoning = "medium"
             "#,
     )
     .expect("write temp config");
@@ -329,7 +467,7 @@ fn set_planning_agents_updates_config_file() {
         &path,
         &[PlanningAgentConfig {
             model_name: "gpt-5.4".into(),
-            reasoning_effort: ReasoningEffort::High,
+            reasoning: ReasoningEffort::High.into(),
         }],
     )
     .expect("update planning config");
@@ -338,13 +476,13 @@ fn set_planning_agents_updates_config_file() {
         updated.planning.agents,
         vec![PlanningAgentConfig {
             model_name: "gpt-5.4".into(),
-            reasoning_effort: ReasoningEffort::High,
+            reasoning: ReasoningEffort::High.into(),
         }]
     );
 
     let raw = fs::read_to_string(&path).expect("read updated config");
     assert!(raw.contains("model_name = \"gpt-5.4\""));
-    assert!(raw.contains("reasoning_effort = \"high\""));
+    assert!(raw.contains("reasoning = \"high\""));
 
     fs::remove_file(path).expect("remove temp config");
 }
@@ -359,21 +497,27 @@ fn set_model_selection_updates_config_file() {
             [azure]
             resource_name = "demo-resource"
             api_key = "secret"
-            model_name = "gpt-5-mini"
-            reasoning_effort = "minimal"
+            model_name = "gpt-5.4"
+            reasoning = "low"
             "#,
     )
     .expect("write temp config");
 
-    let updated =
-        AppConfig::set_model_selection_at_path(&path, "gpt-5.4-mini", ReasoningEffort::Medium)
-            .expect("update config");
+    let updated = AppConfig::set_model_selection_at_path(
+        &path,
+        "gpt-5.4-mini",
+        ReasoningEffort::Medium.into(),
+    )
+    .expect("update config");
 
     assert_eq!(updated.azure.model_name, "gpt-5.4-mini");
-    assert_eq!(updated.azure.reasoning_effort, ReasoningEffort::Medium);
+    assert_eq!(
+        updated.azure.reasoning,
+        ReasoningSetting::Gpt(ReasoningEffort::Medium)
+    );
     let raw = fs::read_to_string(&path).expect("read updated config");
     assert!(raw.contains("model_name = \"gpt-5.4-mini\""));
-    assert!(raw.contains("reasoning_effort = \"medium\""));
+    assert!(raw.contains("reasoning = \"medium\""));
 
     fs::remove_file(path).expect("remove temp config");
 }
@@ -389,20 +533,24 @@ fn set_safety_selection_updates_config_file() {
             resource_name = "demo-resource"
             api_key = "secret"
             model_name = "gpt-5.4-mini"
-            reasoning_effort = "medium"
+            reasoning = "medium"
             "#,
     )
     .expect("write temp config");
 
-    let updated = AppConfig::set_safety_selection_at_path(&path, "gpt-5.4", ReasoningEffort::High)
-        .expect("update config");
+    let updated =
+        AppConfig::set_safety_selection_at_path(&path, "gpt-5.4", ReasoningEffort::High.into())
+            .expect("update config");
 
     assert_eq!(updated.safety.model_name, "gpt-5.4");
-    assert_eq!(updated.safety.reasoning_effort, ReasoningEffort::High);
+    assert_eq!(
+        updated.safety.reasoning,
+        ReasoningSetting::Gpt(ReasoningEffort::High)
+    );
     let raw = fs::read_to_string(&path).expect("read updated config");
     assert!(raw.contains("[safety]"));
     assert!(raw.contains("model_name = \"gpt-5.4\""));
-    assert!(raw.contains("reasoning_effort = \"high\""));
+    assert!(raw.contains("reasoning = \"high\""));
 
     fs::remove_file(path).expect("remove temp config");
 }
@@ -439,12 +587,12 @@ fn validation_rejects_zero_subagent_concurrency() {
             resource_name: "demo-resource".into(),
             api_key: "secret".into(),
             model_name: "gpt-5.4-mini".into(),
-            reasoning_effort: ReasoningEffort::Medium,
+            reasoning: ReasoningEffort::Medium.into(),
             api_version: default_api_version(),
         },
         safety: SafetyConfig {
             model_name: "gpt-5.4-mini".into(),
-            reasoning_effort: ReasoningEffort::Medium,
+            reasoning: ReasoningEffort::Medium.into(),
         },
         ui: UiConfig::default(),
         subagents: SubagentConfig { max_concurrent: 0 },
@@ -462,12 +610,12 @@ fn validation_rejects_zero_tool_output_token_limit() {
             resource_name: "demo-resource".into(),
             api_key: "secret".into(),
             model_name: "gpt-5.4-mini".into(),
-            reasoning_effort: ReasoningEffort::Medium,
+            reasoning: ReasoningEffort::Medium.into(),
             api_version: default_api_version(),
         },
         safety: SafetyConfig {
             model_name: "gpt-5.4-mini".into(),
-            reasoning_effort: ReasoningEffort::Medium,
+            reasoning: ReasoningEffort::Medium.into(),
         },
         ui: UiConfig::default(),
         subagents: SubagentConfig::default(),
@@ -488,12 +636,12 @@ fn validation_rejects_invalid_search_include_patterns() {
             resource_name: "demo-resource".into(),
             api_key: "secret".into(),
             model_name: "gpt-5.4-mini".into(),
-            reasoning_effort: ReasoningEffort::Medium,
+            reasoning: ReasoningEffort::Medium.into(),
             api_version: default_api_version(),
         },
         safety: SafetyConfig {
             model_name: "gpt-5.4-mini".into(),
-            reasoning_effort: ReasoningEffort::Medium,
+            reasoning: ReasoningEffort::Medium.into(),
         },
         ui: UiConfig::default(),
         subagents: SubagentConfig::default(),
@@ -508,18 +656,18 @@ fn validation_rejects_invalid_search_include_patterns() {
 }
 
 #[test]
-fn validation_rejects_unsupported_safety_reasoning_effort() {
+fn validation_rejects_unsupported_safety_reasoning_setting() {
     let config = AppConfig {
         azure: AzureConfig {
             resource_name: "demo-resource".into(),
             api_key: "secret".into(),
             model_name: "gpt-5.4-mini".into(),
-            reasoning_effort: ReasoningEffort::Medium,
+            reasoning: ReasoningEffort::Medium.into(),
             api_version: default_api_version(),
         },
         safety: SafetyConfig {
             model_name: "gpt-5.4-mini".into(),
-            reasoning_effort: ReasoningEffort::Minimal,
+            reasoning: ReasoningEffort::Minimal.into(),
         },
         ui: UiConfig::default(),
         subagents: SubagentConfig::default(),
@@ -528,4 +676,67 @@ fn validation_rejects_unsupported_safety_reasoning_effort() {
     };
 
     assert!(config.validate().is_err());
+}
+
+#[test]
+fn validation_rejects_unknown_safety_model() {
+    let config = AppConfig {
+        azure: AzureConfig {
+            resource_name: "demo-resource".into(),
+            api_key: "secret".into(),
+            model_name: "gpt-5.4-mini".into(),
+            reasoning: ReasoningEffort::Medium.into(),
+            api_version: default_api_version(),
+        },
+        safety: SafetyConfig {
+            model_name: "mystery-model".into(),
+            reasoning: ReasoningEffort::Medium.into(),
+        },
+        ui: UiConfig::default(),
+        subagents: SubagentConfig::default(),
+        planning: PlanningConfig::default(),
+        tools: ToolConfig::default(),
+    };
+
+    let error = config.validate().expect_err("validation should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("Warning: unknown safety.model_name `mystery-model`")
+    );
+}
+
+#[test]
+fn validation_rejects_duplicate_planning_models_with_specific_message() {
+    let config = AppConfig {
+        azure: AzureConfig {
+            resource_name: "demo-resource".into(),
+            api_key: "secret".into(),
+            model_name: "gpt-5.4-mini".into(),
+            reasoning: ReasoningEffort::Medium.into(),
+            api_version: default_api_version(),
+        },
+        safety: SafetyConfig {
+            model_name: "gpt-5.4-mini".into(),
+            reasoning: ReasoningEffort::Medium.into(),
+        },
+        ui: UiConfig::default(),
+        subagents: SubagentConfig::default(),
+        planning: PlanningConfig {
+            agents: vec![
+                PlanningAgentConfig {
+                    model_name: "gpt-5.4".into(),
+                    reasoning: ReasoningEffort::High.into(),
+                },
+                PlanningAgentConfig {
+                    model_name: "gpt-5.4".into(),
+                    reasoning: ReasoningEffort::Low.into(),
+                },
+            ],
+        },
+        tools: ToolConfig::default(),
+    };
+
+    let error = config.validate().expect_err("validation should fail");
+    assert!(error.to_string().contains("duplicate model `gpt-5.4`"));
 }

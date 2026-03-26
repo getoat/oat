@@ -12,7 +12,7 @@ use crate::{
     },
     ask_user::AskUserResponse,
     completion_request::CompletionRequestSnapshot,
-    config::{AppConfig, ReasoningEffort},
+    config::{AppConfig, ReasoningSetting},
     model_registry,
     stats::StatsHook,
     subagents::SubagentManager,
@@ -42,7 +42,7 @@ pub struct LlmService {
     pub(crate) agent: super::LlmAgent,
     client: openai::CompletionsClient,
     model_name: String,
-    reasoning_effort: ReasoningEffort,
+    reasoning: ReasoningSetting,
     pub(crate) access_mode: AccessMode,
     role: crate::agent::AgentRole,
     pub(crate) approvals: WriteApprovalController,
@@ -89,7 +89,7 @@ impl LlmService {
             &client,
             &model_name,
             &preamble,
-            config.azure.reasoning_effort,
+            config.azure.reasoning,
             Some(tool_context),
         );
         let safety = SafetyClassifier::from_client(&client, config);
@@ -98,7 +98,7 @@ impl LlmService {
             agent,
             client,
             model_name,
-            reasoning_effort: config.azure.reasoning_effort,
+            reasoning: config.azure.reasoning,
             access_mode: context.access_mode,
             role: context.role,
             approvals,
@@ -345,7 +345,7 @@ impl LlmService {
             &self.client,
             model_name,
             &self.preamble,
-            self.reasoning_effort,
+            self.reasoning,
             None,
         );
         let mut candidate_history = history;

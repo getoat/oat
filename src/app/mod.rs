@@ -7,7 +7,7 @@ mod shell;
 mod state;
 
 pub(crate) use query::InputContext;
-pub(crate) use session::compatible_reasoning_effort;
+pub(crate) use session::compatible_reasoning_setting;
 pub use session::{
     AccessMode, Action, ApprovalMode, ChatMessage, CommandRisk, EditorInput, EditorKey, Effect,
     MessageStyle, PendingAskUser, PendingReply, PendingReplyKind, PendingReplyReplaySeed,

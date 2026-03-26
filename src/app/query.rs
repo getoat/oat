@@ -1,9 +1,8 @@
 use ratatui_textarea::TextArea;
 
 use crate::{
-    config::ReasoningEffort,
+    config::ReasoningSetting,
     features::planning::{PlanReviewState, PlanningAgentConfig, PlanningStage},
-    model_registry,
     stats::StatsTotals,
 };
 
@@ -12,8 +11,8 @@ use super::{
     PendingShellApproval, PendingWriteApproval, SelectionPicker, SessionHistoryMessage,
     SessionState, SlashCommand, TranscriptEntry, UiState,
     session::{
-        current_model_info, history_pending_status_label, next_request_context_percent,
-        should_show_history_busy_indicator, shows_startup_banner, supported_reasoning_levels,
+        history_pending_status_label, next_request_context_percent,
+        should_show_history_busy_indicator, shows_startup_banner, supported_reasoning_settings,
     },
     ui::{
         AskUserUiState, HistoryRenderCache, ShellApprovalUiState, picker_height,
@@ -50,8 +49,8 @@ pub fn safety_model_name(state: &AppState) -> &str {
     &state.session.safety_model_name
 }
 
-pub fn safety_reasoning_effort(state: &AppState) -> ReasoningEffort {
-    state.session.safety_reasoning_effort
+pub fn safety_reasoning(state: &AppState) -> ReasoningSetting {
+    state.session.safety_reasoning
 }
 
 pub fn pending_write_approval(state: &AppState) -> Option<&PendingWriteApproval> {
@@ -175,8 +174,8 @@ pub fn model_name(state: &AppState) -> &str {
     &state.session.model_name
 }
 
-pub fn reasoning_effort(state: &AppState) -> ReasoningEffort {
-    state.session.reasoning_effort
+pub fn reasoning(state: &AppState) -> ReasoningSetting {
+    state.session.reasoning
 }
 
 pub fn last_history_model_name(state: &AppState) -> Option<&str> {
@@ -185,10 +184,6 @@ pub fn last_history_model_name(state: &AppState) -> Option<&str> {
 
 pub fn planning_agents(state: &AppState) -> &[PlanningAgentConfig] {
     &state.session.planning_agents
-}
-
-pub fn current_model_info_state(state: &AppState) -> Option<&'static model_registry::ModelInfo> {
-    current_model_info(&state.session)
 }
 
 pub fn session_stats(state: &AppState) -> StatsTotals {
@@ -272,8 +267,8 @@ pub fn selected_command(state: &AppState) -> Option<SlashCommand> {
         .or_else(|| commands.first().copied())
 }
 
-pub fn supported_reasoning_levels_state(state: &AppState) -> Vec<ReasoningEffort> {
-    supported_reasoning_levels(&state.session)
+pub fn supported_reasoning_settings_state(state: &AppState) -> Vec<ReasoningSetting> {
+    supported_reasoning_settings(&state.session)
 }
 
 pub fn active_reply_id(state: &AppState) -> Option<u64> {

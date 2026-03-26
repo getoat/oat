@@ -12,7 +12,7 @@ use serde_json::json;
 use crate::{
     agent::{AgentContext, AgentRole},
     app::AccessMode,
-    config::{AppConfig, ReasoningEffort},
+    config::{AppConfig, KimiThinkingMode, ReasoningSetting},
     tools::{ToolContext, tools_for_context},
 };
 
@@ -20,10 +20,19 @@ use super::LlmAgent;
 
 const SYSTEM_PROMPT: &str = include_str!("../../prompts/system.md");
 
-pub(crate) fn reasoning_params(reasoning_effort: ReasoningEffort) -> serde_json::Value {
-    json!({
-        "reasoning_effort": reasoning_effort.as_str()
-    })
+pub(crate) fn reasoning_params(model_name: &str, reasoning: ReasoningSetting) -> serde_json::Value {
+    match reasoning {
+        ReasoningSetting::Gpt(reasoning_effort) => json!({
+            "reasoning_effort": reasoning_effort.as_str()
+        }),
+        ReasoningSetting::Kimi(KimiThinkingMode::On) => json!({}),
+        ReasoningSetting::Kimi(KimiThinkingMode::Off) if model_name == "kimi-k2.5" => json!({
+            "thinking": {
+                "type": "disabled"
+            }
+        }),
+        ReasoningSetting::Kimi(KimiThinkingMode::Off) => json!({}),
+    }
 }
 
 pub(crate) fn azure_openai_base_url(config: &AppConfig) -> String {
@@ -79,13 +88,13 @@ pub(crate) fn build_agent(
     client: &openai::CompletionsClient,
     model_name: &str,
     preamble: &str,
-    reasoning_effort: ReasoningEffort,
+    reasoning: ReasoningSetting,
     tool_context: Option<ToolContext>,
 ) -> LlmAgent {
     let builder = client
         .agent(model_name.to_string())
         .preamble(preamble)
-        .additional_params(reasoning_params(reasoning_effort));
+        .additional_params(reasoning_params(model_name, reasoning));
     match tool_context {
         Some(tool_context) => builder.tools(tools_for_context(tool_context)).build(),
         None => builder.build(),

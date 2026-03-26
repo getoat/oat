@@ -29,3 +29,11 @@ fn mode_status_label_prefers_plan_state() {
         "Plan"
     );
 }
+
+#[test]
+fn model_picker_detail_uses_context_display_override_when_present() {
+    let model = crate::model_registry::find_model("kimi-k2.5").expect("registry model");
+    let detail = super::model_picker_detail(model);
+
+    assert!(detail.contains("ctx 256K"));
+}

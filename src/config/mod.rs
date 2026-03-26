@@ -20,7 +20,9 @@ pub(crate) use paths::default_config_locations;
 use paths::{default_config_update_path, default_home_config_path};
 #[cfg(test)]
 use types::default_api_version;
-pub(crate) use types::{AppConfig, ReasoningEffort};
+pub(crate) use types::{
+    AppConfig, KimiThinkingMode, RawReasoningSetting, ReasoningEffort, ReasoningSetting,
+};
 #[cfg(test)]
 pub(crate) use types::{AzureConfig, SafetyConfig, SubagentConfig, ToolConfig, UiConfig};
 use updates::write_config_updates_at_path;
@@ -98,26 +100,23 @@ impl AppConfig {
         toml::from_str(&raw).with_context(|| format!("failed to parse {}", path.display()))
     }
 
-    pub fn set_default_reasoning_effort(reasoning_effort: ReasoningEffort) -> Result<Self> {
+    pub fn set_default_reasoning(reasoning: ReasoningSetting) -> Result<Self> {
         let home_path = default_home_config_path(HOME_CONFIG_RELATIVE_PATH);
         let cwd_path = PathBuf::from(DEFAULT_CONFIG_PATH);
         let target_path = default_config_update_path(home_path.as_deref(), Some(&cwd_path))?;
-        write_config_updates_at_path(&target_path, None, Some(reasoning_effort), None, None, None)?;
+        write_config_updates_at_path(&target_path, None, Some(reasoning), None, None, None)?;
         Self::load_from_default_path()
     }
 
     #[cfg(test)]
-    pub fn set_reasoning_effort_at_path(
-        path: &Path,
-        reasoning_effort: ReasoningEffort,
-    ) -> Result<Self> {
-        write_config_updates_at_path(path, None, Some(reasoning_effort), None, None, None)?;
+    pub fn set_reasoning_at_path(path: &Path, reasoning: ReasoningSetting) -> Result<Self> {
+        write_config_updates_at_path(path, None, Some(reasoning), None, None, None)?;
         Self::load_from_path(path)
     }
 
     pub fn set_default_model_selection_with_planning(
         model_name: &str,
-        reasoning_effort: ReasoningEffort,
+        reasoning: ReasoningSetting,
         planning_agents: &[PlanningAgentConfig],
     ) -> Result<Self> {
         let home_path = default_home_config_path(HOME_CONFIG_RELATIVE_PATH);
@@ -126,7 +125,7 @@ impl AppConfig {
         write_config_updates_at_path(
             &target_path,
             Some(model_name),
-            Some(reasoning_effort),
+            Some(reasoning),
             Some(planning_agents),
             None,
             None,
@@ -138,16 +137,9 @@ impl AppConfig {
     pub fn set_model_selection_at_path(
         path: &Path,
         model_name: &str,
-        reasoning_effort: ReasoningEffort,
+        reasoning: ReasoningSetting,
     ) -> Result<Self> {
-        write_config_updates_at_path(
-            path,
-            Some(model_name),
-            Some(reasoning_effort),
-            None,
-            None,
-            None,
-        )?;
+        write_config_updates_at_path(path, Some(model_name), Some(reasoning), None, None, None)?;
         Self::load_from_path(path)
     }
 
@@ -170,7 +162,7 @@ impl AppConfig {
 
     pub fn set_default_safety_selection(
         model_name: &str,
-        reasoning_effort: ReasoningEffort,
+        reasoning: ReasoningSetting,
     ) -> Result<Self> {
         let home_path = default_home_config_path(HOME_CONFIG_RELATIVE_PATH);
         let cwd_path = PathBuf::from(DEFAULT_CONFIG_PATH);
@@ -181,7 +173,7 @@ impl AppConfig {
             None,
             None,
             Some(model_name),
-            Some(reasoning_effort),
+            Some(reasoning),
         )?;
         Self::load_from_default_path()
     }
@@ -190,16 +182,9 @@ impl AppConfig {
     pub fn set_safety_selection_at_path(
         path: &Path,
         model_name: &str,
-        reasoning_effort: ReasoningEffort,
+        reasoning: ReasoningSetting,
     ) -> Result<Self> {
-        write_config_updates_at_path(
-            path,
-            None,
-            None,
-            None,
-            Some(model_name),
-            Some(reasoning_effort),
-        )?;
+        write_config_updates_at_path(path, None, None, None, Some(model_name), Some(reasoning))?;
         Self::load_from_path(path)
     }
 

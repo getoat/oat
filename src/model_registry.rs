@@ -1,9 +1,14 @@
-use crate::config::ReasoningEffort;
+use crate::config::{KimiThinkingMode, ReasoningEffort, ReasoningSetting};
 
-const GPT_5_4_REASONING_LEVELS: [ReasoningEffort; 3] = [
-    ReasoningEffort::Low,
-    ReasoningEffort::Medium,
-    ReasoningEffort::High,
+const GPT_5_4_REASONING_SETTINGS: [ReasoningSetting; 3] = [
+    ReasoningSetting::Gpt(ReasoningEffort::Low),
+    ReasoningSetting::Gpt(ReasoningEffort::Medium),
+    ReasoningSetting::Gpt(ReasoningEffort::High),
+];
+
+const KIMI_K2_5_REASONING_SETTINGS: [ReasoningSetting; 2] = [
+    ReasoningSetting::Kimi(KimiThinkingMode::On),
+    ReasoningSetting::Kimi(KimiThinkingMode::Off),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,15 +42,20 @@ pub struct ModelInfo {
     pub name: &'static str,
     pub provider: ModelProvider,
     pub context_length: usize,
+    pub context_length_display: Option<&'static str>,
     pub compaction_trigger_percent_used: u8,
     pub pricing: ModelPricing,
     pub long_context_pricing: Option<LongContextPricing>,
-    pub supported_reasoning_levels: &'static [ReasoningEffort],
+    pub supported_reasoning_settings: &'static [ReasoningSetting],
 }
 
 impl ModelInfo {
-    pub fn supports_reasoning(self, reasoning_effort: ReasoningEffort) -> bool {
-        self.supported_reasoning_levels.contains(&reasoning_effort)
+    pub fn supports_reasoning(self, reasoning: ReasoningSetting) -> bool {
+        self.supported_reasoning_settings.contains(&reasoning)
+    }
+
+    pub fn display_context_length(self) -> Option<&'static str> {
+        self.context_length_display
     }
 
     pub fn pricing_for_input_tokens(self, input_tokens: usize) -> ModelPricing {
@@ -76,11 +86,57 @@ impl ModelInfo {
     }
 }
 
-const MODELS: [ModelInfo; 3] = [
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParseReasoningSettingError {
+    UnknownModel,
+    Unknown,
+    UnsupportedForModel {
+        supported: &'static [ReasoningSetting],
+    },
+}
+
+fn supported_reasoning_settings_display(supported: &[ReasoningSetting]) -> String {
+    supported
+        .iter()
+        .map(|setting| setting.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn supported_models_display() -> String {
+    models()
+        .iter()
+        .map(|model| model.name)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+pub fn unknown_model_message(field_name: &str, model_name: &str) -> String {
+    format!(
+        "Warning: unknown {field_name} `{model_name}`. Supported models: {}",
+        supported_models_display()
+    )
+}
+
+impl ParseReasoningSettingError {
+    pub fn message(self, field_name: &str, model_name: &str, value: &str) -> String {
+        match self {
+            Self::UnknownModel => unknown_model_message(field_name, model_name),
+            Self::Unknown => format!("unknown {field_name} `{value}`"),
+            Self::UnsupportedForModel { supported } => format!(
+                "{field_name} `{value}` is not supported by model `{model_name}`. Supported values: {}",
+                supported_reasoning_settings_display(supported)
+            ),
+        }
+    }
+}
+
+const MODELS: [ModelInfo; 4] = [
     ModelInfo {
         name: "gpt-5.4",
         provider: ModelProvider::AzureOpenAi,
         context_length: 272_000,
+        context_length_display: None,
         compaction_trigger_percent_used: 90,
         pricing: ModelPricing {
             input_per_million_tokens: 2.50,
@@ -88,12 +144,13 @@ const MODELS: [ModelInfo; 3] = [
             output_per_million_tokens: 15.00,
         },
         long_context_pricing: None,
-        supported_reasoning_levels: &GPT_5_4_REASONING_LEVELS,
+        supported_reasoning_settings: &GPT_5_4_REASONING_SETTINGS,
     },
     ModelInfo {
         name: "gpt-5.4-mini",
         provider: ModelProvider::AzureOpenAi,
         context_length: 272_000,
+        context_length_display: None,
         compaction_trigger_percent_used: 90,
         pricing: ModelPricing {
             input_per_million_tokens: 0.75,
@@ -101,12 +158,13 @@ const MODELS: [ModelInfo; 3] = [
             output_per_million_tokens: 4.50,
         },
         long_context_pricing: None,
-        supported_reasoning_levels: &GPT_5_4_REASONING_LEVELS,
+        supported_reasoning_settings: &GPT_5_4_REASONING_SETTINGS,
     },
     ModelInfo {
         name: "gpt-5.4-nano",
         provider: ModelProvider::AzureOpenAi,
         context_length: 272_000,
+        context_length_display: None,
         compaction_trigger_percent_used: 90,
         pricing: ModelPricing {
             input_per_million_tokens: 0.20,
@@ -114,7 +172,21 @@ const MODELS: [ModelInfo; 3] = [
             output_per_million_tokens: 1.25,
         },
         long_context_pricing: None,
-        supported_reasoning_levels: &GPT_5_4_REASONING_LEVELS,
+        supported_reasoning_settings: &GPT_5_4_REASONING_SETTINGS,
+    },
+    ModelInfo {
+        name: "kimi-k2.5",
+        provider: ModelProvider::AzureOpenAi,
+        context_length: 262_144,
+        context_length_display: Some("256K"),
+        compaction_trigger_percent_used: 90,
+        pricing: ModelPricing {
+            input_per_million_tokens: 0.60,
+            cache_read_per_million_tokens: 0.10,
+            output_per_million_tokens: 3.00,
+        },
+        long_context_pricing: None,
+        supported_reasoning_settings: &KIMI_K2_5_REASONING_SETTINGS,
     },
 ];
 
@@ -126,12 +198,29 @@ pub fn find_model(name: &str) -> Option<&'static ModelInfo> {
     MODELS.iter().find(|model| model.name == name)
 }
 
-pub fn reasoning_levels_for_model(name: &str) -> Option<&'static [ReasoningEffort]> {
-    find_model(name).map(|model| model.supported_reasoning_levels)
+pub fn reasoning_settings_for_model(name: &str) -> Option<&'static [ReasoningSetting]> {
+    find_model(name).map(|model| model.supported_reasoning_settings)
 }
 
-pub fn default_reasoning_for_model(name: &str) -> Option<ReasoningEffort> {
-    reasoning_levels_for_model(name).and_then(|levels| levels.first().copied())
+pub fn parse_reasoning_setting_for_model(
+    model_name: &str,
+    value: &str,
+) -> Result<ReasoningSetting, ParseReasoningSettingError> {
+    let Some(supported) = reasoning_settings_for_model(model_name) else {
+        return Err(ParseReasoningSettingError::UnknownModel);
+    };
+
+    if let Some(setting) = ReasoningSetting::parse_from_supported(value, supported) {
+        Ok(setting)
+    } else if ReasoningSetting::parse_unscoped(value).is_some() {
+        Err(ParseReasoningSettingError::UnsupportedForModel { supported })
+    } else {
+        Err(ParseReasoningSettingError::Unknown)
+    }
+}
+
+pub fn default_reasoning_setting_for_model(name: &str) -> Option<ReasoningSetting> {
+    reasoning_settings_for_model(name).and_then(|settings| settings.first().copied())
 }
 
 pub fn recommended_prompt_token_budget(name: &str) -> Option<usize> {
@@ -144,17 +233,53 @@ mod tests {
 
     #[test]
     fn seeded_models_are_available() {
-        assert_eq!(models().len(), 3);
+        assert_eq!(models().len(), 4);
         assert!(find_model("gpt-5.4").is_some());
         assert!(find_model("gpt-5.4-mini").is_some());
         assert!(find_model("gpt-5.4-nano").is_some());
+        assert!(find_model("kimi-k2.5").is_some());
     }
 
     #[test]
-    fn registry_exposes_reasoning_levels() {
+    fn registry_exposes_reasoning_settings() {
         let model = find_model("gpt-5.4-mini").expect("registry model");
-        assert!(model.supports_reasoning(ReasoningEffort::Medium));
-        assert!(!model.supports_reasoning(ReasoningEffort::Minimal));
+        assert!(model.supports_reasoning(ReasoningSetting::Gpt(ReasoningEffort::Medium)));
+        assert!(!model.supports_reasoning(ReasoningSetting::Gpt(ReasoningEffort::Minimal)));
+        assert!(!model.supports_reasoning(ReasoningSetting::Kimi(KimiThinkingMode::On)));
+    }
+
+    #[test]
+    fn parse_reasoning_setting_for_model_rejects_cross_family_values() {
+        assert_eq!(
+            parse_reasoning_setting_for_model("gpt-5.4-mini", "medium"),
+            Ok(ReasoningSetting::Gpt(ReasoningEffort::Medium))
+        );
+        assert_eq!(
+            parse_reasoning_setting_for_model("kimi-k2.5", "medium"),
+            Err(ParseReasoningSettingError::UnsupportedForModel {
+                supported: &KIMI_K2_5_REASONING_SETTINGS,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_reasoning_setting_for_unknown_model_reports_unknown_model() {
+        assert_eq!(
+            parse_reasoning_setting_for_model("custom-model", "medium"),
+            Err(ParseReasoningSettingError::UnknownModel)
+        );
+    }
+
+    #[test]
+    fn kimi_exposes_on_off_reasoning_and_display_context() {
+        let model = find_model("kimi-k2.5").expect("registry model");
+
+        assert_eq!(model.context_length, 262_144);
+        assert_eq!(model.display_context_length(), Some("256K"));
+        assert_eq!(
+            model.supported_reasoning_settings,
+            &KIMI_K2_5_REASONING_SETTINGS
+        );
     }
 
     #[test]
@@ -172,6 +297,7 @@ mod tests {
             name: "synthetic-tiered-model",
             provider: ModelProvider::AzureOpenAi,
             context_length: 272_000,
+            context_length_display: None,
             compaction_trigger_percent_used: 95,
             pricing: ModelPricing {
                 input_per_million_tokens: 1.0,
@@ -186,7 +312,7 @@ mod tests {
                     output_per_million_tokens: 6.0,
                 },
             }),
-            supported_reasoning_levels: &GPT_5_4_REASONING_LEVELS,
+            supported_reasoning_settings: &GPT_5_4_REASONING_SETTINGS,
         };
 
         assert_eq!(model.pricing_for_input_tokens(100_000), model.pricing);
@@ -201,10 +327,12 @@ mod tests {
         let gpt_54 = find_model("gpt-5.4").expect("registry model");
         let gpt_54_mini = find_model("gpt-5.4-mini").expect("registry model");
         let gpt_54_nano = find_model("gpt-5.4-nano").expect("registry model");
+        let kimi = find_model("kimi-k2.5").expect("registry model");
 
         assert_eq!(gpt_54.recommended_prompt_token_budget(), 104_000);
         assert_eq!(gpt_54_mini.recommended_prompt_token_budget(), 104_000);
         assert_eq!(gpt_54_nano.recommended_prompt_token_budget(), 104_000);
+        assert_eq!(kimi.recommended_prompt_token_budget(), 99_072);
     }
 
     #[test]
@@ -213,6 +341,7 @@ mod tests {
             name: "synthetic-late-model",
             provider: ModelProvider::AzureOpenAi,
             context_length: 100,
+            context_length_display: None,
             compaction_trigger_percent_used: 99,
             pricing: ModelPricing {
                 input_per_million_tokens: 1.0,
@@ -220,7 +349,7 @@ mod tests {
                 output_per_million_tokens: 2.0,
             },
             long_context_pricing: None,
-            supported_reasoning_levels: &GPT_5_4_REASONING_LEVELS,
+            supported_reasoning_settings: &GPT_5_4_REASONING_SETTINGS,
         };
 
         assert_eq!(model.compaction_trigger_percent_used(), 90);
