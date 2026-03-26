@@ -9,6 +9,8 @@ use super::{
     write_file::WRITE_FILE_TOOL_NAME,
 };
 
+const GENERIC_WRITE_APPROVAL_SUMMARY: &str = "No reason provided for this write request";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DiffKind {
     Added,
@@ -31,51 +33,112 @@ pub struct MutationPreview {
     pub lines: Vec<DiffPreviewLine>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ApprovalPreview {
+    pub(crate) summary: String,
+    pub(crate) target: Option<String>,
+}
+
+enum ParsedWriteTool {
+    ApplyPatches(ApplyPatchesArgs),
+    WriteFile(WriteFileArgs),
+    DeletePath(DeletePathArgs),
+}
+
+impl ParsedWriteTool {
+    fn target(&self) -> &str {
+        match self {
+            Self::ApplyPatches(args) => &args.filename,
+            Self::WriteFile(args) => &args.filename,
+            Self::DeletePath(args) => &args.path,
+        }
+    }
+
+    fn normalized_intent(&self) -> Option<String> {
+        let intent = match self {
+            Self::ApplyPatches(args) => args.intent.as_deref(),
+            Self::WriteFile(args) => args.intent.as_deref(),
+            Self::DeletePath(args) => args.intent.as_deref(),
+        };
+        normalize_intent(intent)
+    }
+
+    fn missing_reason_summary(&self) -> String {
+        match self {
+            Self::ApplyPatches(_) => {
+                format!("No reason provided for changing {}", self.target())
+            }
+            Self::WriteFile(_) => {
+                format!("No reason provided for creating {}", self.target())
+            }
+            Self::DeletePath(_) => {
+                format!("No reason provided for deleting {}", self.target())
+            }
+        }
+    }
+}
+
+pub(crate) fn approval_preview(
+    tool_name: &str,
+    raw_args: &str,
+    _workspace_root: &Path,
+) -> ApprovalPreview {
+    let Some(parsed) = parse_write_tool(tool_name, raw_args) else {
+        return ApprovalPreview {
+            summary: GENERIC_WRITE_APPROVAL_SUMMARY.to_string(),
+            target: None,
+        };
+    };
+
+    derive_approval_preview(&parsed)
+}
+
 pub fn mutation_preview(
     tool_name: &str,
     raw_args: &str,
     workspace_root: &Path,
 ) -> Option<MutationPreview> {
+    let parsed = parse_write_tool(tool_name, raw_args)?;
+    let target = parsed.target().to_string();
+    let summary = parsed.normalized_intent();
+
+    let lines = match parsed {
+        ParsedWriteTool::ApplyPatches(args) => apply_patches_preview_lines(args, workspace_root),
+        ParsedWriteTool::WriteFile(args) => {
+            numbered_diff_lines('+', &args.content, DiffKind::Added, None, Some(1))
+        }
+        ParsedWriteTool::DeletePath(args) => delete_path_preview_lines(workspace_root, &args.path),
+    };
+
+    Some(MutationPreview {
+        target,
+        summary,
+        lines,
+    })
+}
+
+fn parse_write_tool(tool_name: &str, raw_args: &str) -> Option<ParsedWriteTool> {
     match tool_name {
-        APPLY_PATCH_TOOL_NAME => {
-            let args: ApplyPatchesArgs = serde_json::from_str(raw_args).ok()?;
-            Some(apply_patches_preview(args, workspace_root))
-        }
-        WRITE_FILE_TOOL_NAME => {
-            let args: WriteFileArgs = serde_json::from_str(raw_args).ok()?;
-            Some(MutationPreview {
-                target: args.filename,
-                summary: normalize_intent(args.intent.as_deref()),
-                lines: numbered_diff_lines('+', &args.content, DiffKind::Added, None, Some(1)),
-            })
-        }
-        DELETE_PATH_TOOL_NAME => {
-            let args: DeletePathArgs = serde_json::from_str(raw_args).ok()?;
-            Some(MutationPreview {
-                target: args.path.clone(),
-                summary: normalize_intent(args.intent.as_deref()),
-                lines: delete_path_preview_lines(workspace_root, &args.path),
-            })
-        }
+        APPLY_PATCH_TOOL_NAME => serde_json::from_str(raw_args)
+            .ok()
+            .map(ParsedWriteTool::ApplyPatches),
+        WRITE_FILE_TOOL_NAME => serde_json::from_str(raw_args)
+            .ok()
+            .map(ParsedWriteTool::WriteFile),
+        DELETE_PATH_TOOL_NAME => serde_json::from_str(raw_args)
+            .ok()
+            .map(ParsedWriteTool::DeletePath),
         _ => None,
     }
 }
 
-pub fn write_approval_summary(tool_name: &str, raw_args: &str, workspace_root: &Path) -> String {
-    if let Some(preview) = mutation_preview(tool_name, raw_args, workspace_root) {
-        if let Some(summary) = preview.summary {
-            return summary;
-        }
-
-        return match tool_name {
-            APPLY_PATCH_TOOL_NAME => format!("No reason provided for changing {}", preview.target),
-            WRITE_FILE_TOOL_NAME => format!("No reason provided for creating {}", preview.target),
-            DELETE_PATH_TOOL_NAME => format!("No reason provided for deleting {}", preview.target),
-            _ => "No reason provided for this write request".to_string(),
-        };
+fn derive_approval_preview(parsed: &ParsedWriteTool) -> ApprovalPreview {
+    ApprovalPreview {
+        summary: parsed
+            .normalized_intent()
+            .unwrap_or_else(|| parsed.missing_reason_summary()),
+        target: Some(parsed.target().to_string()),
     }
-
-    "No reason provided for this write request".to_string()
 }
 
 fn normalize_intent(intent: Option<&str>) -> Option<String> {
@@ -84,7 +147,10 @@ fn normalize_intent(intent: Option<&str>) -> Option<String> {
     (!normalized.is_empty()).then_some(normalized)
 }
 
-fn apply_patches_preview(args: ApplyPatchesArgs, workspace_root: &Path) -> MutationPreview {
+fn apply_patches_preview_lines(
+    args: ApplyPatchesArgs,
+    workspace_root: &Path,
+) -> Vec<DiffPreviewLine> {
     let mut lines = Vec::new();
     let mut content = read_preview_file(workspace_root, &args.filename);
 
@@ -115,11 +181,7 @@ fn apply_patches_preview(args: ApplyPatchesArgs, workspace_root: &Path) -> Mutat
         lines.extend(preview_lines);
     }
 
-    MutationPreview {
-        target: args.filename,
-        summary: normalize_intent(args.intent.as_deref()),
-        lines,
-    }
+    lines
 }
 
 fn apply_numbered_patch_preview(
@@ -287,15 +349,87 @@ mod tests {
     }
 
     #[test]
-    fn write_approval_summary_falls_back_to_missing_reason_message() {
+    fn approval_preview_returns_expected_summary_and_target() {
+        let tree = TempTree::new();
+        let cases = [
+            (
+                APPLY_PATCH_TOOL_NAME,
+                r#"{"filename":"src/lib.rs","patches":[{"old_text":"a","new_text":"b"}],"intent":"replace startup path"}"#,
+                "replace startup path",
+                Some("src/lib.rs"),
+            ),
+            (
+                APPLY_PATCH_TOOL_NAME,
+                r#"{"filename":"src/lib.rs","patches":[{"old_text":"a","new_text":"b"}]}"#,
+                "No reason provided for changing src/lib.rs",
+                Some("src/lib.rs"),
+            ),
+            (
+                WRITE_FILE_TOOL_NAME,
+                r#"{"filename":"notes.txt","content":"hello","intent":"create notes"}"#,
+                "create notes",
+                Some("notes.txt"),
+            ),
+            (
+                WRITE_FILE_TOOL_NAME,
+                r#"{"filename":"notes.txt","content":"hello"}"#,
+                "No reason provided for creating notes.txt",
+                Some("notes.txt"),
+            ),
+            (
+                DELETE_PATH_TOOL_NAME,
+                r#"{"path":"notes.txt","intent":"remove notes"}"#,
+                "remove notes",
+                Some("notes.txt"),
+            ),
+            (
+                DELETE_PATH_TOOL_NAME,
+                r#"{"path":"notes.txt"}"#,
+                "No reason provided for deleting notes.txt",
+                Some("notes.txt"),
+            ),
+        ];
+
+        for (tool_name, raw_args, expected_summary, expected_target) in cases {
+            let preview = approval_preview(tool_name, raw_args, &tree.root);
+            assert_eq!(preview.summary, expected_summary);
+            assert_eq!(preview.target.as_deref(), expected_target);
+        }
+    }
+
+    #[test]
+    fn approval_preview_treats_invalid_and_unsupported_tools_identically() {
         let tree = TempTree::new();
 
-        let summary = write_approval_summary(
+        let invalid = approval_preview(
             WRITE_FILE_TOOL_NAME,
-            r#"{"filename":"notes.txt","content":"hello"}"#,
+            r#"{"filename":"notes.txt""#,
             &tree.root,
         );
+        let unsupported = approval_preview("UnknownTool", "{}", &tree.root);
 
-        assert_eq!(summary, "No reason provided for creating notes.txt");
+        assert_eq!(
+            invalid,
+            ApprovalPreview {
+                summary: GENERIC_WRITE_APPROVAL_SUMMARY.into(),
+                target: None,
+            }
+        );
+        assert_eq!(unsupported, invalid);
+    }
+
+    #[test]
+    fn mutation_preview_returns_none_for_invalid_and_unsupported_inputs() {
+        let tree = TempTree::new();
+
+        assert!(
+            mutation_preview(
+                WRITE_FILE_TOOL_NAME,
+                r#"{"filename":"notes.txt""#,
+                &tree.root
+            )
+            .is_none()
+        );
+        assert!(mutation_preview("UnknownTool", "{}", &tree.root).is_none());
     }
 }

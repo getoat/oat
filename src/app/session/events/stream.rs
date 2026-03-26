@@ -142,3 +142,624 @@ pub(crate) fn on_stream_event(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        app::{
+            Action, ChatMessage, MessageStyle, PendingReply, PendingReplyKind,
+            SessionHistoryMessage, Speaker, TranscriptEntry,
+            session::test_support::{new_app, registry_app},
+        },
+        ask_user::{AskUserAnswer, AskUserQuestion, AskUserRequest},
+        features::planning::PlanningStage,
+    };
+
+    fn ask_user_request() -> AskUserRequest {
+        AskUserRequest {
+            title: Some("Clarify implementation".into()),
+            questions: vec![AskUserQuestion {
+                id: "scope".into(),
+                prompt: "Which scope?".into(),
+                answers: vec![
+                    AskUserAnswer {
+                        id: "narrow".into(),
+                        label: "Narrow".into(),
+                    },
+                    AskUserAnswer {
+                        id: "broad".into(),
+                        label: "Broad".into(),
+                    },
+                ],
+            }],
+        }
+    }
+
+    #[test]
+    fn stream_text_creates_and_updates_agent_message() {
+        let mut app = new_app(true);
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(1, PendingReplyKind::Normal));
+
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: StreamEvent::TextDelta("Hello".into()),
+        });
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: StreamEvent::TextDelta(", world".into()),
+        });
+
+        match &app.entries()[1] {
+            TranscriptEntry::Message(message) => {
+                assert_eq!(message.style, MessageStyle::Plain);
+                assert_eq!(message.text, "Hello, world");
+            }
+            entry => panic!("expected agent message, got {entry:?}"),
+        }
+    }
+
+    #[test]
+    fn whitespace_only_text_delta_stays_pending_without_visible_content() {
+        let mut app = new_app(true);
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(1, PendingReplyKind::Normal));
+
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: StreamEvent::TextDelta("\n  ".into()),
+        });
+
+        assert_eq!(app.entries().len(), 1);
+        assert!(!app.has_visible_pending_content());
+        assert_eq!(
+            app.state_mut()
+                .session
+                .pending_reply
+                .as_ref()
+                .expect("pending reply")
+                .plain_text,
+            "\n  "
+        );
+    }
+
+    #[test]
+    fn proposed_plan_wrapper_prefix_stays_pending_until_visible_text_arrives() {
+        let mut app = registry_app(true);
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(1, PendingReplyKind::Planning));
+
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: StreamEvent::TextDelta("<proposed_plan>\n".into()),
+        });
+
+        assert_eq!(app.entries().len(), 1);
+        assert!(!app.has_visible_pending_content());
+
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: StreamEvent::TextDelta("# Test Plan\n".into()),
+        });
+
+        assert!(app.has_visible_pending_content());
+        assert!(matches!(
+            &app.entries()[1],
+            TranscriptEntry::Message(message)
+                if message.style == MessageStyle::Plain
+                    && message.text == "<proposed_plan>\n# Test Plan\n"
+        ));
+    }
+
+    #[test]
+    fn planning_ready_wrapper_prefix_stays_pending_until_visible_text_arrives() {
+        let mut app = registry_app(true);
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(1, PendingReplyKind::Planning));
+
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: StreamEvent::TextDelta("<planning_ready>\n".into()),
+        });
+
+        assert_eq!(app.entries().len(), 1);
+        assert!(!app.has_visible_pending_content());
+
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: StreamEvent::TextDelta("## Summary\n".into()),
+        });
+
+        assert!(app.has_visible_pending_content());
+        assert!(matches!(
+            &app.entries()[1],
+            TranscriptEntry::Message(message)
+                if message.style == MessageStyle::Plain
+                    && message.text == "<planning_ready>\n## Summary\n"
+        ));
+    }
+
+    #[test]
+    fn stream_reasoning_is_hidden_when_config_disables_it() {
+        let mut app = new_app(false);
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(1, PendingReplyKind::Normal));
+
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: StreamEvent::ReasoningDelta("thinking".into()),
+        });
+
+        assert_eq!(app.entries().len(), 1);
+    }
+
+    #[test]
+    fn stream_commentary_adds_agent_commentary_entry() {
+        let mut app = new_app(true);
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(1, PendingReplyKind::Normal));
+
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: StreamEvent::Commentary("Checking the current failure mode.".into()),
+        });
+
+        assert!(matches!(
+            &app.entries()[1],
+            TranscriptEntry::Message(message)
+                if message.style == MessageStyle::Commentary
+                    && message.text == "Checking the current failure mode."
+        ));
+    }
+
+    #[test]
+    fn stream_tool_call_adds_transcript_entry() {
+        let mut app = new_app(true);
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(1, PendingReplyKind::Normal));
+
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: StreamEvent::ToolCall {
+                name: "List".into(),
+                arguments: r#"{"dir":"src","recursive":true}"#.into(),
+            },
+        });
+
+        match &app.entries()[1] {
+            TranscriptEntry::ToolCall(tool_call) => {
+                assert_eq!(tool_call.name, "List");
+                assert_eq!(tool_call.parameter, r#"{"dir":"src","recursive":true}"#);
+            }
+            entry => panic!("expected tool call, got {entry:?}"),
+        }
+    }
+
+    #[test]
+    fn stream_text_after_tool_call_starts_new_message_entry() {
+        let mut app = new_app(true);
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(1, PendingReplyKind::Normal));
+
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: StreamEvent::TextDelta("Before tool".into()),
+        });
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: StreamEvent::ToolCall {
+                name: "List".into(),
+                arguments: r#"{"dir":"src"}"#.into(),
+            },
+        });
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: StreamEvent::TextDelta("After tool".into()),
+        });
+
+        assert!(matches!(
+            &app.entries()[1],
+            TranscriptEntry::Message(message) if message.text == "Before tool"
+        ));
+        assert!(matches!(
+            &app.entries()[2],
+            TranscriptEntry::ToolCall(tool_call)
+                if tool_call.name == "List" && tool_call.parameter == r#"{"dir":"src"}"#
+        ));
+        assert!(matches!(
+            &app.entries()[3],
+            TranscriptEntry::Message(message) if message.text == "After tool"
+        ));
+    }
+
+    #[test]
+    fn stream_tool_result_adds_transcript_entry() {
+        let mut app = new_app(true);
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(1, PendingReplyKind::Normal));
+
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: StreamEvent::ToolResult {
+                name: "ReadFile".into(),
+                output: "1 | hello".into(),
+            },
+        });
+
+        match &app.entries()[1] {
+            TranscriptEntry::ToolResult(tool_result) => {
+                assert_eq!(tool_result.name, "ReadFile");
+                assert_eq!(tool_result.output, "1 | hello");
+            }
+            entry => panic!("expected tool result, got {entry:?}"),
+        }
+    }
+
+    #[test]
+    fn commentary_between_text_segments_stays_separate_from_final_reply_text() {
+        let mut app = new_app(true);
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(1, PendingReplyKind::Normal));
+
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: StreamEvent::TextDelta("Before".into()),
+        });
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: StreamEvent::Commentary("Inspecting the failing path.".into()),
+        });
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: StreamEvent::TextDelta("After".into()),
+        });
+
+        assert!(matches!(
+            &app.entries()[1],
+            TranscriptEntry::Message(message)
+                if message.style == MessageStyle::Plain && message.text == "Before"
+        ));
+        assert!(matches!(
+            &app.entries()[2],
+            TranscriptEntry::Message(message)
+                if message.style == MessageStyle::Commentary
+                    && message.text == "Inspecting the failing path."
+        ));
+        assert!(matches!(
+            &app.entries()[3],
+            TranscriptEntry::Message(message)
+                if message.style == MessageStyle::Plain && message.text == "After"
+        ));
+        assert_eq!(
+            app.state_mut()
+                .session
+                .pending_reply
+                .as_ref()
+                .expect("pending reply")
+                .plain_text,
+            "BeforeAfter"
+        );
+    }
+
+    #[test]
+    fn stream_text_after_tool_result_starts_new_message_entry() {
+        let mut app = crate::app::App::new(
+            true,
+            true,
+            "gpt-5-mini",
+            crate::config::ReasoningEffort::Medium,
+        );
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(1, PendingReplyKind::Normal));
+
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: StreamEvent::TextDelta("Before result".into()),
+        });
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: StreamEvent::ToolResult {
+                name: "ReadFile".into(),
+                output: "1 | line".into(),
+            },
+        });
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: StreamEvent::TextDelta("After result".into()),
+        });
+
+        assert!(matches!(
+            &app.entries()[1],
+            TranscriptEntry::Message(message) if message.text == "Before result"
+        ));
+        assert!(matches!(
+            &app.entries()[2],
+            TranscriptEntry::ToolResult(tool_result)
+                if tool_result.name == "ReadFile" && tool_result.output == "1 | line"
+        ));
+        assert!(matches!(
+            &app.entries()[3],
+            TranscriptEntry::Message(message) if message.text == "After result"
+        ));
+    }
+
+    #[test]
+    fn reasoning_followed_by_text_creates_distinct_entries_in_order() {
+        let mut app = new_app(true);
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(1, PendingReplyKind::Normal));
+
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: StreamEvent::ReasoningDelta("thinking".into()),
+        });
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: StreamEvent::TextDelta("answer".into()),
+        });
+
+        assert!(matches!(
+            &app.entries()[1],
+            TranscriptEntry::Message(message)
+                if message.style == MessageStyle::Thinking && message.text == "thinking"
+        ));
+        assert!(matches!(
+            &app.entries()[2],
+            TranscriptEntry::Message(message)
+                if message.style == MessageStyle::Plain && message.text == "answer"
+        ));
+    }
+
+    #[test]
+    fn text_reasoning_text_creates_three_ordered_segments() {
+        let mut app = new_app(true);
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(1, PendingReplyKind::Normal));
+
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: StreamEvent::TextDelta("first".into()),
+        });
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: StreamEvent::ReasoningDelta("thought".into()),
+        });
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: StreamEvent::TextDelta("second".into()),
+        });
+
+        assert!(matches!(
+            &app.entries()[1],
+            TranscriptEntry::Message(message)
+                if message.style == MessageStyle::Plain && message.text == "first"
+        ));
+        assert!(matches!(
+            &app.entries()[2],
+            TranscriptEntry::Message(message)
+                if message.style == MessageStyle::Thinking && message.text == "thought"
+        ));
+        assert!(matches!(
+            &app.entries()[3],
+            TranscriptEntry::Message(message)
+                if message.style == MessageStyle::Plain && message.text == "second"
+        ));
+    }
+
+    #[test]
+    fn ask_user_stream_event_starts_pending_interaction() {
+        let mut app = new_app(true);
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(1, PendingReplyKind::Normal));
+
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: StreamEvent::AskUserRequested {
+                request_id: "call-1".into(),
+                request: ask_user_request(),
+            },
+        });
+
+        assert!(app.has_pending_ask_user());
+        assert_eq!(
+            app.pending_ask_user()
+                .map(|pending| pending.request_id.as_str()),
+            Some("call-1")
+        );
+    }
+
+    #[test]
+    fn stream_failure_appends_error_message() {
+        let mut app = new_app(true);
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(1, PendingReplyKind::Normal));
+
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: StreamEvent::Failed("boom".into()),
+        });
+
+        assert!(app.state_mut().session.pending_reply.is_none());
+        let TranscriptEntry::Message(message) = app.entries().last().expect("error entry exists")
+        else {
+            panic!("expected message entry");
+        };
+        assert_eq!(message.style, MessageStyle::Error);
+        assert!(message.text.contains("boom"));
+    }
+
+    #[test]
+    fn stream_failure_while_waiting_for_interaction_clears_pending_reply_at_app_layer() {
+        let mut app = new_app(true);
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(1, PendingReplyKind::Normal));
+        app.begin_ask_user("call-1".into(), ask_user_request());
+
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: StreamEvent::Failed("boom".into()),
+        });
+
+        assert!(app.state_mut().session.pending_reply.is_none());
+        assert!(!app.has_pending_ask_user());
+    }
+
+    #[test]
+    fn stale_stream_events_are_ignored_after_new_session() {
+        let mut app = new_app(true);
+        app.replace_session_history(vec![SessionHistoryMessage::assistant("previous")]);
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(11, PendingReplyKind::Normal));
+        app.state_mut()
+            .session
+            .entries
+            .push(TranscriptEntry::Message(ChatMessage {
+                speaker: Speaker::User,
+                text: "hello".into(),
+                style: MessageStyle::Plain,
+            }));
+        app.composer_mut().insert_str("/new");
+        app.sync_command_selection();
+
+        app.apply(Action::SubmitMessage);
+        app.apply(Action::StreamEvent {
+            reply_id: 11,
+            event: StreamEvent::TextDelta("stale".into()),
+        });
+
+        assert_eq!(app.entries().len(), 1);
+        assert!(app.session_history().is_empty());
+    }
+
+    #[test]
+    fn finished_stream_replaces_canonical_history() {
+        let mut app = new_app(true);
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(2, PendingReplyKind::Normal));
+        app.replace_session_history(vec![SessionHistoryMessage::assistant("old")]);
+
+        app.apply(Action::StreamEvent {
+            reply_id: 2,
+            event: StreamEvent::Finished {
+                history: Some(vec![
+                    SessionHistoryMessage::user("hello"),
+                    SessionHistoryMessage::assistant("world"),
+                ]),
+            },
+        });
+
+        assert!(app.state_mut().session.pending_reply.is_none());
+        assert_eq!(
+            app.session_history(),
+            &[
+                SessionHistoryMessage::user("hello"),
+                SessionHistoryMessage::assistant("world")
+            ]
+        );
+    }
+
+    #[test]
+    fn finished_plan_response_enters_plan_review_selection_mode() {
+        let mut app = registry_app(true);
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(1, PendingReplyKind::Planning));
+
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: StreamEvent::TextDelta(
+                "<proposed_plan>\n# Test Plan\n\nSummary\n</proposed_plan>".into(),
+            ),
+        });
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: StreamEvent::Finished { history: None },
+        });
+
+        assert!(app.plan_review_selection_active());
+        assert!(!app.plan_review_feedback_active());
+    }
+
+    #[test]
+    fn finished_planning_stream_clears_plan_active_state() {
+        let mut app = registry_app(true);
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(2, PendingReplyKind::Planning));
+
+        app.apply(Action::StreamEvent {
+            reply_id: 2,
+            event: StreamEvent::Finished { history: None },
+        });
+
+        assert!(app.state_mut().session.pending_reply.is_none());
+        assert!(!app.plan_active());
+    }
+
+    #[test]
+    fn planning_ready_response_starts_planner_fanout() {
+        let mut app = registry_app(true);
+        app.begin_planning_conversation();
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(2, PendingReplyKind::Planning));
+        app.replace_session_history(vec![SessionHistoryMessage::user("plan this")]);
+
+        app.apply(Action::StreamEvent {
+            reply_id: 2,
+            event: StreamEvent::TextDelta("<planning_ready>\n## Summary\n".into()),
+        });
+        app.apply(Action::StreamEvent {
+            reply_id: 2,
+            event: StreamEvent::ToolCall {
+                name: "List".into(),
+                arguments: r#"{"dir":"src"}"#.into(),
+            },
+        });
+        app.apply(Action::StreamEvent {
+            reply_id: 2,
+            event: StreamEvent::TextDelta("Stable brief\n</planning_ready>".into()),
+        });
+        let effect = app.apply(Action::StreamEvent {
+            reply_id: 2,
+            event: StreamEvent::Finished { history: None },
+        });
+
+        assert!(matches!(
+            effect,
+            Some(Effect::RunPlanningWorkflow {
+                description,
+                history,
+                ..
+            }) if description == "## Summary\nStable brief" && history == vec![SessionHistoryMessage::user("plan this")]
+        ));
+        assert_eq!(
+            app.state_mut()
+                .session
+                .pending_reply
+                .as_ref()
+                .map(|pending| pending.kind),
+            Some(PendingReplyKind::Planning)
+        );
+        assert_eq!(
+            app.planning_session_stage(),
+            Some(PlanningStage::RunningFanout)
+        );
+    }
+
+    #[test]
+    fn failed_stream_keeps_previous_canonical_history() {
+        let mut app = new_app(true);
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(2, PendingReplyKind::Normal));
+        app.replace_session_history(vec![SessionHistoryMessage::assistant("stable")]);
+
+        app.apply(Action::StreamEvent {
+            reply_id: 2,
+            event: StreamEvent::Failed("boom".into()),
+        });
+
+        assert_eq!(
+            app.session_history(),
+            &[SessionHistoryMessage::assistant("stable")]
+        );
+    }
+}

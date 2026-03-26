@@ -2,6 +2,7 @@ use crate::app::{
     AppState, ApprovalMode, CommandRisk, EditorInput, PendingWriteApproval, ShellApprovalDecision,
     ShellApprovalEditMode, WriteApprovalDecision,
 };
+use crate::tools::{ApprovalPreview, approval_preview};
 
 use super::transcript::{push_agent_message, push_error_message};
 
@@ -85,9 +86,19 @@ fn enqueue_write_approval(
             tool_name, source_context
         ),
     );
+    let ApprovalPreview { summary, target } =
+        approval_preview(&tool_name, &arguments, &state.session.workspace_root);
     state
         .session
-        .enqueue_write_approval(source_label, request_id, tool_name, arguments);
+        .pending_write_approvals
+        .push_back(PendingWriteApproval {
+            request_id,
+            tool_name,
+            arguments,
+            summary,
+            target,
+            source_label,
+        });
 }
 
 fn enqueue_shell_approval(
@@ -313,4 +324,54 @@ fn sync_pending_shell_approval_ui(state: &mut AppState) {
         .pending_shell_approvals
         .front()
         .map(crate::app::ui::ShellApprovalUiState::new);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::session::test_support::new_app;
+
+    #[test]
+    fn begin_write_approval_stores_summary_and_target() {
+        let mut app = new_app(true);
+
+        begin_write_approval(
+            app.state_mut(),
+            "call-1".into(),
+            "WriteFile".into(),
+            r#"{"filename":"notes.txt","content":"hello"}"#.into(),
+        );
+
+        let pending = app
+            .state()
+            .session
+            .pending_write_approvals
+            .front()
+            .expect("pending approval");
+        assert_eq!(pending.summary, "No reason provided for creating notes.txt");
+        assert_eq!(pending.target.as_deref(), Some("notes.txt"));
+    }
+
+    #[test]
+    fn begin_subagent_write_approval_preserves_source_label() {
+        let mut app = new_app(true);
+
+        begin_subagent_write_approval(
+            app.state_mut(),
+            "planner-1".into(),
+            "call-1".into(),
+            "DeletePath".into(),
+            r#"{"path":"notes.txt","intent":"remove stale notes"}"#.into(),
+        );
+
+        let pending = app
+            .state()
+            .session
+            .pending_write_approvals
+            .front()
+            .expect("pending approval");
+        assert_eq!(pending.summary, "remove stale notes");
+        assert_eq!(pending.target.as_deref(), Some("notes.txt"));
+        assert_eq!(pending.source_label.as_deref(), Some("planner-1"));
+    }
 }

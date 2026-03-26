@@ -4,7 +4,6 @@ use crate::{
     config::ReasoningEffort,
     features::planning::{PlanningAgentConfig, PlanningFeatureState},
     stats::StatsTotals,
-    tools::{mutation_preview, write_approval_summary},
 };
 
 use super::{
@@ -110,25 +109,6 @@ impl SessionState {
         self.estimated_session_history_tokens =
             history.iter().map(|message| message.estimated_tokens).sum();
         self.session_history = history;
-    }
-
-    pub fn enqueue_write_approval(
-        &mut self,
-        source_label: Option<String>,
-        request_id: String,
-        tool_name: String,
-        arguments: String,
-    ) {
-        let preview = mutation_preview(&tool_name, &arguments, &self.workspace_root);
-        let approval = PendingWriteApproval {
-            request_id,
-            tool_name: tool_name.clone(),
-            arguments: arguments.clone(),
-            summary: write_approval_summary(&tool_name, &arguments, &self.workspace_root),
-            target: preview.as_ref().map(|preview| preview.target.clone()),
-            source_label,
-        };
-        self.pending_write_approvals.push_back(approval);
     }
 
     pub fn enqueue_shell_approval(

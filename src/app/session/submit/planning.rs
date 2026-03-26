@@ -133,3 +133,131 @@ fn accepted_plan_implementation_prompt(state: &AppState) -> String {
         accepted_plan = accepted_plan
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        app::{Action, Effect, PendingReplyKind, session::test_support::registry_app},
+        features::planning::planning_conversation_prompt,
+    };
+
+    #[test]
+    fn planning_draft_submission_starts_planning_workflow() {
+        let mut app = registry_app(true);
+        app.enter_planning_draft_mode();
+        app.composer_mut().insert_str("Add a planning workflow");
+
+        let effect = app.apply(Action::SubmitMessage);
+
+        assert_eq!(
+            effect,
+            Some(Effect::PromptModel {
+                reply_id: 1,
+                prompt: planning_conversation_prompt("Add a planning workflow"),
+                history: Vec::new(),
+                history_model_name: None,
+            })
+        );
+        assert!(!app.planning_draft_mode());
+        assert!(app.plan_active());
+        assert_eq!(
+            app.state_mut()
+                .session
+                .pending_reply
+                .as_ref()
+                .map(|pending| pending.kind),
+            Some(PendingReplyKind::Planning)
+        );
+    }
+
+    #[test]
+    fn accepting_plan_starts_normal_prompt_model_turn() {
+        let mut app = registry_app(true);
+        app.state_mut().session.planning.proposed_plan =
+            Some(crate::features::planning::ProposedPlan {
+                markdown: "# Test Plan\n\n- step one".into(),
+                raw_block: "<proposed_plan>\n# Test Plan\n\n- step one\n</proposed_plan>".into(),
+            });
+        app.begin_plan_review();
+
+        let effect = app.apply(Action::AcceptPlanAndImplement);
+
+        assert!(matches!(
+            effect,
+            Some(Effect::PromptModel {
+                reply_id: 1,
+                history,
+                prompt,
+                ..
+            }) if history.is_empty()
+                && prompt.contains("You are no longer in Plan Mode")
+                && prompt.contains("# Test Plan")
+                && prompt.contains("step one")
+        ));
+        assert!(app.state_mut().session.pending_reply.is_some());
+        assert!(!app.plan_review_selection_active());
+        assert_eq!(
+            app.state_mut()
+                .session
+                .pending_reply
+                .as_ref()
+                .map(|pending| pending.kind),
+            Some(PendingReplyKind::Normal)
+        );
+    }
+
+    #[test]
+    fn suggesting_plan_changes_enters_feedback_mode() {
+        let mut app = registry_app(true);
+        app.begin_plan_review();
+
+        let effect = app.apply(Action::SuggestPlanChanges);
+
+        assert!(effect.is_none());
+        assert!(app.plan_review_feedback_active());
+        assert!(!app.plan_review_selection_active());
+    }
+
+    #[test]
+    fn plan_review_arrow_selection_and_enter_can_choose_feedback() {
+        let mut app = registry_app(true);
+        app.begin_plan_review();
+
+        let move_effect = app.apply(Action::SelectNextCommand);
+        assert!(move_effect.is_none());
+        assert_eq!(app.selected_plan_review_index(), Some(1));
+
+        let submit_effect = app.apply(Action::SubmitMessage);
+        assert!(submit_effect.is_none());
+        assert!(app.plan_review_feedback_active());
+    }
+
+    #[test]
+    fn submitting_plan_feedback_regenerates_plan_with_main_agent_prompt() {
+        let mut app = registry_app(true);
+        app.begin_plan_review_feedback();
+        app.composer_mut().insert_str("Cover rollback and tests.");
+
+        let effect = app.apply(Action::SubmitMessage);
+
+        assert_eq!(
+            effect,
+            Some(Effect::PromptModel {
+                reply_id: 1,
+                prompt: "Revise the proposed plan based on these comments. Respond with an updated <proposed_plan> block and do not begin implementation yet. Do not use subagents for this revision.\n\nCover rollback and tests.".into(),
+                history: Vec::new(),
+                history_model_name: None,
+            })
+        );
+        assert!(app.state_mut().session.pending_reply.is_some());
+        assert_eq!(
+            app.state_mut()
+                .session
+                .pending_reply
+                .as_ref()
+                .map(|pending| pending.kind),
+            Some(PendingReplyKind::Planning)
+        );
+        assert!(!app.plan_review_feedback_active());
+    }
+}

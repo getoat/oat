@@ -25,7 +25,9 @@ pub(crate) use grep::GrepTool;
 pub(crate) use list::ListTool;
 #[cfg(test)]
 pub(crate) use preview::DiffPreviewLine;
-pub(crate) use preview::{DiffKind, MutationPreview, mutation_preview, write_approval_summary};
+pub(crate) use preview::{
+    ApprovalPreview, DiffKind, MutationPreview, approval_preview, mutation_preview,
+};
 pub(crate) use read_file::ReadFileTool;
 pub(crate) use read_files::ReadFilesTool;
 pub(crate) use run_shell_script::{

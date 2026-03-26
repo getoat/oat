@@ -278,3 +278,24 @@ pub(crate) fn compatible_reasoning_effort(
         current
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compatible_reasoning_effort_preserves_supported_level() {
+        assert_eq!(
+            compatible_reasoning_effort("gpt-5.4", ReasoningEffort::High),
+            ReasoningEffort::High
+        );
+    }
+
+    #[test]
+    fn compatible_reasoning_effort_downgrades_to_medium_when_needed() {
+        assert_eq!(
+            compatible_reasoning_effort("gpt-5.4-mini", ReasoningEffort::Minimal),
+            ReasoningEffort::Medium
+        );
+    }
+}

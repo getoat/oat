@@ -44,3 +44,80 @@ pub(super) fn handle(state: &mut AppState, action: Action) -> Option<Effect> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::{
+        MessageStyle, PendingReply, PendingReplyKind, TranscriptEntry,
+        session::test_support::{new_app, registry_app},
+    };
+
+    #[test]
+    fn clear_composer_or_quit_quits_when_composer_is_empty() {
+        let mut app = new_app(true);
+
+        app.apply(Action::ClearComposerOrQuit);
+
+        assert!(app.state_mut().session.should_quit);
+    }
+
+    #[test]
+    fn clear_composer_or_quit_clears_composer_before_quitting() {
+        let mut app = new_app(true);
+        app.composer_mut().insert_str("draft");
+
+        app.apply(Action::ClearComposerOrQuit);
+
+        assert!(!app.state_mut().session.should_quit);
+        assert!(!app.composer_has_content());
+    }
+
+    #[test]
+    fn clear_composer_or_quit_cancels_pending_reply_instead_of_quitting() {
+        let mut app = new_app(true);
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(1, PendingReplyKind::Normal));
+
+        let effect = app.apply(Action::ClearComposerOrQuit);
+
+        assert_eq!(effect, Some(Effect::CancelPendingReply));
+        assert!(!app.state_mut().session.should_quit);
+        assert!(app.state_mut().session.pending_reply.is_none());
+        let TranscriptEntry::Message(message) = app.entries().last().expect("cancel message")
+        else {
+            panic!("expected message entry");
+        };
+        assert_eq!(message.style, MessageStyle::Error);
+        assert_eq!(message.text, "Request cancelled.");
+    }
+
+    #[test]
+    fn explicit_cancel_pending_reply_adds_cancellation_message() {
+        let mut app = new_app(true);
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(1, PendingReplyKind::Normal));
+
+        let effect = app.apply(Action::CancelPendingReply);
+
+        assert_eq!(effect, Some(Effect::CancelPendingReply));
+        assert!(app.state_mut().session.pending_reply.is_none());
+        let TranscriptEntry::Message(message) = app.entries().last().expect("cancel message")
+        else {
+            panic!("expected message entry");
+        };
+        assert_eq!(message.style, MessageStyle::Error);
+        assert_eq!(message.text, "Request cancelled.");
+    }
+
+    #[test]
+    fn escape_action_closes_active_picker() {
+        let mut app = registry_app(true);
+        app.open_model_picker();
+
+        let effect = app.apply(Action::CancelPendingReply);
+
+        assert!(effect.is_none());
+        assert!(!app.selection_picker_visible());
+    }
+}

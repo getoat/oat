@@ -19,3 +19,26 @@ pub(super) fn submit_picker_selection(state: &mut AppState) -> Option<Effect> {
         }),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::{Action, session::test_support::registry_app};
+
+    #[test]
+    fn submitting_model_picker_returns_model_selection_effect() {
+        let mut app = registry_app(true);
+        app.open_model_picker();
+        app.apply(Action::SelectNextCommand);
+
+        let effect = app.apply(Action::SubmitMessage);
+
+        assert_eq!(
+            effect,
+            Some(Effect::SetModelSelection {
+                model_name: "gpt-5.4-nano".into(),
+            })
+        );
+        assert!(!app.selection_picker_visible());
+    }
+}

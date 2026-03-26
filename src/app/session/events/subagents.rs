@@ -143,3 +143,79 @@ pub(crate) fn on_subagent_event(state: &mut AppState, event: SubagentUiEvent) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        app::{
+            Action, MessageStyle, SubagentDisplayState, TranscriptEntry,
+            session::test_support::new_app,
+        },
+        subagents::{SubagentActivityKind, SubagentUiEvent},
+    };
+
+    #[test]
+    fn subagent_failure_message_includes_log_path_when_available() {
+        let mut app = new_app(true);
+
+        app.apply(Action::SubagentEvent(SubagentUiEvent::Failed {
+            id: "subagent-1".into(),
+            error: "boom".into(),
+            log_path: Some("/tmp/subagent-1.json".into()),
+        }));
+
+        let TranscriptEntry::Message(message) = app.entries().last().expect("message entry") else {
+            panic!("expected message entry");
+        };
+        assert_eq!(message.style, MessageStyle::Error);
+        assert!(
+            message
+                .text
+                .contains("Logged request to `/tmp/subagent-1.json`.")
+        );
+    }
+
+    #[test]
+    fn subagent_update_tracks_latest_tool_name() {
+        let mut app = new_app(true);
+        app.apply(Action::SubagentEvent(SubagentUiEvent::Spawned {
+            id: "subagent-1".into(),
+            access_mode: crate::app::AccessMode::ReadOnly,
+            activity_kind: SubagentActivityKind::General,
+        }));
+
+        app.apply(Action::SubagentEvent(SubagentUiEvent::Updated {
+            id: "subagent-1".into(),
+            latest_tool_name: Some("Grep".into()),
+        }));
+
+        let TranscriptEntry::SubagentStatus(status) = app.entries().last().expect("status entry")
+        else {
+            panic!("expected subagent status entry");
+        };
+        assert_eq!(status.latest_tool_name.as_deref(), Some("Grep"));
+    }
+
+    #[test]
+    fn cancelled_subagent_event_updates_status_without_error_message() {
+        let mut app = new_app(true);
+        app.apply(Action::SubagentEvent(SubagentUiEvent::Spawned {
+            id: "subagent-1".into(),
+            access_mode: crate::app::AccessMode::ReadOnly,
+            activity_kind: SubagentActivityKind::General,
+        }));
+
+        let entry_count_before = app.entries().len();
+        app.apply(Action::SubagentEvent(SubagentUiEvent::Cancelled {
+            id: "subagent-1".into(),
+        }));
+
+        assert_eq!(app.entries().len(), entry_count_before);
+        let TranscriptEntry::SubagentStatus(status) = app.entries().last().expect("status entry")
+        else {
+            panic!("expected subagent status entry");
+        };
+        assert_eq!(status.state, SubagentDisplayState::Cancelled);
+        assert_eq!(status.status_text, "cancelled");
+    }
+}

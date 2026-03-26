@@ -123,3 +123,149 @@ pub(super) fn handle(state: &mut AppState, action: Action) -> Option<Effect> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        app::{
+            Action, SlashCommand,
+            session::test_support::{new_app, registry_app},
+        },
+        config::ReasoningEffort,
+        features::planning::PlanningAgentConfig,
+    };
+
+    #[test]
+    fn up_arrow_recalls_previous_submitted_input() {
+        let mut app = new_app(true);
+        app.restore_command_history(vec!["first".into(), "second".into()], 20);
+
+        app.apply(Action::SelectPreviousCommand);
+        assert_eq!(app.composer().lines(), ["second"]);
+        app.apply(Action::SelectPreviousCommand);
+        assert_eq!(app.composer().lines(), ["second"]);
+        assert_eq!(app.composer().cursor(), (0, 0));
+
+        app.apply(Action::SelectPreviousCommand);
+        assert_eq!(app.composer().lines(), ["first"]);
+    }
+
+    #[test]
+    fn down_arrow_restores_newer_history_and_original_draft() {
+        let mut app = new_app(true);
+        app.restore_command_history(vec!["first".into(), "second".into()], 20);
+        app.composer_mut().insert_str("draft");
+
+        app.apply(Action::SelectPreviousCommand);
+        assert_eq!(app.composer().lines(), ["draft"]);
+        assert_eq!(app.composer().cursor(), (0, 0));
+
+        app.apply(Action::SelectPreviousCommand);
+        assert_eq!(app.composer().lines(), ["second"]);
+
+        app.apply(Action::SelectNextCommand);
+        assert_eq!(app.composer().lines(), ["draft"]);
+    }
+
+    #[test]
+    fn up_arrow_keeps_multiline_cursor_navigation_when_not_at_top() {
+        let mut app = new_app(true);
+        app.restore_command_history(vec!["previous".into()], 20);
+        app.composer_mut().insert_str("line one");
+        app.composer_mut().insert_newline();
+        app.composer_mut().insert_str("line two");
+
+        app.apply(Action::SelectPreviousCommand);
+
+        assert_eq!(app.composer().lines(), ["line one", "line two"]);
+        assert_eq!(app.composer().cursor().0, 0);
+    }
+
+    #[test]
+    fn up_arrow_on_first_visual_row_moves_to_visual_start_before_history() {
+        let mut app = new_app(true);
+        app.set_composer_wrap_width(6);
+        app.restore_command_history(vec!["previous".into()], 20);
+        app.composer_mut().insert_str("alpha beta");
+        app.set_composer_cursor(0, 3);
+
+        app.apply(Action::SelectPreviousCommand);
+
+        assert_eq!(app.composer().lines(), ["alpha beta"]);
+        assert_eq!(app.composer().cursor(), (0, 0));
+    }
+
+    #[test]
+    fn down_arrow_on_last_visual_row_moves_to_visual_end_before_history() {
+        let mut app = new_app(true);
+        app.set_composer_wrap_width(6);
+        app.restore_command_history(vec!["previous".into()], 20);
+        app.composer_mut().insert_str("alpha beta");
+        app.set_composer_cursor(0, 7);
+
+        app.apply(Action::SelectNextCommand);
+
+        assert_eq!(app.composer().lines(), ["alpha beta"]);
+        assert_eq!(app.composer().cursor(), (0, 10));
+    }
+
+    #[test]
+    fn up_and_down_navigate_wrapped_visual_rows() {
+        let mut app = new_app(true);
+        app.set_composer_wrap_width(6);
+        app.composer_mut().insert_str("alpha beta gamma");
+
+        app.apply(Action::SelectPreviousCommand);
+        assert_eq!(app.composer().cursor(), (0, 10));
+
+        app.apply(Action::SelectPreviousCommand);
+        assert_eq!(app.composer().cursor(), (0, 5));
+
+        app.apply(Action::SelectNextCommand);
+        assert_eq!(app.composer().cursor(), (0, 10));
+    }
+
+    #[test]
+    fn command_selection_wraps() {
+        let mut app = new_app(true);
+        app.composer_mut().insert_str("/");
+        app.sync_command_selection();
+
+        app.apply(Action::SelectPreviousCommand);
+        assert_eq!(app.selected_command(), Some(SlashCommand::Quit));
+
+        app.apply(Action::SelectNextCommand);
+        assert_eq!(app.selected_command(), Some(SlashCommand::NewSession));
+    }
+
+    #[test]
+    fn plan_review_selection_wraps_with_arrow_keys() {
+        let mut app = registry_app(true);
+        app.begin_plan_review();
+
+        app.apply(Action::SelectPreviousCommand);
+        assert_eq!(app.selected_plan_review_index(), Some(1));
+
+        app.apply(Action::SelectNextCommand);
+        assert_eq!(app.selected_plan_review_index(), Some(0));
+    }
+
+    #[test]
+    fn toggling_planning_picker_selection_persists_default_effort() {
+        let mut app = registry_app(true);
+        app.open_model_picker();
+        app.apply(Action::PickerTabRight);
+
+        let effect = app.apply(Action::TogglePickerSelection);
+
+        assert_eq!(
+            effect,
+            Some(crate::app::Effect::SetPlanningAgents {
+                planning_agents: vec![PlanningAgentConfig {
+                    model_name: "gpt-5.4".into(),
+                    reasoning_effort: ReasoningEffort::Low,
+                }],
+            })
+        );
+    }
+}

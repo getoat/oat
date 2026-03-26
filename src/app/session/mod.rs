@@ -8,6 +8,8 @@ mod reducer;
 mod selectors;
 mod state;
 pub(crate) mod submit;
+#[cfg(test)]
+pub(crate) mod test_support;
 mod transcript;
 
 pub use actions::Action;
