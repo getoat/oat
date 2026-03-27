@@ -8,15 +8,17 @@ use crate::{
 };
 
 use super::types::{
-    AppConfig, AzureConfig, ChutesConfig, ModelSelectionConfig, RawReasoningSetting, SafetyConfig,
-    SubagentConfig, ToolConfig, UiConfig, default_api_version, default_command_history_limit,
-    default_max_concurrent_subagents, default_show_thinking,
+    AppConfig, AzureConfig, ChutesConfig, CodexConfig, ModelSelectionConfig, OpenRouterConfig,
+    RawReasoningSetting, SafetyConfig, SubagentConfig, ToolConfig, UiConfig, default_api_version,
+    default_command_history_limit, default_max_concurrent_subagents, default_show_thinking,
 };
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub(super) struct PartialAppConfig {
     azure: Option<PartialAzureConfig>,
     chutes: Option<PartialChutesConfig>,
+    codex: Option<PartialCodexConfig>,
+    openrouter: Option<PartialOpenRouterConfig>,
     model: Option<PartialModelSelectionConfig>,
     safety: Option<PartialSafetyConfig>,
     ui: Option<PartialUiConfig>,
@@ -37,6 +39,18 @@ impl PartialAppConfig {
             self.chutes
                 .get_or_insert_with(PartialChutesConfig::default)
                 .merge(chutes);
+        }
+
+        if let Some(codex) = other.codex {
+            self.codex
+                .get_or_insert_with(PartialCodexConfig::default)
+                .merge(codex);
+        }
+
+        if let Some(openrouter) = other.openrouter {
+            self.openrouter
+                .get_or_insert_with(PartialOpenRouterConfig::default)
+                .merge(openrouter);
         }
 
         if let Some(model) = other.model {
@@ -80,6 +94,8 @@ impl PartialAppConfig {
         let Self {
             azure,
             chutes,
+            codex,
+            openrouter,
             model,
             safety,
             ui,
@@ -101,6 +117,10 @@ impl PartialAppConfig {
         Ok(AppConfig {
             azure: azure.map(PartialAzureConfig::finalize).transpose()?,
             chutes: chutes.map(PartialChutesConfig::finalize).transpose()?,
+            codex: codex.map(PartialCodexConfig::finalize).transpose()?,
+            openrouter: openrouter
+                .map(PartialOpenRouterConfig::finalize)
+                .transpose()?,
             model: model.clone(),
             safety: safety.unwrap_or_default().finalize(&model)?,
             ui: ui.unwrap_or_default().finalize(),
@@ -207,6 +227,75 @@ impl PartialChutesConfig {
 
     fn finalize(self) -> Result<ChutesConfig> {
         Ok(ChutesConfig {
+            api_key: self.api_key.unwrap_or_default(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct PartialCodexConfig {
+    auth_mode: Option<super::types::CodexAuthMode>,
+    #[serde(rename = "OPENAI_API_KEY")]
+    openai_api_key: Option<String>,
+    access_token: Option<String>,
+    refresh_token: Option<String>,
+    id_token: Option<String>,
+    account_id: Option<String>,
+    last_refresh: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl PartialCodexConfig {
+    fn merge(&mut self, other: Self) {
+        if other.auth_mode.is_some() {
+            self.auth_mode = other.auth_mode;
+        }
+        if other.openai_api_key.is_some() {
+            self.openai_api_key = other.openai_api_key;
+        }
+        if other.access_token.is_some() {
+            self.access_token = other.access_token;
+        }
+        if other.refresh_token.is_some() {
+            self.refresh_token = other.refresh_token;
+        }
+        if other.id_token.is_some() {
+            self.id_token = other.id_token;
+        }
+        if other.account_id.is_some() {
+            self.account_id = other.account_id;
+        }
+        if other.last_refresh.is_some() {
+            self.last_refresh = other.last_refresh;
+        }
+    }
+
+    fn finalize(self) -> Result<CodexConfig> {
+        Ok(CodexConfig {
+            auth_mode: self.auth_mode,
+            openai_api_key: self.openai_api_key.filter(|value| !value.trim().is_empty()),
+            access_token: self.access_token.filter(|value| !value.trim().is_empty()),
+            refresh_token: self.refresh_token.filter(|value| !value.trim().is_empty()),
+            id_token: self.id_token.filter(|value| !value.trim().is_empty()),
+            account_id: self.account_id.filter(|value| !value.trim().is_empty()),
+            last_refresh: self.last_refresh,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct PartialOpenRouterConfig {
+    api_key: Option<String>,
+}
+
+impl PartialOpenRouterConfig {
+    fn merge(&mut self, other: Self) {
+        if other.api_key.is_some() {
+            self.api_key = other.api_key;
+        }
+    }
+
+    fn finalize(self) -> Result<OpenRouterConfig> {
+        Ok(OpenRouterConfig {
             api_key: self.api_key.unwrap_or_default(),
         })
     }

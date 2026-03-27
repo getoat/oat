@@ -1,10 +1,11 @@
 use anyhow::{Result, anyhow};
+use chrono::{DateTime, Utc};
 use serde::{
     Deserialize, Deserializer, Serialize, Serializer,
     de::{self, Visitor},
 };
 
-use std::fmt;
+use std::{fmt, sync::LazyLock};
 
 use crate::{features::planning::PlanningConfig, model_registry, tool_policy};
 
@@ -12,6 +13,8 @@ use crate::{features::planning::PlanningConfig, model_registry, tool_policy};
 pub struct AppConfig {
     pub azure: Option<AzureConfig>,
     pub chutes: Option<ChutesConfig>,
+    pub codex: Option<CodexConfig>,
+    pub openrouter: Option<OpenRouterConfig>,
     pub model: ModelSelectionConfig,
     pub safety: SafetyConfig,
     pub ui: UiConfig,
@@ -46,9 +49,23 @@ impl AppConfig {
                         "config is missing the [chutes] table required for model `{model_name}`"
                     )
                 }),
+            model_registry::ModelProvider::Codex => Ok(ProviderConfigRef::Codex(
+                self.codex.as_ref().unwrap_or(&EMPTY_CODEX_CONFIG),
+            )),
+            model_registry::ModelProvider::OpenRouter => self
+                .openrouter
+                .as_ref()
+                .map(ProviderConfigRef::OpenRouter)
+                .ok_or_else(|| {
+                    anyhow!(
+                        "config is missing the [openrouter] table required for model `{model_name}`"
+                    )
+                }),
         }
     }
 }
+
+static EMPTY_CODEX_CONFIG: LazyLock<CodexConfig> = LazyLock::new(CodexConfig::default);
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct AzureConfig {
@@ -75,6 +92,91 @@ impl ChutesConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexAuthMode {
+    ApiKey,
+    Chatgpt,
+    ChatgptAuthTokens,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct CodexConfig {
+    pub auth_mode: Option<CodexAuthMode>,
+    #[serde(rename = "OPENAI_API_KEY")]
+    pub openai_api_key: Option<String>,
+    pub access_token: Option<String>,
+    pub refresh_token: Option<String>,
+    pub id_token: Option<String>,
+    pub account_id: Option<String>,
+    pub last_refresh: Option<DateTime<Utc>>,
+}
+
+impl CodexConfig {
+    pub fn resolved_auth_mode(&self) -> Option<CodexAuthMode> {
+        if let Some(mode) = self.auth_mode {
+            return Some(mode);
+        }
+        if self
+            .openai_api_key
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+        {
+            return Some(CodexAuthMode::ApiKey);
+        }
+        if self
+            .access_token
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+        {
+            return Some(CodexAuthMode::Chatgpt);
+        }
+        None
+    }
+
+    pub fn auth_token(&self) -> Option<&str> {
+        match self.resolved_auth_mode() {
+            Some(CodexAuthMode::ApiKey) => self
+                .openai_api_key
+                .as_deref()
+                .filter(|value| !value.trim().is_empty()),
+            Some(CodexAuthMode::Chatgpt | CodexAuthMode::ChatgptAuthTokens) => self
+                .access_token
+                .as_deref()
+                .filter(|value| !value.trim().is_empty()),
+            None => None,
+        }
+    }
+
+    pub fn account_id(&self) -> Option<&str> {
+        self.account_id
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+    }
+
+    pub fn is_authenticated(&self) -> bool {
+        self.auth_token().is_some()
+    }
+
+    pub fn base_url(&self) -> &'static str {
+        match self.resolved_auth_mode() {
+            Some(CodexAuthMode::ApiKey) => "https://api.openai.com/v1",
+            _ => "https://chatgpt.com/backend-api/codex",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct OpenRouterConfig {
+    pub api_key: String,
+}
+
+impl OpenRouterConfig {
+    pub fn base_url(&self) -> &'static str {
+        "https://openrouter.ai/api/v1"
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct ModelSelectionConfig {
     pub model_name: String,
@@ -85,13 +187,17 @@ pub struct ModelSelectionConfig {
 pub enum ProviderConfigRef<'a> {
     Azure(&'a AzureConfig),
     Chutes(&'a ChutesConfig),
+    Codex(&'a CodexConfig),
+    OpenRouter(&'a OpenRouterConfig),
 }
 
 impl ProviderConfigRef<'_> {
-    pub fn api_key(&self) -> &str {
+    pub fn auth_token(&self) -> Option<&str> {
         match self {
-            Self::Azure(config) => &config.api_key,
-            Self::Chutes(config) => &config.api_key,
+            Self::Azure(config) => Some(&config.api_key),
+            Self::Chutes(config) => Some(&config.api_key),
+            Self::Codex(config) => config.auth_token(),
+            Self::OpenRouter(config) => Some(&config.api_key),
         }
     }
 
@@ -99,6 +205,15 @@ impl ProviderConfigRef<'_> {
         match self {
             Self::Azure(config) => format!("{}/openai/v1", config.endpoint().trim_end_matches('/')),
             Self::Chutes(config) => config.base_url().to_string(),
+            Self::Codex(config) => config.base_url().to_string(),
+            Self::OpenRouter(config) => config.base_url().to_string(),
+        }
+    }
+
+    pub fn account_id(&self) -> Option<&str> {
+        match self {
+            Self::Codex(config) => config.account_id(),
+            Self::Azure(_) | Self::Chutes(_) | Self::OpenRouter(_) => None,
         }
     }
 }
@@ -175,6 +290,7 @@ impl RawReasoningSetting {
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum ReasoningEffort {
+    None,
     Minimal,
     Low,
     Medium,
@@ -185,6 +301,7 @@ pub enum ReasoningEffort {
 impl ReasoningEffort {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::None => "none",
             Self::Minimal => "minimal",
             Self::Low => "low",
             Self::Medium => "medium",
@@ -195,6 +312,7 @@ impl ReasoningEffort {
 
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
+            "none" => Some(Self::None),
             "minimal" => Some(Self::Minimal),
             "low" => Some(Self::Low),
             "medium" => Some(Self::Medium),

@@ -6,6 +6,8 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0.102"
 base64 = "0.22.1"
+bytes = "1.10.1"
+chrono = { version = "0.4.42", features = ["serde"] }
 crossterm = "0.29"
 futures-util = "0.3.32"
 globset = "0.4.18"
@@ -13,6 +15,7 @@ ignore = "0.4.24"
 ratatui = { version = "0.30.0", default-features = false, features = ["crossterm", "crossterm_0_29"] }
 ratatui-textarea = "0.8.0"
 regex = "1.12.2"
+reqwest = { version = "0.12.24", default-features = false, features = ["json", "rustls-tls"] }
 rig-core = "0.33.0"
 schemars = "1.2.1"
 serde = { version = "1.0.228", features = ["derive"] }
@@ -21,4 +24,5 @@ tiktoken-rs = "0.6.0"
 tokio = { version = "1.50.0", features = ["full", "test-util"] }
 toml = "1.0.7"
 tui-markdown = { version = "0.3.7", default-features = false, features = ["highlight-code"] }
+urlencoding = "2.1.3"
 uuid = { version = "1.18.1", features = ["v7"] }

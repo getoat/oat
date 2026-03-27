@@ -13,7 +13,19 @@ use super::agent_builder::reasoning_params;
 
 #[derive(Clone)]
 pub(crate) struct SafetyClassifier {
-    agent: super::LlmAgent,
+    agent: SafetyAgent,
+}
+
+#[derive(Clone)]
+enum SafetyAgent {
+    Completions(super::OpenAiCompletionsAgent),
+    Responses(super::OpenAiResponsesAgent),
+}
+
+#[derive(Clone)]
+pub(crate) enum SafetyClient {
+    Completions(openai::CompletionsClient),
+    Responses(super::CodexResponsesClient),
 }
 
 #[derive(Clone)]
@@ -48,15 +60,29 @@ struct SafetyClassifierOutput {
 }
 
 impl SafetyClassifier {
-    pub(crate) fn from_client(client: &openai::CompletionsClient, config: &AppConfig) -> Self {
-        let agent = client
-            .agent(config.safety.model_name.clone())
-            .preamble(safety_classifier_preamble())
-            .additional_params(reasoning_params(
-                &config.safety.model_name,
-                config.safety.reasoning,
-            ))
-            .build();
+    pub(crate) fn from_client(client: &SafetyClient, config: &AppConfig) -> Self {
+        let agent = match client {
+            SafetyClient::Completions(client) => SafetyAgent::Completions(
+                client
+                    .agent(config.safety.model_name.clone())
+                    .preamble(safety_classifier_preamble())
+                    .additional_params(reasoning_params(
+                        &config.safety.model_name,
+                        config.safety.reasoning,
+                    ))
+                    .build(),
+            ),
+            SafetyClient::Responses(client) => SafetyAgent::Responses(
+                client
+                    .agent(crate::codex::api_model_name(&config.safety.model_name).to_string())
+                    .preamble(safety_classifier_preamble())
+                    .additional_params(reasoning_params(
+                        &config.safety.model_name,
+                        config.safety.reasoning,
+                    ))
+                    .build(),
+            ),
+        };
         Self { agent }
     }
 
@@ -71,11 +97,16 @@ impl SafetyClassifier {
         let working_directory = display_requested_shell_cwd(args.cwd.as_deref());
         let prompt =
             safety_classifier_prompt(access_mode, &command, &working_directory, args, heuristic);
-        let model_output = self
-            .agent
-            .prompt_typed::<SafetyClassifierOutput>(prompt)
-            .await
-            .ok();
+        let model_output = match &self.agent {
+            SafetyAgent::Completions(agent) => agent
+                .prompt_typed::<SafetyClassifierOutput>(prompt.clone())
+                .await
+                .ok(),
+            SafetyAgent::Responses(agent) => agent
+                .prompt_typed::<SafetyClassifierOutput>(prompt)
+                .await
+                .ok(),
+        };
         let model_risk = model_output
             .as_ref()
             .map(|output| CommandRisk::from(output.risk))

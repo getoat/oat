@@ -303,13 +303,14 @@ pub fn command_palette_visible(state: &AppState) -> bool {
     selection_picker(state).is_none() && command_query(state).is_some()
 }
 
-pub fn command_palette_height(state: &AppState) -> u16 {
+pub fn command_palette_height(state: &AppState, screen_height: u16) -> u16 {
     if !command_palette_visible(state) {
         return 0;
     }
 
-    let line_count = filtered_commands(state).len().clamp(1, 4) as u16;
-    line_count + 2
+    let line_count = filtered_commands(state).len().max(1) as u16;
+    let max_height = (screen_height / 2).max(3);
+    (line_count + 2).min(max_height)
 }
 
 pub fn overlay_height(state: &AppState, screen_height: u16) -> u16 {
@@ -317,7 +318,7 @@ pub fn overlay_height(state: &AppState, screen_height: u16) -> u16 {
         return picker_height(picker, screen_height);
     }
 
-    command_palette_height(state)
+    command_palette_height(state, screen_height)
 }
 
 pub(crate) fn input_context(state: &AppState) -> InputContext {

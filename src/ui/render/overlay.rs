@@ -11,7 +11,8 @@ use crate::app::{
 };
 
 use super::helpers::{
-    command_palette_line, model_picker_detail, model_picker_tab_line, selection_picker_line,
+    command_palette_line, display_model_name, model_picker_detail, model_picker_header_line,
+    model_picker_tab_line, selection_picker_line, selection_picker_line_with_label_width,
 };
 
 pub(super) fn render_overlay(frame: &mut Frame, app: &App, area: Rect, accent: Color) {
@@ -32,9 +33,15 @@ fn render_command_palette(frame: &mut Frame, app: &App, area: Rect, accent: Colo
             Style::default().fg(Color::DarkGray),
         ))]
     } else {
+        let command_count = commands.len();
+        let selected_index = selected
+            .and_then(|selected| commands.iter().position(|command| *command == selected))
+            .unwrap_or(0);
+        let visible_range = centered_visible_range(command_count, visible_rows, selected_index);
         commands
             .into_iter()
-            .take(visible_rows)
+            .skip(visible_range.start)
+            .take(visible_range.len())
             .map(|command| command_palette_line(command, selected, accent))
             .collect()
     };
@@ -67,13 +74,24 @@ fn render_selection_picker(
             safety_selected_model,
         } => {
             let mut lines = vec![model_picker_tab_line(*active_tab, accent)];
-            let row_budget = visible_rows.saturating_sub(1);
             let selected_model = match active_tab {
                 ModelPickerTab::NormalAgent => normal_selected_model.as_str(),
                 ModelPickerTab::PlanningAgents => planning_selected_model.as_str(),
                 ModelPickerTab::SafetyModel => safety_selected_model.as_str(),
             };
             let entries = display_entries_for_tab(*active_tab, query::model_name(app.state()));
+            let model_name_width = entries
+                .iter()
+                .filter_map(|entry| match entry {
+                    ModelPickerEntry::Model(model) => {
+                        Some(display_model_name(model.name).chars().count())
+                    }
+                    ModelPickerEntry::ProviderHeading(_) => None,
+                })
+                .max()
+                .unwrap_or(0);
+            lines.push(model_picker_header_line(model_name_width));
+            let row_budget = visible_rows.saturating_sub(lines.len());
             for entry in visible_model_entries(&entries, row_budget, selected_model) {
                 match entry {
                     ModelPickerEntry::ProviderHeading(provider) => {
@@ -85,32 +103,39 @@ fn render_selection_picker(
                         )]))
                     }
                     ModelPickerEntry::Model(model) => {
+                        let base_detail = model_picker_detail(model);
                         let detail = match active_tab {
-                            ModelPickerTab::NormalAgent => model_picker_detail(model),
+                            ModelPickerTab::NormalAgent => base_detail,
                             ModelPickerTab::PlanningAgents => query::planning_agents(app.state())
                                 .iter()
                                 .find(|agent| agent.model_name == model.name)
                                 .map(|agent| {
-                                    format!("selected  reasoning: {}", agent.reasoning.as_str())
+                                    format!(
+                                        "{base_detail}  selected  reasoning: {}",
+                                        agent.reasoning.as_str()
+                                    )
                                 })
                                 .unwrap_or_else(|| {
-                                    "not selected  Space toggles  Enter sets reasoning".into()
+                                    format!(
+                                        "{base_detail}  not selected  Space toggles  Enter sets reasoning"
+                                    )
                                 }),
                             ModelPickerTab::SafetyModel => {
                                 if query::safety_model_name(app.state()) == model.name {
                                     format!(
-                                        "selected  reasoning: {}",
+                                        "{base_detail}  selected  reasoning: {}",
                                         query::safety_reasoning(app.state()).as_str()
                                     )
                                 } else {
-                                    "Enter sets reasoning".into()
+                                    format!("{base_detail}  Enter sets reasoning")
                                 }
                             }
                         };
-                        lines.push(selection_picker_line(
+                        lines.push(selection_picker_line_with_label_width(
                             model.name == selected_model,
-                            model.name,
+                            display_model_name(model.name),
                             detail,
+                            model_name_width,
                             accent,
                         ));
                     }
@@ -124,23 +149,27 @@ fn render_selection_picker(
             selected_index,
             target,
         } => {
+            let visible_range =
+                centered_visible_range(options.len(), visible_rows, *selected_index);
             let lines: Vec<Line<'static>> = options
                 .iter()
-                .take(visible_rows)
                 .enumerate()
+                .skip(visible_range.start)
+                .take(visible_range.len())
                 .map(|(index, level)| {
+                    let display_name = display_model_name(model_name);
                     selection_picker_line(
                         index == *selected_index,
                         level.as_str(),
                         match target {
                             crate::app::ReasoningPickerTarget::NormalAgent => {
-                                format!("for {}", model_name)
+                                format!("for {display_name}")
                             }
                             crate::app::ReasoningPickerTarget::PlanningAgent => {
-                                format!("for planning with {}", model_name)
+                                format!("for planning with {display_name}")
                             }
                             crate::app::ReasoningPickerTarget::SafetyModel => {
-                                format!("for safety classification with {}", model_name)
+                                format!("for safety classification with {display_name}")
                             }
                         },
                         accent,
@@ -168,6 +197,32 @@ fn render_selection_picker(
     frame.render_widget(picker, area);
 }
 
+fn centered_visible_range(
+    total_rows: usize,
+    row_budget: usize,
+    selected_index: usize,
+) -> std::ops::Range<usize> {
+    let preferred_start = selected_index.saturating_sub(row_budget / 2);
+    clamped_visible_range(total_rows, row_budget, preferred_start)
+}
+
+fn clamped_visible_range(
+    total_rows: usize,
+    row_budget: usize,
+    preferred_start: usize,
+) -> std::ops::Range<usize> {
+    if row_budget == 0 || total_rows == 0 {
+        return 0..0;
+    }
+
+    if total_rows <= row_budget {
+        return 0..total_rows;
+    }
+
+    let start = preferred_start.min(total_rows.saturating_sub(row_budget));
+    start..(start + row_budget).min(total_rows)
+}
+
 fn visible_model_entries<'a>(
     entries: &'a [ModelPickerEntry],
     row_budget: usize,
@@ -193,17 +248,13 @@ fn visible_model_entries<'a>(
         .rposition(|entry| matches!(entry, ModelPickerEntry::ProviderHeading(_)))
         .unwrap_or(0);
 
-    let mut start = if selected_index.saturating_sub(provider_heading_index) < row_budget {
+    let preferred_start = if selected_index.saturating_sub(provider_heading_index) < row_budget {
         provider_heading_index
     } else {
         selected_index + 1 - row_budget
     };
-    let mut end = (start + row_budget).min(entries.len());
-    if end - start < row_budget && end == entries.len() {
-        start = end.saturating_sub(row_budget);
-    }
-    end = (start + row_budget).min(entries.len());
-    &entries[start..end]
+    let visible_range = clamped_visible_range(entries.len(), row_budget, preferred_start);
+    &entries[visible_range]
 }
 
 #[cfg(test)]

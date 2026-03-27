@@ -218,6 +218,7 @@ pub(super) fn render_mode(
     );
     let session_stats = query::session_stats(app.state());
     let context_percent = query::next_request_context_percent_state(app.state());
+    let model_name = display_model_name(query::model_name(app.state()));
 
     let mut spans = vec![Span::styled(
         mode_label,
@@ -232,7 +233,7 @@ pub(super) fn render_mode(
     }
     spans.push(Span::raw(format!(
         "  {} • {}  in {}  out {}  ctx {}  ${:.6}",
-        query::model_name(app.state()),
+        model_name,
         query::reasoning(app.state()).as_str(),
         format_compact_tokens(session_stats.input_tokens),
         format_compact_tokens(session_stats.output_tokens),
@@ -307,25 +308,55 @@ pub(super) fn selection_picker_line(
     detail: impl Into<String>,
     accent: Color,
 ) -> Line<'static> {
+    selection_picker_line_with_label_width(is_selected, label, detail, 0, accent)
+}
+
+pub(super) fn selection_picker_line_with_label_width(
+    is_selected: bool,
+    label: impl Into<String>,
+    detail: impl Into<String>,
+    label_width: usize,
+    accent: Color,
+) -> Line<'static> {
     let marker = if is_selected { ">" } else { " " };
+    let label = label.into();
     let name_style = if is_selected {
         Style::default().fg(accent).add_modifier(Modifier::BOLD)
     } else {
         Style::default().add_modifier(Modifier::BOLD)
     };
+    let label = if label_width == 0 {
+        label
+    } else {
+        format!("{label:<label_width$}")
+    };
 
     Line::from(vec![
         Span::styled(marker, name_style),
         Span::raw(" "),
-        Span::styled(label.into(), name_style),
+        Span::styled(label, name_style),
         Span::raw("  "),
         Span::styled(detail.into(), Style::default().fg(Color::Gray)),
     ])
 }
 
+pub(super) fn model_picker_header_line(name_width: usize) -> Line<'static> {
+    let detail = format!(
+        "{:<14} {:>7} {:>7} {:>8} {:>7}",
+        "provider", "ctx", "$in", "$cache", "$out"
+    );
+    let prefix = " ".repeat(2 + name_width + 2);
+    Line::from(Span::styled(
+        format!("{prefix}{detail}"),
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD),
+    ))
+}
+
 pub(super) fn model_picker_detail(model: &crate::model_registry::ModelInfo) -> String {
     let standard = format!(
-        "{}  ctx {}  in {}  cache {}  out {}",
+        "{:<14} {:>7} {:>7} {:>8} {:>7}",
         model.provider.display_name(),
         model
             .display_context_length()
@@ -338,7 +369,7 @@ pub(super) fn model_picker_detail(model: &crate::model_registry::ModelInfo) -> S
 
     if let Some(long_context) = model.long_context_pricing {
         format!(
-            "{standard}  >{} in {}  cache {}  out {}",
+            "{standard}  >{}: $in {}  $cache {}  $out {}",
             format_context_length(long_context.input_tokens_threshold),
             format_price(long_context.pricing.input_per_million_tokens),
             format_price(long_context.pricing.cache_read_per_million_tokens),
@@ -347,6 +378,10 @@ pub(super) fn model_picker_detail(model: &crate::model_registry::ModelInfo) -> S
     } else {
         standard
     }
+}
+
+pub(super) fn display_model_name(model_name: &str) -> String {
+    crate::codex::display_name(model_name)
 }
 
 pub(super) fn format_context_length(context_length: usize) -> String {

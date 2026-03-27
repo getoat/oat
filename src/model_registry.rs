@@ -1,9 +1,43 @@
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{LazyLock, Mutex, RwLock},
+};
+
 use crate::config::{KimiThinkingMode, ReasoningEffort, ReasoningSetting};
 
 const GPT_5_4_REASONING_SETTINGS: [ReasoningSetting; 3] = [
     ReasoningSetting::Gpt(ReasoningEffort::Low),
     ReasoningSetting::Gpt(ReasoningEffort::Medium),
     ReasoningSetting::Gpt(ReasoningEffort::High),
+];
+
+const GPT_5_2_REASONING_SETTINGS: [ReasoningSetting; 5] = [
+    ReasoningSetting::Gpt(ReasoningEffort::None),
+    ReasoningSetting::Gpt(ReasoningEffort::Low),
+    ReasoningSetting::Gpt(ReasoningEffort::Medium),
+    ReasoningSetting::Gpt(ReasoningEffort::High),
+    ReasoningSetting::Gpt(ReasoningEffort::XHigh),
+];
+
+const GPT_5_CODEX_REASONING_SETTINGS: [ReasoningSetting; 4] = [
+    ReasoningSetting::Gpt(ReasoningEffort::Low),
+    ReasoningSetting::Gpt(ReasoningEffort::Medium),
+    ReasoningSetting::Gpt(ReasoningEffort::High),
+    ReasoningSetting::Gpt(ReasoningEffort::XHigh),
+];
+
+const GPT_5_1_CODEX_MINI_REASONING_SETTINGS: [ReasoningSetting; 2] = [
+    ReasoningSetting::Gpt(ReasoningEffort::Medium),
+    ReasoningSetting::Gpt(ReasoningEffort::High),
+];
+
+const OPENROUTER_REASONING_SETTINGS: [ReasoningSetting; 6] = [
+    ReasoningSetting::Gpt(ReasoningEffort::Medium),
+    ReasoningSetting::Gpt(ReasoningEffort::High),
+    ReasoningSetting::Gpt(ReasoningEffort::Low),
+    ReasoningSetting::Gpt(ReasoningEffort::Minimal),
+    ReasoningSetting::Gpt(ReasoningEffort::XHigh),
+    ReasoningSetting::Gpt(ReasoningEffort::None),
 ];
 
 const KIMI_K2_5_REASONING_SETTINGS: [ReasoningSetting; 2] = [
@@ -17,6 +51,8 @@ const DEFAULT_REASONING_SETTINGS: [ReasoningSetting; 1] = [ReasoningSetting::Def
 pub enum ModelProvider {
     AzureOpenAi,
     ChutesAi,
+    Codex,
+    OpenRouter,
 }
 
 impl ModelProvider {
@@ -24,6 +60,8 @@ impl ModelProvider {
         match self {
             Self::AzureOpenAi => "Azure OpenAI",
             Self::ChutesAi => "Chutes AI",
+            Self::Codex => "Codex",
+            Self::OpenRouter => "OpenRouter",
         }
     }
 }
@@ -135,7 +173,7 @@ impl ParseReasoningSettingError {
     }
 }
 
-const MODELS: [ModelInfo; 6] = [
+const BASE_MODELS: [ModelInfo; 17] = [
     ModelInfo {
         name: "gpt-5.4",
         provider: ModelProvider::AzureOpenAi,
@@ -179,6 +217,34 @@ const MODELS: [ModelInfo; 6] = [
         supported_reasoning_settings: &GPT_5_4_REASONING_SETTINGS,
     },
     ModelInfo {
+        name: "gpt-5.2",
+        provider: ModelProvider::AzureOpenAi,
+        context_length: 272_000,
+        context_length_display: None,
+        compaction_trigger_percent_used: 90,
+        pricing: ModelPricing {
+            input_per_million_tokens: 1.75,
+            cache_read_per_million_tokens: 0.175,
+            output_per_million_tokens: 14.00,
+        },
+        long_context_pricing: None,
+        supported_reasoning_settings: &GPT_5_2_REASONING_SETTINGS,
+    },
+    ModelInfo {
+        name: "gpt-5.3-codex",
+        provider: ModelProvider::AzureOpenAi,
+        context_length: 272_000,
+        context_length_display: None,
+        compaction_trigger_percent_used: 90,
+        pricing: ModelPricing {
+            input_per_million_tokens: 1.75,
+            cache_read_per_million_tokens: 0.175,
+            output_per_million_tokens: 14.00,
+        },
+        long_context_pricing: None,
+        supported_reasoning_settings: &GPT_5_CODEX_REASONING_SETTINGS,
+    },
+    ModelInfo {
         name: "kimi-k2.5",
         provider: ModelProvider::AzureOpenAi,
         context_length: 262_144,
@@ -220,14 +286,300 @@ const MODELS: [ModelInfo; 6] = [
         long_context_pricing: None,
         supported_reasoning_settings: &DEFAULT_REASONING_SETTINGS,
     },
+    ModelInfo {
+        name: "openai/gpt-5.4",
+        provider: ModelProvider::OpenRouter,
+        context_length: 272_000,
+        context_length_display: None,
+        compaction_trigger_percent_used: 90,
+        pricing: ModelPricing {
+            input_per_million_tokens: 2.50,
+            cache_read_per_million_tokens: 0.25,
+            output_per_million_tokens: 15.00,
+        },
+        long_context_pricing: None,
+        supported_reasoning_settings: &OPENROUTER_REASONING_SETTINGS,
+    },
+    ModelInfo {
+        name: "openai/gpt-5.4-mini",
+        provider: ModelProvider::OpenRouter,
+        context_length: 272_000,
+        context_length_display: None,
+        compaction_trigger_percent_used: 90,
+        pricing: ModelPricing {
+            input_per_million_tokens: 0.75,
+            cache_read_per_million_tokens: 0.075,
+            output_per_million_tokens: 4.50,
+        },
+        long_context_pricing: None,
+        supported_reasoning_settings: &OPENROUTER_REASONING_SETTINGS,
+    },
+    ModelInfo {
+        name: "openai/gpt-5.4-nano",
+        provider: ModelProvider::OpenRouter,
+        context_length: 272_000,
+        context_length_display: None,
+        compaction_trigger_percent_used: 90,
+        pricing: ModelPricing {
+            input_per_million_tokens: 0.20,
+            cache_read_per_million_tokens: 0.02,
+            output_per_million_tokens: 1.25,
+        },
+        long_context_pricing: None,
+        supported_reasoning_settings: &OPENROUTER_REASONING_SETTINGS,
+    },
+    ModelInfo {
+        name: "openai/gpt-5.2",
+        provider: ModelProvider::OpenRouter,
+        context_length: 400_000,
+        context_length_display: Some("400K"),
+        compaction_trigger_percent_used: 90,
+        pricing: ModelPricing {
+            input_per_million_tokens: 1.75,
+            cache_read_per_million_tokens: 0.175,
+            output_per_million_tokens: 14.00,
+        },
+        long_context_pricing: None,
+        supported_reasoning_settings: &GPT_5_2_REASONING_SETTINGS,
+    },
+    ModelInfo {
+        name: "openai/gpt-5.3-codex",
+        provider: ModelProvider::OpenRouter,
+        context_length: 400_000,
+        context_length_display: Some("400K"),
+        compaction_trigger_percent_used: 90,
+        pricing: ModelPricing {
+            input_per_million_tokens: 1.75,
+            cache_read_per_million_tokens: 0.175,
+            output_per_million_tokens: 14.00,
+        },
+        long_context_pricing: None,
+        supported_reasoning_settings: &GPT_5_CODEX_REASONING_SETTINGS,
+    },
+    ModelInfo {
+        name: "minimax/minimax-m2.7",
+        provider: ModelProvider::OpenRouter,
+        context_length: 204_800,
+        context_length_display: Some("204K"),
+        compaction_trigger_percent_used: 90,
+        pricing: ModelPricing {
+            input_per_million_tokens: 0.30,
+            cache_read_per_million_tokens: 0.06,
+            output_per_million_tokens: 1.20,
+        },
+        long_context_pricing: None,
+        supported_reasoning_settings: &OPENROUTER_REASONING_SETTINGS,
+    },
+    ModelInfo {
+        name: "xiaomi/mimo-v2-omni",
+        provider: ModelProvider::OpenRouter,
+        context_length: 262_144,
+        context_length_display: Some("256K"),
+        compaction_trigger_percent_used: 90,
+        pricing: ModelPricing {
+            input_per_million_tokens: 0.40,
+            cache_read_per_million_tokens: 0.08,
+            output_per_million_tokens: 2.00,
+        },
+        long_context_pricing: None,
+        supported_reasoning_settings: &OPENROUTER_REASONING_SETTINGS,
+    },
+    ModelInfo {
+        name: "xiaomi/mimo-v2-pro",
+        provider: ModelProvider::OpenRouter,
+        context_length: 1_048_576,
+        context_length_display: Some("1.05M"),
+        compaction_trigger_percent_used: 90,
+        pricing: ModelPricing {
+            input_per_million_tokens: 1.00,
+            cache_read_per_million_tokens: 0.20,
+            output_per_million_tokens: 3.00,
+        },
+        long_context_pricing: None,
+        supported_reasoning_settings: &OPENROUTER_REASONING_SETTINGS,
+    },
+    ModelInfo {
+        name: "xiaomi/mimo-v2-flash",
+        provider: ModelProvider::OpenRouter,
+        context_length: 262_144,
+        context_length_display: Some("256K"),
+        compaction_trigger_percent_used: 90,
+        pricing: ModelPricing {
+            input_per_million_tokens: 0.09,
+            cache_read_per_million_tokens: 0.045,
+            output_per_million_tokens: 0.29,
+        },
+        long_context_pricing: None,
+        supported_reasoning_settings: &OPENROUTER_REASONING_SETTINGS,
+    },
 ];
 
+static MODEL_REGISTRY: LazyLock<RwLock<&'static [ModelInfo]>> =
+    LazyLock::new(|| RwLock::new(build_model_registry()));
+static GENERIC_CODEX_MODELS: LazyLock<Mutex<HashMap<String, &'static ModelInfo>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn build_model_registry() -> &'static [ModelInfo] {
+    let mut models = BASE_MODELS.to_vec();
+    let mut seen = BASE_MODELS
+        .iter()
+        .map(|model| model.name.to_string())
+        .collect::<HashSet<_>>();
+
+    for bundled in bundled_codex_models() {
+        if seen.insert(bundled.name.to_string()) {
+            models.push(bundled);
+        }
+    }
+
+    Box::leak(models.into_boxed_slice())
+}
+
+fn bundled_codex_models() -> [ModelInfo; 7] {
+    [
+        bundled_codex_model(
+            "codex/gpt-5.3-codex",
+            &GPT_5_CODEX_REASONING_SETTINGS,
+            false,
+        ),
+        bundled_codex_model("codex/gpt-5.4", &GPT_5_4_REASONING_SETTINGS, false),
+        bundled_codex_model("codex/gpt-5.4-mini", &GPT_5_4_REASONING_SETTINGS, true),
+        bundled_codex_model(
+            "codex/gpt-5.2-codex",
+            &GPT_5_CODEX_REASONING_SETTINGS,
+            false,
+        ),
+        bundled_codex_model(
+            "codex/gpt-5.1-codex-max",
+            &GPT_5_CODEX_REASONING_SETTINGS,
+            false,
+        ),
+        bundled_codex_model("codex/gpt-5.2", &GPT_5_2_REASONING_SETTINGS, false),
+        bundled_codex_model(
+            "codex/gpt-5.1-codex-mini",
+            &GPT_5_1_CODEX_MINI_REASONING_SETTINGS,
+            true,
+        ),
+    ]
+}
+
+fn bundled_codex_model(
+    name: &'static str,
+    supported_reasoning_settings: &'static [ReasoningSetting],
+    is_mini: bool,
+) -> ModelInfo {
+    ModelInfo {
+        name,
+        provider: ModelProvider::Codex,
+        context_length: 272_000,
+        context_length_display: None,
+        compaction_trigger_percent_used: 90,
+        pricing: if is_mini {
+            ModelPricing {
+                input_per_million_tokens: 0.75,
+                cache_read_per_million_tokens: 0.075,
+                output_per_million_tokens: 4.50,
+            }
+        } else {
+            ModelPricing {
+                input_per_million_tokens: 1.75,
+                cache_read_per_million_tokens: 0.175,
+                output_per_million_tokens: 14.00,
+            }
+        },
+        long_context_pricing: None,
+        supported_reasoning_settings,
+    }
+}
+
+fn dynamic_codex_model(name: &str) -> ModelInfo {
+    let leaked_name: &'static str = Box::leak(name.to_string().into_boxed_str());
+    let slug = name.strip_prefix("codex/").unwrap_or(name);
+
+    if let Some(template) = BASE_MODELS.iter().find(|model| {
+        model.provider != ModelProvider::Codex
+            && (model.name == slug || model.name == format!("openai/{slug}"))
+    }) {
+        let mut model = *template;
+        model.name = leaked_name;
+        model.provider = ModelProvider::Codex;
+        return model;
+    }
+
+    let (context_length, context_length_display, pricing, supported_reasoning_settings) =
+        if slug == "gpt-5.2" {
+            (
+                400_000,
+                Some("400K"),
+                ModelPricing {
+                    input_per_million_tokens: 1.75,
+                    cache_read_per_million_tokens: 0.175,
+                    output_per_million_tokens: 14.00,
+                },
+                &GPT_5_2_REASONING_SETTINGS[..],
+            )
+        } else if slug.contains("codex") {
+            (
+                400_000,
+                Some("400K"),
+                ModelPricing {
+                    input_per_million_tokens: 1.75,
+                    cache_read_per_million_tokens: 0.175,
+                    output_per_million_tokens: 14.00,
+                },
+                &GPT_5_CODEX_REASONING_SETTINGS[..],
+            )
+        } else {
+            (
+                272_000,
+                None,
+                ModelPricing {
+                    input_per_million_tokens: 2.50,
+                    cache_read_per_million_tokens: 0.25,
+                    output_per_million_tokens: 15.00,
+                },
+                &GPT_5_4_REASONING_SETTINGS[..],
+            )
+        };
+
+    ModelInfo {
+        name: leaked_name,
+        provider: ModelProvider::Codex,
+        context_length,
+        context_length_display,
+        compaction_trigger_percent_used: 90,
+        pricing,
+        long_context_pricing: None,
+        supported_reasoning_settings,
+    }
+}
+
 pub fn models() -> &'static [ModelInfo] {
-    &MODELS
+    *MODEL_REGISTRY.read().expect("model registry lock")
 }
 
 pub fn find_model(name: &str) -> Option<&'static ModelInfo> {
-    MODELS.iter().find(|model| model.name == name)
+    models()
+        .iter()
+        .find(|model| model.name == name)
+        .or_else(|| generic_codex_model(name))
+}
+
+fn generic_codex_model(name: &str) -> Option<&'static ModelInfo> {
+    if !name.starts_with("codex/") {
+        return None;
+    }
+
+    let mut models = GENERIC_CODEX_MODELS
+        .lock()
+        .expect("generic codex model lock");
+    if let Some(model) = models.get(name) {
+        return Some(*model);
+    }
+
+    let model = Box::leak(Box::new(dynamic_codex_model(name)));
+    models.insert(name.to_string(), model);
+    Some(model)
 }
 
 pub fn reasoning_settings_for_model(name: &str) -> Option<&'static [ReasoningSetting]> {
@@ -265,13 +617,31 @@ mod tests {
 
     #[test]
     fn seeded_models_are_available() {
-        assert_eq!(models().len(), 6);
+        assert!(models().len() >= 22);
         assert!(find_model("gpt-5.4").is_some());
         assert!(find_model("gpt-5.4-mini").is_some());
         assert!(find_model("gpt-5.4-nano").is_some());
+        assert!(find_model("gpt-5.2").is_some());
+        assert!(find_model("gpt-5.3-codex").is_some());
         assert!(find_model("kimi-k2.5").is_some());
         assert!(find_model("zai-org/GLM-5-TEE").is_some());
         assert!(find_model("MiniMaxAI/MiniMax-M2.5-TEE").is_some());
+        assert!(find_model("codex/gpt-5.3-codex").is_some());
+        assert!(find_model("codex/gpt-5.4").is_some());
+        assert!(find_model("codex/gpt-5.4-mini").is_some());
+        assert!(find_model("codex/gpt-5.2-codex").is_some());
+        assert!(find_model("codex/gpt-5.1-codex-max").is_some());
+        assert!(find_model("codex/gpt-5.2").is_some());
+        assert!(find_model("codex/gpt-5.1-codex-mini").is_some());
+        assert!(find_model("openai/gpt-5.4").is_some());
+        assert!(find_model("openai/gpt-5.4-mini").is_some());
+        assert!(find_model("openai/gpt-5.4-nano").is_some());
+        assert!(find_model("openai/gpt-5.2").is_some());
+        assert!(find_model("openai/gpt-5.3-codex").is_some());
+        assert!(find_model("minimax/minimax-m2.7").is_some());
+        assert!(find_model("xiaomi/mimo-v2-omni").is_some());
+        assert!(find_model("xiaomi/mimo-v2-pro").is_some());
+        assert!(find_model("xiaomi/mimo-v2-flash").is_some());
     }
 
     #[test]
@@ -280,6 +650,38 @@ mod tests {
         assert!(model.supports_reasoning(ReasoningSetting::Gpt(ReasoningEffort::Medium)));
         assert!(!model.supports_reasoning(ReasoningSetting::Gpt(ReasoningEffort::Minimal)));
         assert!(!model.supports_reasoning(ReasoningSetting::Kimi(KimiThinkingMode::On)));
+    }
+
+    #[test]
+    fn gpt_5_2_and_5_3_codex_expose_model_specific_reasoning_levels() {
+        let gpt_5_2 = find_model("gpt-5.2").expect("registry model");
+        let gpt_5_3_codex = find_model("gpt-5.3-codex").expect("registry model");
+        let codex_gpt_5_2 = find_model("codex/gpt-5.2").expect("registry model");
+        let codex_gpt_5_1_mini = find_model("codex/gpt-5.1-codex-mini").expect("registry model");
+        let openrouter_gpt_5_2 = find_model("openai/gpt-5.2").expect("registry model");
+        let openrouter_gpt_5_3_codex = find_model("openai/gpt-5.3-codex").expect("registry model");
+
+        assert!(gpt_5_2.supports_reasoning(ReasoningSetting::Gpt(ReasoningEffort::None)));
+        assert!(gpt_5_2.supports_reasoning(ReasoningSetting::Gpt(ReasoningEffort::XHigh)));
+        assert!(!gpt_5_2.supports_reasoning(ReasoningSetting::Gpt(ReasoningEffort::Minimal)));
+        assert!(!gpt_5_3_codex.supports_reasoning(ReasoningSetting::Gpt(ReasoningEffort::None)));
+        assert!(gpt_5_3_codex.supports_reasoning(ReasoningSetting::Gpt(ReasoningEffort::XHigh)));
+        assert_eq!(
+            openrouter_gpt_5_2.supported_reasoning_settings,
+            &GPT_5_2_REASONING_SETTINGS
+        );
+        assert_eq!(
+            openrouter_gpt_5_3_codex.supported_reasoning_settings,
+            &GPT_5_CODEX_REASONING_SETTINGS
+        );
+        assert_eq!(
+            codex_gpt_5_2.supported_reasoning_settings,
+            &GPT_5_2_REASONING_SETTINGS
+        );
+        assert_eq!(
+            codex_gpt_5_1_mini.supported_reasoning_settings,
+            &GPT_5_1_CODEX_MINI_REASONING_SETTINGS
+        );
     }
 
     #[test]
@@ -382,14 +784,90 @@ mod tests {
         let gpt_54 = find_model("gpt-5.4").expect("registry model");
         let gpt_54_mini = find_model("gpt-5.4-mini").expect("registry model");
         let gpt_54_nano = find_model("gpt-5.4-nano").expect("registry model");
+        let gpt_5_2 = find_model("gpt-5.2").expect("registry model");
+        let gpt_5_3_codex = find_model("gpt-5.3-codex").expect("registry model");
         let kimi = find_model("kimi-k2.5").expect("registry model");
         let glm = find_model("zai-org/GLM-5-TEE").expect("registry model");
+        let openrouter_gpt_54 = find_model("openai/gpt-5.4").expect("registry model");
+        let openrouter_gpt_54_mini = find_model("openai/gpt-5.4-mini").expect("registry model");
+        let openrouter_gpt_54_nano = find_model("openai/gpt-5.4-nano").expect("registry model");
+        let openrouter_gpt_5_2 = find_model("openai/gpt-5.2").expect("registry model");
+        let openrouter_gpt_5_3_codex = find_model("openai/gpt-5.3-codex").expect("registry model");
+        let minimax = find_model("minimax/minimax-m2.7").expect("registry model");
+        let mimo_omni = find_model("xiaomi/mimo-v2-omni").expect("registry model");
+        let mimo_pro = find_model("xiaomi/mimo-v2-pro").expect("registry model");
+        let mimo_flash = find_model("xiaomi/mimo-v2-flash").expect("registry model");
 
         assert_eq!(gpt_54.recommended_prompt_token_budget(), 104_000);
         assert_eq!(gpt_54_mini.recommended_prompt_token_budget(), 104_000);
         assert_eq!(gpt_54_nano.recommended_prompt_token_budget(), 104_000);
+        assert_eq!(gpt_5_2.recommended_prompt_token_budget(), 104_000);
+        assert_eq!(gpt_5_3_codex.recommended_prompt_token_budget(), 104_000);
         assert_eq!(kimi.recommended_prompt_token_budget(), 99_072);
         assert_eq!(glm.recommended_prompt_token_budget(), 68_000);
+        assert_eq!(openrouter_gpt_54.recommended_prompt_token_budget(), 104_000);
+        assert_eq!(
+            openrouter_gpt_54_mini.recommended_prompt_token_budget(),
+            104_000
+        );
+        assert_eq!(
+            openrouter_gpt_54_nano.recommended_prompt_token_budget(),
+            104_000
+        );
+        assert_eq!(
+            openrouter_gpt_5_2.recommended_prompt_token_budget(),
+            168_000
+        );
+        assert_eq!(
+            openrouter_gpt_5_3_codex.recommended_prompt_token_budget(),
+            168_000
+        );
+        assert_eq!(minimax.recommended_prompt_token_budget(), 70_400);
+        assert_eq!(mimo_omni.recommended_prompt_token_budget(), 99_072);
+        assert_eq!(mimo_pro.recommended_prompt_token_budget(), 492_288);
+        assert_eq!(mimo_flash.recommended_prompt_token_budget(), 99_072);
+    }
+
+    #[test]
+    fn openrouter_models_use_effort_reasoning_and_expected_pricing() {
+        let gpt_54 = find_model("openai/gpt-5.4").expect("registry model");
+        let gpt_54_mini = find_model("openai/gpt-5.4-mini").expect("registry model");
+        let gpt_54_nano = find_model("openai/gpt-5.4-nano").expect("registry model");
+        let gpt_5_2 = find_model("openai/gpt-5.2").expect("registry model");
+        let gpt_5_3_codex = find_model("openai/gpt-5.3-codex").expect("registry model");
+        let minimax = find_model("minimax/minimax-m2.7").expect("registry model");
+        let mimo_omni = find_model("xiaomi/mimo-v2-omni").expect("registry model");
+        let mimo_pro = find_model("xiaomi/mimo-v2-pro").expect("registry model");
+        let mimo_flash = find_model("xiaomi/mimo-v2-flash").expect("registry model");
+
+        assert_eq!(gpt_54.provider, ModelProvider::OpenRouter);
+        assert_eq!(gpt_54_mini.provider, ModelProvider::OpenRouter);
+        assert_eq!(gpt_54_nano.provider, ModelProvider::OpenRouter);
+        assert_eq!(gpt_5_2.provider, ModelProvider::OpenRouter);
+        assert_eq!(gpt_5_3_codex.provider, ModelProvider::OpenRouter);
+        assert_eq!(minimax.provider, ModelProvider::OpenRouter);
+        assert_eq!(mimo_omni.provider, ModelProvider::OpenRouter);
+        assert_eq!(mimo_pro.provider, ModelProvider::OpenRouter);
+        assert_eq!(mimo_flash.provider, ModelProvider::OpenRouter);
+        assert_eq!(
+            gpt_54.supported_reasoning_settings,
+            &OPENROUTER_REASONING_SETTINGS
+        );
+        assert_eq!(gpt_54.pricing.input_per_million_tokens, 2.50);
+        assert_eq!(gpt_54_mini.pricing.cache_read_per_million_tokens, 0.075);
+        assert_eq!(gpt_54_nano.pricing.output_per_million_tokens, 1.25);
+        assert_eq!(gpt_5_2.context_length, 400_000);
+        assert_eq!(gpt_5_2.pricing.input_per_million_tokens, 1.75);
+        assert_eq!(gpt_5_3_codex.context_length, 400_000);
+        assert_eq!(gpt_5_3_codex.pricing.cache_read_per_million_tokens, 0.175);
+        assert_eq!(gpt_5_3_codex.pricing.output_per_million_tokens, 14.00);
+        assert_eq!(minimax.pricing.input_per_million_tokens, 0.30);
+        assert_eq!(minimax.pricing.cache_read_per_million_tokens, 0.06);
+        assert_eq!(mimo_omni.pricing.output_per_million_tokens, 2.00);
+        assert_eq!(mimo_pro.context_length, 1_048_576);
+        assert_eq!(mimo_flash.pricing.input_per_million_tokens, 0.09);
+        assert_eq!(mimo_flash.pricing.cache_read_per_million_tokens, 0.045);
+        assert_eq!(mimo_flash.pricing.output_per_million_tokens, 0.29);
     }
 
     #[test]

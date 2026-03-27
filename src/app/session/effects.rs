@@ -14,6 +14,9 @@ pub enum Effect {
     },
     CompactHistory,
     ShowStats,
+    OpenModelPicker,
+    LoginCodex,
+    LogoutCodex,
     RotateSession,
     SetModelSelection {
         model_name: String,

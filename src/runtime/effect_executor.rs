@@ -12,8 +12,10 @@ use crate::{
     features::planning::run_planning_workflow,
     features::planning::sanitize_planning_agents,
     llm::{LlmService, WriteApprovalController, history_from_rig, history_into_rig},
+    model_registry::{self, ModelProvider},
     stats::StatsStore,
     subagents::SubagentManager,
+    ui,
 };
 
 use super::{clipboard::osc52_copy_sequence, reply_driver::ReplyDriver};
@@ -39,6 +41,12 @@ impl EffectExecutor<'_> {
                 history,
                 history_model_name,
             } => {
+                self.refresh_codex_auth_if_needed()?;
+                let model_names = vec![
+                    self.config.model.model_name.clone(),
+                    self.config.safety.model_name.clone(),
+                ];
+                self.ensure_codex_auth_for_models(model_names.iter().map(String::as_str))?;
                 self.reply_driver.cancel_active_reply(self.llm);
                 let llm = self.llm.clone();
                 let stats_hook = self
@@ -60,6 +68,12 @@ impl EffectExecutor<'_> {
                 Ok(())
             }
             Effect::CompactHistory => {
+                self.refresh_codex_auth_if_needed()?;
+                let model_names = vec![
+                    self.config.model.model_name.clone(),
+                    self.config.safety.model_name.clone(),
+                ];
+                self.ensure_codex_auth_for_models(model_names.iter().map(String::as_str))?;
                 self.reply_driver.cancel_active_reply(self.llm);
                 let llm = self.llm.clone();
                 let history = query::session_history(self.app.state()).to_vec();
@@ -90,6 +104,12 @@ impl EffectExecutor<'_> {
                 );
                 Ok(())
             }
+            Effect::OpenModelPicker => {
+                app::ops::picker::open_model_picker(self.app.state_mut());
+                Ok(())
+            }
+            Effect::LoginCodex => self.login_codex(),
+            Effect::LogoutCodex => self.logout_codex(),
             Effect::RotateSession => {
                 self.runtime
                     .block_on(self.subagents.cancel_all_running(false));
@@ -98,6 +118,7 @@ impl EffectExecutor<'_> {
                 Ok(())
             }
             Effect::SetModelSelection { model_name } => {
+                self.ensure_codex_auth_for_model(&model_name)?;
                 let reasoning = app::compatible_reasoning_setting(
                     &model_name,
                     query::reasoning(self.app.state()),
@@ -119,11 +140,12 @@ impl EffectExecutor<'_> {
                 self.app.set_safety_reasoning(self.config.safety.reasoning);
                 self.app.set_planning_agents(planning_agents);
                 app::ops::picker::open_reasoning_picker(self.app.state_mut());
+                let display_name = crate::codex::display_name(&model_name);
                 app::ops::transcript::push_agent_message(
                     self.app.state_mut(),
                     format!(
                         "Model set to `{}` and saved to the active config. Select a reasoning setting.",
-                        model_name
+                        display_name
                     ),
                 );
                 Ok(())
@@ -138,17 +160,23 @@ impl EffectExecutor<'_> {
                     .set_safety_model_name(self.config.safety.model_name.clone());
                 self.app.set_safety_reasoning(self.config.safety.reasoning);
                 let model_name = query::model_name(self.app.state()).to_string();
+                let display_name = crate::codex::display_name(&model_name);
                 app::ops::transcript::push_agent_message(
                     self.app.state_mut(),
                     format!(
                         "Reasoning set to `{}` for model `{}` and saved to the active config.",
                         reasoning.as_str(),
-                        model_name
+                        display_name
                     ),
                 );
                 Ok(())
             }
             Effect::SetPlanningAgents { planning_agents } => {
+                self.ensure_codex_auth_for_models(
+                    planning_agents
+                        .iter()
+                        .map(|agent| agent.model_name.as_str()),
+                )?;
                 let updated_config = AppConfig::set_default_planning_agents(&planning_agents)?;
                 *self.config = updated_config;
                 self.app.set_planning_agents(planning_agents.clone());
@@ -166,6 +194,7 @@ impl EffectExecutor<'_> {
                 model_name,
                 reasoning,
             } => {
+                self.ensure_codex_auth_for_model(&model_name)?;
                 let updated_config =
                     AppConfig::set_default_safety_selection(&model_name, reasoning)?;
                 let rebuilt = self.rebuild_llm(&updated_config, query::mode(self.app.state()))?;
@@ -173,11 +202,12 @@ impl EffectExecutor<'_> {
                 *self.llm = rebuilt;
                 self.app.set_safety_model_name(model_name.clone());
                 self.app.set_safety_reasoning(reasoning);
+                let display_name = crate::codex::display_name(&model_name);
                 app::ops::transcript::push_agent_message(
                     self.app.state_mut(),
                     format!(
                         "Safety model set to `{}` with `{}` reasoning and saved to the active config.",
-                        model_name,
+                        display_name,
                         reasoning.as_str()
                     ),
                 );
@@ -189,6 +219,19 @@ impl EffectExecutor<'_> {
                 history,
                 history_model_name,
             } => {
+                self.refresh_codex_auth_if_needed()?;
+                let mut model_names = vec![
+                    self.config.model.model_name.clone(),
+                    self.config.safety.model_name.clone(),
+                ];
+                model_names.extend(
+                    self.config
+                        .planning
+                        .agents
+                        .iter()
+                        .map(|agent| agent.model_name.clone()),
+                );
+                self.ensure_codex_auth_for_models(model_names.iter().map(String::as_str))?;
                 self.reply_driver.cancel_active_reply(self.llm);
                 let history = history_into_rig(history)?;
                 let config = self.config.clone();
@@ -337,5 +380,136 @@ impl EffectExecutor<'_> {
             self.llm.ask_user_controller(),
             Some(self.subagents.clone()),
         )
+    }
+
+    fn refresh_codex_auth_if_needed(&mut self) -> Result<()> {
+        if !self
+            .config
+            .codex
+            .as_ref()
+            .is_some_and(crate::codex::should_refresh)
+        {
+            return Ok(());
+        }
+
+        let updated_config = AppConfig::refresh_default_codex_auth_if_needed()?;
+        if updated_config != *self.config {
+            self.sync_runtime_config(updated_config)?;
+        }
+        Ok(())
+    }
+
+    fn sync_runtime_config(&mut self, updated_config: AppConfig) -> Result<()> {
+        let rebuilt = self.rebuild_llm(&updated_config, query::mode(self.app.state()))?;
+        *self.config = updated_config;
+        *self.llm = rebuilt;
+        Ok(())
+    }
+
+    fn login_codex(&mut self) -> Result<()> {
+        self.run_codex_login_flow()
+    }
+
+    fn logout_codex(&mut self) -> Result<()> {
+        if self.active_models_use_codex() {
+            app::ops::transcript::push_error_message(
+                self.app.state_mut(),
+                "Switch the main, safety, and planning selections away from Codex before logging out.",
+            );
+            return Ok(());
+        }
+
+        let updated_config = AppConfig::set_default_codex_auth(None)?;
+        self.sync_runtime_config(updated_config)?;
+        app::ops::transcript::push_agent_message(
+            self.app.state_mut(),
+            "Cleared stored Codex credentials from config.toml.",
+        );
+        Ok(())
+    }
+
+    fn run_codex_login_flow(&mut self) -> Result<()> {
+        let session = self
+            .runtime
+            .block_on(crate::codex::begin_device_code_login())?;
+        let prompt = session.prompt().clone();
+        app::ops::transcript::push_agent_message(
+            self.app.state_mut(),
+            format!(
+                "Open {} and enter code `{}`. Waiting for Codex device login to complete.",
+                prompt.verification_url, prompt.user_code
+            ),
+        );
+        self.draw_ui()?;
+
+        let codex = self
+            .runtime
+            .block_on(crate::codex::complete_device_code_login(session))?;
+        let updated_config = AppConfig::set_default_codex_auth(Some(&codex))?;
+        self.sync_runtime_config(updated_config)?;
+        app::ops::transcript::push_agent_message(
+            self.app.state_mut(),
+            "Codex login complete. Credentials were saved to config.toml.",
+        );
+        let codex_model_count = self.codex_model_count();
+        app::ops::transcript::push_agent_message(
+            self.app.state_mut(),
+            format!(
+                "Loaded {} bundled Codex model{} for the picker.",
+                codex_model_count,
+                if codex_model_count == 1 { "" } else { "s" }
+            ),
+        );
+        Ok(())
+    }
+
+    fn codex_model_count(&self) -> usize {
+        model_registry::models()
+            .iter()
+            .filter(|model| model.provider == ModelProvider::Codex)
+            .count()
+    }
+
+    fn ensure_codex_auth_for_model(&mut self, model_name: &str) -> Result<()> {
+        self.ensure_codex_auth_for_models(std::iter::once(model_name))
+    }
+
+    fn ensure_codex_auth_for_models<'a, I>(&mut self, model_names: I) -> Result<()>
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        let needs_codex_auth = model_names.into_iter().any(Self::model_uses_codex);
+        let has_auth = self
+            .config
+            .codex
+            .as_ref()
+            .is_some_and(|config| config.is_authenticated());
+        if needs_codex_auth && !has_auth {
+            self.run_codex_login_flow()?;
+        }
+        Ok(())
+    }
+
+    fn active_models_use_codex(&self) -> bool {
+        Self::model_uses_codex(&self.config.model.model_name)
+            || Self::model_uses_codex(&self.config.safety.model_name)
+            || self
+                .config
+                .planning
+                .agents
+                .iter()
+                .any(|agent| Self::model_uses_codex(&agent.model_name))
+    }
+
+    fn model_uses_codex(model_name: &str) -> bool {
+        matches!(
+            model_registry::find_model(model_name).map(|model| model.provider),
+            Some(ModelProvider::Codex)
+        )
+    }
+
+    fn draw_ui(&mut self) -> Result<()> {
+        self.terminal.draw(|frame| ui::render(frame, self.app))?;
+        Ok(())
     }
 }

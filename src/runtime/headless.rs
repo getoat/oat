@@ -2,7 +2,12 @@ use std::error::Error;
 
 use anyhow::anyhow;
 
-use crate::{StartupOptions, app::StreamEvent, config::AppConfig};
+use crate::{
+    StartupOptions,
+    app::StreamEvent,
+    config::AppConfig,
+    model_registry::{self, ModelProvider},
+};
 
 use super::bootstrap::bootstrap_headless;
 
@@ -11,6 +16,20 @@ pub(crate) fn run_headless(
     startup: StartupOptions,
     prompt: String,
 ) -> Result<String, Box<dyn Error>> {
+    let headless_codex_without_auth = matches!(
+        model_registry::find_model(&config.model.model_name).map(|model| model.provider),
+        Some(ModelProvider::Codex)
+    ) && !config
+        .codex
+        .as_ref()
+        .is_some_and(|codex| codex.is_authenticated());
+    if headless_codex_without_auth {
+        return Err(anyhow!(
+            "Headless Codex requests require authenticating from the TUI first with `/login`."
+        )
+        .into());
+    }
+
     let mut runtime = bootstrap_headless(&config, startup, prompt)?;
 
     let result = runtime.runtime.block_on(async {

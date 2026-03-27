@@ -13,7 +13,9 @@ use tokio::sync::oneshot;
 use super::{
     AskUserController, InteractionResolveResult, LlmService, ResumeOverride, ResumeRequest,
     WriteApprovalController,
-    agent_builder::{mode_preamble, openai_base_url_for_model, reasoning_params},
+    agent_builder::{
+        http_headers_for_model, mode_preamble, openai_base_url_for_model, reasoning_params,
+    },
     compaction::{
         COMPACTION_SUMMARY_PREFIX, message_contains_tool_state, rebuild_compacted_history,
     },
@@ -22,7 +24,7 @@ use super::{
     safety::{SafetyClassifierRiskOutput, minimum_shell_risk, safety_classifier_preamble},
     streaming::{
         PartialToolCall, format_tool_arguments, parse_commentary_message,
-        resolve_commentary_message,
+        reconcile_completed_reasoning_text, resolve_commentary_message,
     },
 };
 use crate::{
@@ -34,8 +36,9 @@ use crate::{
     },
     completion_request::CompletionRequestSnapshot,
     config::{
-        AppConfig, AzureConfig, KimiThinkingMode, ModelSelectionConfig, ReasoningEffort,
-        ReasoningSetting, SafetyConfig, SubagentConfig, ToolConfig, UiConfig,
+        AppConfig, AzureConfig, CodexAuthMode, CodexConfig, KimiThinkingMode, ModelSelectionConfig,
+        OpenRouterConfig, ReasoningEffort, ReasoningSetting, SafetyConfig, SubagentConfig,
+        ToolConfig, UiConfig,
     },
     features::planning::PlanningConfig,
 };
@@ -48,6 +51,8 @@ fn sample_config() -> AppConfig {
             api_version: "2025-01-01-preview".into(),
         }),
         chutes: None,
+        codex: None,
+        openrouter: None,
         model: ModelSelectionConfig {
             model_name: "gpt-5.4-mini".into(),
             reasoning: ReasoningEffort::Minimal.into(),
@@ -99,6 +104,98 @@ fn openai_base_url_targets_provider_endpoint() {
         openai_base_url_for_model(&sample_config(), "gpt-5.4-mini").expect("base url"),
         "https://demo-resource.openai.azure.com/openai/v1"
     );
+}
+
+#[test]
+fn openrouter_reasoning_params_use_reasoning_object() {
+    assert_eq!(
+        reasoning_params(
+            "minimax/minimax-m2.7",
+            ReasoningSetting::Gpt(ReasoningEffort::XHigh)
+        ),
+        json!({ "reasoning": { "effort": "xhigh" } })
+    );
+    assert_eq!(
+        reasoning_params(
+            "xiaomi/mimo-v2-pro",
+            ReasoningSetting::Gpt(ReasoningEffort::None)
+        ),
+        json!({ "reasoning": { "effort": "none" } })
+    );
+}
+
+#[test]
+fn codex_reasoning_params_use_responses_shape() {
+    assert_eq!(
+        reasoning_params(
+            "codex/gpt-5.3-codex",
+            ReasoningSetting::Gpt(ReasoningEffort::High)
+        ),
+        json!({
+            "reasoning": {
+                "effort": "high",
+                "summary": "auto"
+            },
+            "store": false
+        })
+    );
+}
+
+#[test]
+fn openrouter_base_url_and_headers_target_openrouter() {
+    let mut config = sample_config();
+    config.openrouter = Some(OpenRouterConfig {
+        api_key: "or-secret".into(),
+    });
+
+    assert_eq!(
+        openai_base_url_for_model(&config, "minimax/minimax-m2.7").expect("base url"),
+        "https://openrouter.ai/api/v1"
+    );
+
+    let headers = http_headers_for_model(&config, "minimax/minimax-m2.7").expect("headers");
+    assert_eq!(
+        headers.get("HTTP-Referer").expect("referer"),
+        "https://getoat.app"
+    );
+    assert_eq!(
+        headers.get("X-OpenRouter-Title").expect("openrouter title"),
+        "oat"
+    );
+}
+
+#[test]
+fn codex_headers_include_required_chatgpt_headers() {
+    let mut config = sample_config();
+    config.codex = Some(CodexConfig {
+        auth_mode: Some(CodexAuthMode::Chatgpt),
+        access_token: Some("token".into()),
+        account_id: Some("acct-123".into()),
+        ..CodexConfig::default()
+    });
+
+    let headers = http_headers_for_model(&config, "codex/gpt-5.3-codex").expect("headers");
+    assert_eq!(
+        headers.get("OpenAI-Beta").expect("beta header"),
+        "responses=experimental"
+    );
+    assert_eq!(
+        headers.get("originator").expect("originator header"),
+        "codex_cli_rs"
+    );
+    assert_eq!(
+        headers
+            .get("chatgpt-account-id")
+            .expect("account id header"),
+        "acct-123"
+    );
+}
+
+#[test]
+fn non_openrouter_models_do_not_add_attribution_headers() {
+    let headers = http_headers_for_model(&sample_config(), "gpt-5.4-mini").expect("headers");
+    assert!(headers.get("HTTP-Referer").is_none());
+    assert!(headers.get("X-OpenRouter-Title").is_none());
 }
 
 #[test]
@@ -211,6 +308,34 @@ fn reconcile_stream_text_preserves_shared_prefix_until_divergence() {
 
     let second = reconcile_stream_text("plan in the registry", &mut replay_probe);
     assert_eq!(second, "checking the plan in the registry");
+    assert_eq!(replay_probe, None);
+}
+
+#[test]
+fn completed_reasoning_replay_is_suppressed_after_reasoning_deltas() {
+    let mut replay_probe = None;
+    assert_eq!(
+        reconcile_completed_reasoning_text(
+            "**Summarizing context**\n\nRepeated block",
+            "**Summarizing context**\n\nRepeated block",
+            &mut replay_probe,
+        ),
+        ""
+    );
+    assert_eq!(replay_probe, None);
+}
+
+#[test]
+fn completed_reasoning_keeps_only_new_suffix_after_reasoning_deltas() {
+    let mut replay_probe = None;
+    assert_eq!(
+        reconcile_completed_reasoning_text(
+            "**Summarizing context**\n\nRepeated block\n\nExtra line",
+            "**Summarizing context**\n\nRepeated block",
+            &mut replay_probe,
+        ),
+        "\n\nExtra line"
+    );
     assert_eq!(replay_probe, None);
 }
 

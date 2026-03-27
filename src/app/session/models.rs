@@ -19,6 +19,8 @@ pub enum SlashCommand {
     Stats,
     Model,
     Effort,
+    Login,
+    Logout,
     Plan,
     Quit,
 }
@@ -31,6 +33,8 @@ impl SlashCommand {
             Self::Stats => "/stats",
             Self::Model => "/model",
             Self::Effort => "/effort",
+            Self::Login => "/login",
+            Self::Logout => "/logout",
             Self::Plan => "/plan",
             Self::Quit => "/quit",
         }
@@ -43,6 +47,8 @@ impl SlashCommand {
             Self::Stats => &["/status"],
             Self::Model => &["/models"],
             Self::Effort => &["/reasoning", "/thinking"],
+            Self::Login => &[],
+            Self::Logout => &[],
             Self::Plan => &[],
             Self::Quit => &["/exit"],
         }
@@ -55,6 +61,8 @@ impl SlashCommand {
             Self::Stats => "Show session and historical usage stats",
             Self::Model => "Select the model and reasoning setting",
             Self::Effort => "Set reasoning for the current model",
+            Self::Login => "Authenticate Codex device login",
+            Self::Logout => "Clear stored Codex credentials",
             Self::Plan => "Start an interactive planning session",
             Self::Quit => "Exit the app",
         }
@@ -83,12 +91,14 @@ impl SlashCommand {
     }
 }
 
-const COMMANDS: [SlashCommand; 7] = [
+const COMMANDS: [SlashCommand; 9] = [
     SlashCommand::NewSession,
     SlashCommand::Compact,
     SlashCommand::Stats,
     SlashCommand::Model,
     SlashCommand::Effort,
+    SlashCommand::Login,
+    SlashCommand::Logout,
     SlashCommand::Plan,
     SlashCommand::Quit,
 ];

@@ -1,6 +1,7 @@
 mod agent;
 mod app;
 mod ask_user;
+mod codex;
 mod command_history;
 mod completion_request;
 mod composer;
@@ -56,7 +57,7 @@ impl StartupOptions {
 }
 
 pub fn run_default_tui(terminal: &mut Tui, startup: StartupOptions) -> Result<(), Box<dyn Error>> {
-    let config = config::AppConfig::load_from_default_path()?;
+    let config = config::AppConfig::refresh_default_codex_auth_if_needed()?;
     runtime::tui::run_with_options(terminal, config, startup)
 }
 
@@ -64,7 +65,7 @@ pub fn run_default_headless(
     startup: StartupOptions,
     prompt: String,
 ) -> Result<String, Box<dyn Error>> {
-    let config = config::AppConfig::load_from_default_path()?;
+    let config = config::AppConfig::refresh_default_codex_auth_if_needed()?;
     runtime::headless::run_headless(config, startup, prompt)
 }
 

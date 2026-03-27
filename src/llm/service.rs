@@ -20,9 +20,12 @@ use crate::{
 };
 
 use super::{
-    CompletionCapture, EventCallback, HistoryCompactionResult, InteractionResolveResult,
-    PromptRunResult, ResumeOverride, StreamEvent,
-    agent_builder::{build_agent, mode_preamble, openai_base_url_for_model, run_plain_prompt},
+    CodexResponsesClient, CompletionCapture, EventCallback, HistoryCompactionResult,
+    InteractionResolveResult, PromptRunResult, ResumeOverride, StreamEvent,
+    agent_builder::{
+        build_agent, http_headers_for_model, mode_preamble, openai_base_url_for_model,
+        run_plain_prompt,
+    },
     compaction::{
         COMPACTION_NOTICE, COMPACTION_PROMPT, compaction_model_for_pre_turn,
         drop_oldest_compaction_source_message, is_retryable_compaction_error,
@@ -38,9 +41,95 @@ use super::{
 const MAX_TOOL_STEPS_PER_TURN: usize = 64;
 
 #[derive(Clone)]
+enum AgentVariant {
+    Completions(super::OpenAiCompletionsAgent),
+    Responses(super::OpenAiResponsesAgent),
+}
+
+#[derive(Clone)]
+enum ClientVariant {
+    Completions(openai::CompletionsClient),
+    Responses(CodexResponsesClient),
+}
+
+fn is_codex_model(model_name: &str) -> bool {
+    matches!(
+        model_registry::find_model(model_name).map(|model| model.provider),
+        Some(model_registry::ModelProvider::Codex)
+    )
+}
+
+fn codex_http_client() -> crate::codex::CodexHttpClient {
+    crate::codex::CodexHttpClient::new(rig::http_client::ReqwestClient::new())
+}
+
+fn build_responses_client(config: &AppConfig, model_name: &str) -> Result<CodexResponsesClient> {
+    let provider_config = config.provider_config_for_model(model_name)?;
+    openai::Client::builder()
+        .http_client(codex_http_client())
+        .api_key(provider_config.auth_token().unwrap_or_default())
+        .base_url(openai_base_url_for_model(config, model_name)?)
+        .http_headers(http_headers_for_model(config, model_name)?)
+        .build()
+        .context("failed to build OpenAI Responses client")
+}
+
+fn build_completions_client(
+    config: &AppConfig,
+    model_name: &str,
+) -> Result<openai::CompletionsClient> {
+    let provider_config = config.provider_config_for_model(model_name)?;
+    openai::CompletionsClient::builder()
+        .api_key(provider_config.auth_token().unwrap_or_default())
+        .base_url(openai_base_url_for_model(config, model_name)?)
+        .http_headers(http_headers_for_model(config, model_name)?)
+        .build()
+        .context("failed to build OpenAI-compatible client")
+}
+
+fn build_client_and_agent(
+    config: &AppConfig,
+    model_name: &str,
+    preamble: &str,
+    reasoning: ReasoningSetting,
+    tool_context: ToolContext,
+) -> Result<(ClientVariant, AgentVariant)> {
+    if is_codex_model(model_name) {
+        let client = build_responses_client(config, model_name)?;
+        let agent = build_agent(&client, model_name, preamble, reasoning, Some(tool_context));
+        Ok((
+            ClientVariant::Responses(client),
+            AgentVariant::Responses(agent),
+        ))
+    } else {
+        let client = build_completions_client(config, model_name)?;
+        let agent = build_agent(&client, model_name, preamble, reasoning, Some(tool_context));
+        Ok((
+            ClientVariant::Completions(client),
+            AgentVariant::Completions(agent),
+        ))
+    }
+}
+
+fn build_safety_client(config: &AppConfig) -> Result<super::safety::SafetyClient> {
+    let model_name = &config.safety.model_name;
+    if is_codex_model(model_name) {
+        Ok(super::safety::SafetyClient::Responses(
+            build_responses_client(config, model_name)
+                .context("failed to build safety OpenAI Responses client")?,
+        ))
+    } else {
+        Ok(super::safety::SafetyClient::Completions(
+            build_completions_client(config, model_name)
+                .context("failed to build safety OpenAI-compatible client")?,
+        ))
+    }
+}
+
+#[derive(Clone)]
 pub struct LlmService {
-    pub(crate) agent: super::LlmAgent,
-    client: openai::CompletionsClient,
+    agent: AgentVariant,
+    client: ClientVariant,
     model_name: String,
     reasoning: ReasoningSetting,
     pub(crate) access_mode: AccessMode,
@@ -68,12 +157,6 @@ impl LlmService {
             .model_name_override
             .clone()
             .unwrap_or_else(|| config.model.model_name.clone());
-        let provider_config = config.provider_config_for_model(&model_name)?;
-        let client = openai::CompletionsClient::builder()
-            .api_key(provider_config.api_key())
-            .base_url(openai_base_url_for_model(config, &model_name)?)
-            .build()
-            .context("failed to build OpenAI-compatible client")?;
 
         let preamble = mode_preamble(&context);
         let tool_context = ToolContext {
@@ -86,25 +169,14 @@ impl LlmService {
         };
         let tool_names = tool_names_for_context(&tool_context);
         let approval_mode = approvals.mode();
-        let agent = build_agent(
-            &client,
+        let (client, agent) = build_client_and_agent(
+            config,
             &model_name,
             &preamble,
             config.model.reasoning,
-            Some(tool_context),
-        );
-        let safety_client = {
-            let safety_provider_config =
-                config.provider_config_for_model(&config.safety.model_name)?;
-            openai::CompletionsClient::builder()
-                .api_key(safety_provider_config.api_key())
-                .base_url(openai_base_url_for_model(
-                    config,
-                    &config.safety.model_name,
-                )?)
-                .build()
-                .context("failed to build safety OpenAI-compatible client")?
-        };
+            tool_context,
+        )?;
+        let safety_client = build_safety_client(config)?;
         let safety = SafetyClassifier::from_client(&safety_client, config);
 
         Ok(Self {
@@ -293,20 +365,43 @@ impl LlmService {
                 return Err(anyhow::anyhow!(message));
             }
 
-            match run_prompt_step(
-                self,
-                reply_id,
-                prompt,
-                history,
-                stats_hook.clone(),
-                capture.clone(),
-                emit.clone(),
-                resume.clone(),
-                replay_seed.take(),
-                MAX_TOOL_STEPS_PER_TURN,
-            )
-            .await?
-            {
+            let replay_seed = replay_seed.take();
+            let outcome = match &self.agent {
+                AgentVariant::Completions(agent) => {
+                    run_prompt_step(
+                        self,
+                        agent,
+                        reply_id,
+                        prompt.clone(),
+                        history.clone(),
+                        stats_hook.clone(),
+                        capture.clone(),
+                        emit.clone(),
+                        resume.clone(),
+                        replay_seed.clone(),
+                        MAX_TOOL_STEPS_PER_TURN,
+                    )
+                    .await?
+                }
+                AgentVariant::Responses(agent) => {
+                    run_prompt_step(
+                        self,
+                        agent,
+                        reply_id,
+                        prompt.clone(),
+                        history.clone(),
+                        stats_hook.clone(),
+                        capture.clone(),
+                        emit.clone(),
+                        resume.clone(),
+                        replay_seed,
+                        MAX_TOOL_STEPS_PER_TURN,
+                    )
+                    .await?
+                }
+            };
+
+            match outcome {
                 PromptStepOutcome::Finished(result) => {
                     return Ok(result);
                 }
@@ -354,13 +449,6 @@ impl LlmService {
         emit: EventCallback,
         emit_notice: bool,
     ) -> Result<HistoryCompactionResult> {
-        let compact_agent = build_agent(
-            &self.client,
-            model_name,
-            &self.preamble,
-            self.reasoning,
-            None,
-        );
         let mut candidate_history = history;
 
         loop {
@@ -379,13 +467,29 @@ impl LlmService {
                 continue;
             }
 
-            let summary = match run_plain_prompt(
-                &compact_agent,
-                COMPACTION_PROMPT.to_string(),
-                candidate_history.clone(),
-            )
-            .await
-            {
+            let summary = match &self.client {
+                ClientVariant::Completions(client) => {
+                    let compact_agent =
+                        build_agent(client, model_name, &self.preamble, self.reasoning, None);
+                    run_plain_prompt(
+                        &compact_agent,
+                        COMPACTION_PROMPT.to_string(),
+                        candidate_history.clone(),
+                    )
+                    .await
+                }
+                ClientVariant::Responses(client) => {
+                    let compact_agent =
+                        build_agent(client, model_name, &self.preamble, self.reasoning, None);
+                    run_plain_prompt(
+                        &compact_agent,
+                        COMPACTION_PROMPT.to_string(),
+                        candidate_history.clone(),
+                    )
+                    .await
+                }
+            };
+            let summary = match summary {
                 Ok(summary) => summary,
                 Err(error) if is_retryable_compaction_error(&error.to_string()) => {
                     if !drop_oldest_compaction_source_message(&mut candidate_history) {

@@ -11,7 +11,7 @@ pub(super) fn submit_command(
         ops::transcript::push_error_message(
             state,
             format!(
-                "Unknown command `{command_name}`. Try /new, /stats, /model, /plan, /quit, or /effort."
+                "Unknown command `{command_name}`. Try /new, /stats, /model, /login, /logout, /plan, /quit, or /effort."
             ),
         );
         return None;
@@ -31,6 +31,8 @@ pub(super) fn submit_command(
         SlashCommand::Stats => submit_stats_command(state, arguments),
         SlashCommand::Model => submit_model_command(state, arguments),
         SlashCommand::Plan => submit_plan_command(state, arguments),
+        SlashCommand::Login => submit_login_command(state, arguments),
+        SlashCommand::Logout => submit_logout_command(state, arguments),
         SlashCommand::Quit => {
             ops::session::set_should_quit(state);
             None
@@ -78,8 +80,7 @@ fn submit_model_command(state: &mut AppState, arguments: &str) -> Option<Effect>
     }
 
     ops::composer::clear_composer(state);
-    ops::picker::open_model_picker(state);
-    None
+    Some(Effect::OpenModelPicker)
 }
 
 fn submit_plan_command(state: &mut AppState, arguments: &str) -> Option<Effect> {
@@ -94,6 +95,26 @@ fn submit_plan_command(state: &mut AppState, arguments: &str) -> Option<Effect> 
         "Describe what you want planned, then press Enter to start an interactive planning session.",
     );
     None
+}
+
+fn submit_login_command(state: &mut AppState, arguments: &str) -> Option<Effect> {
+    if !arguments.trim().is_empty() {
+        ops::transcript::push_error_message(state, "Usage: /login");
+        return None;
+    }
+
+    ops::composer::clear_composer(state);
+    Some(Effect::LoginCodex)
+}
+
+fn submit_logout_command(state: &mut AppState, arguments: &str) -> Option<Effect> {
+    if !arguments.trim().is_empty() {
+        ops::transcript::push_error_message(state, "Usage: /logout");
+        return None;
+    }
+
+    ops::composer::clear_composer(state);
+    Some(Effect::LogoutCodex)
 }
 
 fn submit_effort_command(state: &mut AppState, arguments: &str) -> Option<Effect> {
@@ -203,8 +224,7 @@ mod tests {
 
         let effect = app.apply(crate::app::Action::SubmitMessage);
 
-        assert!(effect.is_none());
-        assert!(app.selection_picker_visible());
+        assert_eq!(effect, Some(Effect::OpenModelPicker));
         assert!(!app.composer_has_content());
     }
 
@@ -229,6 +249,30 @@ mod tests {
         let effect = app.apply(crate::app::Action::SubmitMessage);
 
         assert_eq!(effect, Some(Effect::ShowStats));
+        assert!(!app.composer_has_content());
+    }
+
+    #[test]
+    fn login_command_returns_effect() {
+        let mut app = new_app(true);
+        app.composer_mut().insert_str("/login");
+        app.sync_command_selection();
+
+        let effect = app.apply(crate::app::Action::SubmitMessage);
+
+        assert_eq!(effect, Some(Effect::LoginCodex));
+        assert!(!app.composer_has_content());
+    }
+
+    #[test]
+    fn logout_command_returns_effect() {
+        let mut app = new_app(true);
+        app.composer_mut().insert_str("/logout");
+        app.sync_command_selection();
+
+        let effect = app.apply(crate::app::Action::SubmitMessage);
+
+        assert_eq!(effect, Some(Effect::LogoutCodex));
         assert!(!app.composer_has_content());
     }
 

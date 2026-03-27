@@ -5,7 +5,7 @@ use std::{
 
 use rig::{
     agent::{PromptHook, ToolCallHookAction},
-    providers::openai,
+    completion::CompletionModel,
 };
 use tokio::sync::oneshot;
 
@@ -287,7 +287,10 @@ impl ShellApprovalController {
     }
 }
 
-impl PromptHook<openai::CompletionModel> for ShellApprovalHook {
+impl<M> PromptHook<M> for ShellApprovalHook
+where
+    M: CompletionModel,
+{
     async fn on_tool_call(
         &self,
         tool_name: &str,

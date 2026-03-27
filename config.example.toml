@@ -9,13 +9,37 @@ api_version = "2025-01-01-preview"
 # Optional. Required only when selecting a Chutes-hosted model.
 api_key = "paste-your-chutes-api-key-here"
 
+[openrouter]
+# Optional. Required only when selecting an OpenRouter-hosted model.
+api_key = "paste-your-openrouter-api-key-here"
+
+[codex]
+# Optional. `oat /login` populates these fields for Codex device auth directly
+# inside config.toml.
+#
+# API-key mode example:
+# auth_mode = "api_key"
+# OPENAI_API_KEY = "paste-your-openai-api-key-here"
+#
+# Device-login mode fields are managed automatically:
+# auth_mode = "chatgpt"
+# access_token = "..."
+# refresh_token = "..."
+# id_token = "..."
+# account_id = "..."
+# last_refresh = "2026-03-27T00:00:00Z"
+
 [model]
 # Active model selection. The provider is inferred from the model registry.
+# Codex-backed models use the `codex/<slug>` namespace, for example:
+# model_name = "codex/gpt-5.4"
 model_name = "gpt-5.4-mini"
 
 # Model-specific reasoning setting.
-# GPT models: minimal, low, medium, high, xhigh
+# GPT-style models in this registry expose model-specific subsets of:
+# none, minimal, low, medium, high, xhigh
 # kimi-k2.5: on, off
+# OpenRouter reasoning support is also model-specific
 # Chutes models in this registry: default
 reasoning = "medium"
 
@@ -47,6 +71,18 @@ agents = []
 # [[planning.agents]]
 # model_name = "zai-org/GLM-5-TEE"
 # reasoning = "default"
+#
+# [[planning.agents]]
+# model_name = "minimax/minimax-m2.7"
+# reasoning = "medium"
+#
+# [[planning.agents]]
+# model_name = "openai/gpt-5.4-mini"
+# reasoning = "medium"
+#
+# [[planning.agents]]
+# model_name = "codex/gpt-5.3-codex"
+# reasoning = "high"
 
 [safety]
 # Optional dedicated model used to classify shell commands as low, medium, or

@@ -3,8 +3,9 @@ use futures_util::StreamExt;
 use rig::{
     agent::MultiTurnStreamItem,
     client::CompletionClient,
+    completion::CompletionModel,
     completion::Message as RigMessage,
-    providers::openai,
+    http_client::{HeaderMap, HeaderValue},
     streaming::{StreamedAssistantContent, StreamingChat},
 };
 use serde_json::json;
@@ -13,19 +14,37 @@ use crate::{
     agent::{AgentContext, AgentRole},
     app::AccessMode,
     config::{AppConfig, KimiThinkingMode, ReasoningSetting},
+    model_registry,
     tools::{ToolContext, tools_for_context},
 };
-
-use super::LlmAgent;
-
 const SYSTEM_PROMPT: &str = include_str!("../../prompts/system.md");
+const OPENROUTER_REFERER: &str = "https://getoat.app";
+const OPENROUTER_TITLE: &str = "oat";
+const OPENAI_BETA_HEADER: &str = "responses=experimental";
+const OPENAI_ORIGINATOR_HEADER_VALUE: &str = "codex_cli_rs";
 
 pub(crate) fn reasoning_params(model_name: &str, reasoning: ReasoningSetting) -> serde_json::Value {
     match reasoning {
         ReasoningSetting::Default => json!({}),
-        ReasoningSetting::Gpt(reasoning_effort) => json!({
-            "reasoning_effort": reasoning_effort.as_str()
-        }),
+        ReasoningSetting::Gpt(reasoning_effort) => {
+            match model_registry::find_model(model_name).map(|model| model.provider) {
+                Some(model_registry::ModelProvider::OpenRouter) => json!({
+                    "reasoning": {
+                        "effort": reasoning_effort.as_str()
+                    }
+                }),
+                Some(model_registry::ModelProvider::Codex) => json!({
+                    "reasoning": {
+                        "effort": reasoning_effort.as_str(),
+                        "summary": "auto"
+                    },
+                    "store": false
+                }),
+                _ => json!({
+                    "reasoning_effort": reasoning_effort.as_str()
+                }),
+            }
+        }
         ReasoningSetting::Kimi(KimiThinkingMode::On) => json!({}),
         ReasoningSetting::Kimi(KimiThinkingMode::Off) if model_name == "kimi-k2.5" => json!({
             "thinking": {
@@ -41,6 +60,41 @@ pub(crate) fn openai_base_url_for_model(
     model_name: &str,
 ) -> anyhow::Result<String> {
     Ok(config.provider_config_for_model(model_name)?.base_url())
+}
+
+pub(crate) fn http_headers_for_model(
+    config: &AppConfig,
+    model_name: &str,
+) -> anyhow::Result<HeaderMap> {
+    let provider_config = config.provider_config_for_model(model_name)?;
+    let mut headers = HeaderMap::new();
+
+    if matches!(
+        model_registry::find_model(model_name).map(|model| model.provider),
+        Some(model_registry::ModelProvider::Codex)
+    ) {
+        headers.insert("OpenAI-Beta", HeaderValue::from_static(OPENAI_BETA_HEADER));
+        headers.insert(
+            "originator",
+            HeaderValue::from_static(OPENAI_ORIGINATOR_HEADER_VALUE),
+        );
+        if let Some(account_id) = provider_config.account_id() {
+            headers.insert("chatgpt-account-id", HeaderValue::from_str(account_id)?);
+        }
+    }
+
+    if matches!(
+        model_registry::find_model(model_name).map(|model| model.provider),
+        Some(model_registry::ModelProvider::OpenRouter)
+    ) {
+        headers.insert("HTTP-Referer", HeaderValue::from_static(OPENROUTER_REFERER));
+        headers.insert(
+            "X-OpenRouter-Title",
+            HeaderValue::from_static(OPENROUTER_TITLE),
+        );
+    }
+
+    Ok(headers)
 }
 
 fn execution_mode_label(access_mode: AccessMode) -> &'static str {
@@ -85,15 +139,20 @@ pub(crate) fn mode_preamble(context: &AgentContext) -> String {
     preamble
 }
 
-pub(crate) fn build_agent(
-    client: &openai::CompletionsClient,
+pub(crate) fn build_agent<C>(
+    client: &C,
     model_name: &str,
     preamble: &str,
     reasoning: ReasoningSetting,
     tool_context: Option<ToolContext>,
-) -> LlmAgent {
+) -> rig::agent::Agent<C::CompletionModel>
+where
+    C: CompletionClient,
+    C::CompletionModel: CompletionModel + 'static,
+{
+    let api_model_name = crate::codex::api_model_name(model_name);
     let builder = client
-        .agent(model_name.to_string())
+        .agent(api_model_name.to_string())
         .preamble(preamble)
         .additional_params(reasoning_params(model_name, reasoning));
     match tool_context {
@@ -102,11 +161,14 @@ pub(crate) fn build_agent(
     }
 }
 
-pub(crate) async fn run_plain_prompt(
-    agent: &LlmAgent,
+pub(crate) async fn run_plain_prompt<M>(
+    agent: &rig::agent::Agent<M>,
     prompt: String,
     history: Vec<RigMessage>,
-) -> Result<String> {
+) -> Result<String>
+where
+    M: CompletionModel + 'static,
+{
     let mut stream = agent.stream_chat(prompt, history).multi_turn(0).await;
     let mut output = String::new();
 

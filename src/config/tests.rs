@@ -28,6 +28,8 @@ fn sample_config() -> AppConfig {
             api_version: default_api_version(),
         }),
         chutes: None,
+        codex: None,
+        openrouter: None,
         model: ModelSelectionConfig {
             model_name: "gpt-5.4-mini".into(),
             reasoning: ReasoningEffort::Medium.into(),
@@ -147,6 +149,10 @@ fn reasoning_setting_parser_supports_xhigh_and_default_literals() {
         Some(ReasoningSetting::Gpt(ReasoningEffort::XHigh))
     );
     assert_eq!(
+        ReasoningSetting::parse_unscoped("none"),
+        Some(ReasoningSetting::Gpt(ReasoningEffort::None))
+    );
+    assert_eq!(
         ReasoningSetting::parse_unscoped("default"),
         Some(ReasoningSetting::Default)
     );
@@ -260,6 +266,8 @@ fn validation_requires_chutes_credentials_for_selected_chutes_model() {
     let config = AppConfig {
         azure: None,
         chutes: None,
+        codex: None,
+        openrouter: None,
         model: ModelSelectionConfig {
             model_name: "zai-org/GLM-5-TEE".into(),
             reasoning: ReasoningSetting::Default,
@@ -276,6 +284,110 @@ fn validation_requires_chutes_credentials_for_selected_chutes_model() {
 
     let error = config.validate().expect_err("validation should fail");
     assert!(error.to_string().contains("missing the [chutes] table"));
+}
+
+#[test]
+fn validation_requires_openrouter_credentials_for_selected_openrouter_model() {
+    let config = AppConfig {
+        azure: None,
+        chutes: None,
+        codex: None,
+        openrouter: None,
+        model: ModelSelectionConfig {
+            model_name: "minimax/minimax-m2.7".into(),
+            reasoning: ReasoningEffort::Medium.into(),
+        },
+        safety: SafetyConfig {
+            model_name: "minimax/minimax-m2.7".into(),
+            reasoning: ReasoningEffort::Medium.into(),
+        },
+        ui: UiConfig::default(),
+        subagents: SubagentConfig::default(),
+        planning: PlanningConfig::default(),
+        tools: ToolConfig::default(),
+    };
+
+    let error = config.validate().expect_err("validation should fail");
+    assert!(error.to_string().contains("missing the [openrouter] table"));
+}
+
+#[test]
+fn parses_openrouter_model_and_validates_api_key() {
+    let config: AppConfig = toml::from_str(
+        r#"
+            [openrouter]
+            api_key = "or-secret"
+
+            [model]
+            model_name = "xiaomi/mimo-v2-pro"
+            reasoning = "xhigh"
+            "#,
+    )
+    .expect("config parses");
+
+    let openrouter = config.openrouter.as_ref().expect("openrouter config");
+    assert_eq!(openrouter.api_key, "or-secret");
+    assert_eq!(config.model.model_name, "xiaomi/mimo-v2-pro");
+    assert_eq!(
+        config.model.reasoning,
+        ReasoningSetting::Gpt(ReasoningEffort::XHigh)
+    );
+    assert_eq!(config.safety.model_name, "xiaomi/mimo-v2-pro");
+    assert_eq!(
+        config.safety.reasoning,
+        ReasoningSetting::Gpt(ReasoningEffort::XHigh)
+    );
+}
+
+#[test]
+fn parses_codex_model_and_auth_from_config_table() {
+    let config: AppConfig = toml::from_str(
+        r#"
+            [codex]
+            auth_mode = "api_key"
+            OPENAI_API_KEY = "codex-secret"
+
+            [model]
+            model_name = "codex/gpt-5.3-codex"
+            reasoning = "medium"
+            "#,
+    )
+    .expect("config parses");
+
+    let codex = config.codex.as_ref().expect("codex config");
+    assert_eq!(codex.auth_mode, Some(CodexAuthMode::ApiKey));
+    assert_eq!(codex.openai_api_key.as_deref(), Some("codex-secret"));
+    assert_eq!(config.model.model_name, "codex/gpt-5.3-codex");
+    assert_eq!(
+        config.model.reasoning,
+        ReasoningSetting::Gpt(ReasoningEffort::Medium)
+    );
+    assert_eq!(config.safety.model_name, "codex/gpt-5.3-codex");
+}
+
+#[test]
+fn codex_auth_mode_requires_matching_credentials() {
+    let config = toml::from_str::<AppConfig>(
+        r#"
+            [codex]
+            auth_mode = "api_key"
+
+            [model]
+            model_name = "codex/gpt-5.3-codex"
+            reasoning = "medium"
+            "#,
+    )
+    .expect("config parses");
+
+    let error = config
+        .validate()
+        .expect_err("config should fail validation");
+
+    assert!(
+        error
+            .to_string()
+            .contains("codex.OPENAI_API_KEY must not be empty")
+    );
 }
 
 #[test]

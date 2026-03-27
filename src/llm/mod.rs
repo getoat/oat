@@ -7,7 +7,13 @@ mod service;
 mod streaming;
 mod types;
 
-pub(crate) type LlmAgent = rig::agent::Agent<rig::providers::openai::CompletionModel>;
+pub(crate) type OpenAiCompletionsAgent =
+    rig::agent::Agent<rig::providers::openai::completion::CompletionModel>;
+pub(crate) type CodexResponsesClient =
+    rig::providers::openai::Client<crate::codex::CodexHttpClient>;
+pub(crate) type OpenAiResponsesAgent = rig::agent::Agent<
+    rig::providers::openai::responses_api::ResponsesCompletionModel<crate::codex::CodexHttpClient>,
+>;
 
 pub(crate) use crate::app::StreamEvent;
 pub(crate) use hooks::{AskUserController, WriteApprovalController};

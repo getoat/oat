@@ -136,6 +136,37 @@ fn validate_provider_credentials(
                 bail!("chutes.api_key must not be empty");
             }
         }
+        ModelProvider::Codex => {
+            if let Some(codex) = config.codex.as_ref()
+                && let Some(mode) = codex.resolved_auth_mode()
+            {
+                match mode {
+                    crate::config::CodexAuthMode::ApiKey => {
+                        if codex.auth_token().is_none() {
+                            bail!(
+                                "codex.OPENAI_API_KEY must not be empty when codex.auth_mode = \"api_key\""
+                            );
+                        }
+                    }
+                    crate::config::CodexAuthMode::Chatgpt
+                    | crate::config::CodexAuthMode::ChatgptAuthTokens => {
+                        if codex.auth_token().is_none() {
+                            bail!(
+                                "codex.access_token must not be empty when codex.auth_mode uses ChatGPT tokens"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        ModelProvider::OpenRouter => {
+            let Some(openrouter) = config.openrouter.as_ref() else {
+                bail!("config is missing the [openrouter] table required for model `{model_name}`");
+            };
+            if openrouter.api_key.trim().is_empty() {
+                bail!("openrouter.api_key must not be empty");
+            }
+        }
     }
 
     Ok(())

@@ -329,6 +329,8 @@ mod tests {
                 api_version: "2025-01-01-preview".into(),
             }),
             chutes: None,
+            codex: None,
+            openrouter: None,
             model: crate::config::ModelSelectionConfig {
                 model_name: "gpt-5.4-mini".into(),
                 reasoning: crate::config::ReasoningEffort::Medium.into(),

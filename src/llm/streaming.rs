@@ -4,7 +4,7 @@ use anyhow::Result;
 use futures_util::StreamExt;
 use rig::{
     agent::{MultiTurnStreamItem, StreamingError},
-    completion::{Message as RigMessage, PromptError},
+    completion::{CompletionModel, Message as RigMessage, PromptError},
     streaming::{
         StreamedAssistantContent, StreamedUserContent, StreamingChat, ToolCallDeltaContent,
     },
@@ -46,8 +46,9 @@ pub(crate) enum PromptStepOutcome {
     Continue(StepBoundaryState),
 }
 
-pub(crate) async fn run_prompt_step(
+pub(crate) async fn run_prompt_step<M>(
     service: &LlmService,
+    agent: &rig::agent::Agent<M>,
     reply_id: u64,
     prompt: RigMessage,
     history: Vec<RigMessage>,
@@ -57,7 +58,10 @@ pub(crate) async fn run_prompt_step(
     resume: Option<ResumeOverrideController>,
     replay_seed: Option<PendingReplyReplaySeed>,
     max_tool_steps: usize,
-) -> Result<PromptStepOutcome> {
+) -> Result<PromptStepOutcome>
+where
+    M: CompletionModel + 'static,
+{
     let write_approval_hook = WriteApprovalHook {
         reply_id,
         emit: emit.clone(),
@@ -100,8 +104,7 @@ pub(crate) async fn run_prompt_step(
             },
         },
     };
-    let mut stream = service
-        .agent
+    let mut stream = agent
         .stream_chat(prompt, history)
         .with_hook(hook)
         .multi_turn(max_tool_steps)
@@ -140,8 +143,11 @@ pub(crate) async fn run_prompt_step(
                 reasoning,
             ))) => {
                 plain_replay_probe = (!output.is_empty()).then(|| ReplayProbe::new(&output));
-                let delta =
-                    reconcile_stream_text(&reasoning.display_text(), &mut reasoning_replay_probe);
+                let delta = reconcile_completed_reasoning_text(
+                    &reasoning.display_text(),
+                    &reasoning_output,
+                    &mut reasoning_replay_probe,
+                );
                 if delta.is_empty() {
                     None
                 } else {
@@ -295,6 +301,17 @@ pub(crate) async fn run_prompt_step(
 
 pub(crate) fn format_tool_arguments(arguments: &serde_json::Value) -> String {
     serde_json::to_string(arguments).unwrap_or_else(|_| arguments.to_string())
+}
+
+pub(crate) fn reconcile_completed_reasoning_text(
+    incoming: &str,
+    existing_reasoning_output: &str,
+    replay_probe: &mut Option<ReplayProbe>,
+) -> String {
+    if replay_probe.is_none() && !existing_reasoning_output.is_empty() {
+        *replay_probe = Some(ReplayProbe::new(existing_reasoning_output));
+    }
+    reconcile_stream_text(incoming, replay_probe)
 }
 
 fn is_step_boundary_error(error: &StreamingError) -> bool {

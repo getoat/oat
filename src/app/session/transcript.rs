@@ -126,8 +126,9 @@ pub fn startup_banner_message(model_name: &str, mode: AccessMode) -> String {
     let provider = crate::model_registry::find_model(model_name)
         .map(|model| model.provider.display_name())
         .unwrap_or("configured");
+    let display_name = crate::codex::display_name(model_name);
     format!(
-        "Loaded {provider} model `{model_name}` from config. Send a message to start a one-shot response, or type / for commands."
+        "Loaded {provider} model `{display_name}` from config. Send a message to start a one-shot response, or type / for commands."
     )
 }
 

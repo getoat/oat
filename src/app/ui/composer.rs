@@ -66,6 +66,7 @@ pub fn normalize_pasted_line_endings(text: &str) -> String {
 }
 
 pub fn picker_height(picker: &SelectionPicker, screen_height: u16) -> u16 {
+    let max_height = (screen_height / 2).max(3);
     match picker {
         SelectionPicker::Model { .. } => {
             let provider_count = model_registry::models()
@@ -78,10 +79,12 @@ pub fn picker_height(picker: &SelectionPicker, screen_height: u16) -> u16 {
                 })
                 .len() as u16;
             let content_height = model_registry::models().len().max(1) as u16 + provider_count + 1;
-            let max_height = (screen_height / 2).max(3);
             (content_height + 2).min(max_height)
         }
-        SelectionPicker::Reasoning { options, .. } => options.len().clamp(1, 4) as u16 + 2,
+        SelectionPicker::Reasoning { options, .. } => {
+            let content_height = options.len().max(1) as u16;
+            (content_height + 2).min(max_height)
+        }
     }
 }
 

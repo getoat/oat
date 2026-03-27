@@ -5,7 +5,7 @@ use std::{
 
 use rig::{
     agent::{PromptHook, ToolCallHookAction},
-    providers::openai,
+    completion::CompletionModel,
     tool::Tool,
 };
 use tokio::sync::oneshot;
@@ -169,7 +169,10 @@ impl AskUserController {
     }
 }
 
-impl PromptHook<openai::CompletionModel> for AskUserHook {
+impl<M> PromptHook<M> for AskUserHook
+where
+    M: CompletionModel,
+{
     async fn on_tool_call(
         &self,
         tool_name: &str,

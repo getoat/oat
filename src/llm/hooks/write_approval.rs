@@ -5,7 +5,7 @@ use std::{
 
 use rig::{
     agent::{PromptHook, ToolCallHookAction},
-    providers::openai,
+    completion::CompletionModel,
 };
 use tokio::sync::oneshot;
 
@@ -195,7 +195,10 @@ impl WriteApprovalController {
     }
 }
 
-impl PromptHook<openai::CompletionModel> for WriteApprovalHook {
+impl<M> PromptHook<M> for WriteApprovalHook
+where
+    M: CompletionModel,
+{
     async fn on_tool_call(
         &self,
         tool_name: &str,
