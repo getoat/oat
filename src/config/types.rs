@@ -1,3 +1,4 @@
+use anyhow::{Result, anyhow};
 use serde::{
     Deserialize, Deserializer, Serialize, Serializer,
     de::{self, Visitor},
@@ -5,11 +6,13 @@ use serde::{
 
 use std::fmt;
 
-use crate::{features::planning::PlanningConfig, tool_policy};
+use crate::{features::planning::PlanningConfig, model_registry, tool_policy};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppConfig {
-    pub azure: AzureConfig,
+    pub azure: Option<AzureConfig>,
+    pub chutes: Option<ChutesConfig>,
+    pub model: ModelSelectionConfig,
     pub safety: SafetyConfig,
     pub ui: UiConfig,
     pub subagents: SubagentConfig,
@@ -17,12 +20,40 @@ pub struct AppConfig {
     pub tools: ToolConfig,
 }
 
+impl AppConfig {
+    pub fn provider_config_for_model(&self, model_name: &str) -> Result<ProviderConfigRef<'_>> {
+        let model = model_registry::find_model(model_name).ok_or_else(|| {
+            anyhow!(model_registry::unknown_model_message(
+                "model.model_name",
+                model_name
+            ))
+        })?;
+
+        match model.provider {
+            model_registry::ModelProvider::AzureOpenAi => self
+                .azure
+                .as_ref()
+                .map(ProviderConfigRef::Azure)
+                .ok_or_else(|| {
+                    anyhow!("config is missing the [azure] table required for model `{model_name}`")
+                }),
+            model_registry::ModelProvider::ChutesAi => self
+                .chutes
+                .as_ref()
+                .map(ProviderConfigRef::Chutes)
+                .ok_or_else(|| {
+                    anyhow!(
+                        "config is missing the [chutes] table required for model `{model_name}`"
+                    )
+                }),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct AzureConfig {
     pub resource_name: String,
     pub api_key: String,
-    pub model_name: String,
-    pub reasoning: ReasoningSetting,
     #[serde(default = "default_api_version")]
     pub api_version: String,
 }
@@ -30,6 +61,45 @@ pub struct AzureConfig {
 impl AzureConfig {
     pub fn endpoint(&self) -> String {
         format!("https://{}.openai.azure.com", self.resource_name.trim())
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct ChutesConfig {
+    pub api_key: String,
+}
+
+impl ChutesConfig {
+    pub fn base_url(&self) -> &'static str {
+        "https://llm.chutes.ai/v1"
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct ModelSelectionConfig {
+    pub model_name: String,
+    pub reasoning: ReasoningSetting,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProviderConfigRef<'a> {
+    Azure(&'a AzureConfig),
+    Chutes(&'a ChutesConfig),
+}
+
+impl ProviderConfigRef<'_> {
+    pub fn api_key(&self) -> &str {
+        match self {
+            Self::Azure(config) => &config.api_key,
+            Self::Chutes(config) => &config.api_key,
+        }
+    }
+
+    pub fn base_url(&self) -> String {
+        match self {
+            Self::Azure(config) => format!("{}/openai/v1", config.endpoint().trim_end_matches('/')),
+            Self::Chutes(config) => config.base_url().to_string(),
+        }
     }
 }
 
@@ -161,6 +231,7 @@ impl KimiThinkingMode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ReasoningSetting {
+    Default,
     Gpt(ReasoningEffort),
     Kimi(KimiThinkingMode),
 }
@@ -168,15 +239,19 @@ pub enum ReasoningSetting {
 impl ReasoningSetting {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Default => "default",
             Self::Gpt(level) => level.as_str(),
             Self::Kimi(mode) => mode.as_str(),
         }
     }
 
     pub(crate) fn parse_unscoped(value: &str) -> Option<Self> {
-        ReasoningEffort::parse(value)
-            .map(Self::Gpt)
-            .or_else(|| KimiThinkingMode::parse(value).map(Self::Kimi))
+        match value.trim().to_ascii_lowercase().as_str() {
+            "default" => Some(Self::Default),
+            _ => ReasoningEffort::parse(value)
+                .map(Self::Gpt)
+                .or_else(|| KimiThinkingMode::parse(value).map(Self::Kimi)),
+        }
     }
 
     pub(crate) fn parse_from_supported(value: &str, supported: &[Self]) -> Option<Self> {

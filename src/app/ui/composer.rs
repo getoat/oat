@@ -65,14 +65,24 @@ pub fn normalize_pasted_line_endings(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\r', "\n")
 }
 
-pub fn picker_height(picker: &SelectionPicker) -> u16 {
-    let line_count = match picker {
-        SelectionPicker::Model { .. } => model_registry::models().len().max(1) + 1,
-        SelectionPicker::Reasoning { options, .. } => options.len(),
+pub fn picker_height(picker: &SelectionPicker, screen_height: u16) -> u16 {
+    match picker {
+        SelectionPicker::Model { .. } => {
+            let provider_count = model_registry::models()
+                .iter()
+                .fold(Vec::new(), |mut providers, model| {
+                    if !providers.contains(&model.provider) {
+                        providers.push(model.provider);
+                    }
+                    providers
+                })
+                .len() as u16;
+            let content_height = model_registry::models().len().max(1) as u16 + provider_count + 1;
+            let max_height = (screen_height / 2).max(3);
+            (content_height + 2).min(max_height)
+        }
+        SelectionPicker::Reasoning { options, .. } => options.len().clamp(1, 4) as u16 + 2,
     }
-    .clamp(1, 4) as u16;
-
-    line_count + 2
 }
 
 #[derive(Debug)]

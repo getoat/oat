@@ -22,6 +22,7 @@ const SYSTEM_PROMPT: &str = include_str!("../../prompts/system.md");
 
 pub(crate) fn reasoning_params(model_name: &str, reasoning: ReasoningSetting) -> serde_json::Value {
     match reasoning {
+        ReasoningSetting::Default => json!({}),
         ReasoningSetting::Gpt(reasoning_effort) => json!({
             "reasoning_effort": reasoning_effort.as_str()
         }),
@@ -35,11 +36,11 @@ pub(crate) fn reasoning_params(model_name: &str, reasoning: ReasoningSetting) ->
     }
 }
 
-pub(crate) fn azure_openai_base_url(config: &AppConfig) -> String {
-    format!(
-        "{}/openai/v1",
-        config.azure.endpoint().trim_end_matches('/')
-    )
+pub(crate) fn openai_base_url_for_model(
+    config: &AppConfig,
+    model_name: &str,
+) -> anyhow::Result<String> {
+    Ok(config.provider_config_for_model(model_name)?.base_url())
 }
 
 fn execution_mode_label(access_mode: AccessMode) -> &'static str {

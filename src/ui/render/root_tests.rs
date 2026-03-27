@@ -82,7 +82,7 @@ fn render_shows_mode_line_and_initial_prompt() {
 
     assert!(rendered.contains("░███████"));
     assert!(rendered.contains("v0.1.0"));
-    assert!(rendered.contains("Loaded Azure model"));
+    assert!(rendered.contains("Loaded Azure OpenAI model"));
     assert!(rendered.contains("Read-only"));
     assert!(rendered.contains("gpt-5.4-mini • medium"));
     assert!(rendered.contains("in 1.2K"));

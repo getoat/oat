@@ -37,8 +37,8 @@ pub(crate) fn bootstrap_tui(config: AppConfig, startup: StartupOptions) -> Resul
     let mut app = App::with_startup(
         config.ui.show_thinking,
         config.ui.show_tool_output,
-        config.azure.model_name.clone(),
-        config.azure.reasoning,
+        config.model.model_name.clone(),
+        config.model.reasoning,
         config.planning.agents.clone(),
         startup.access_mode,
         startup.approval_mode,
@@ -117,7 +117,7 @@ pub(crate) fn bootstrap_headless(
         )?
     };
     let (stream_tx, stream_rx) = mpsc::unbounded_channel();
-    let stats_hook = stats.hook_for_model(config.azure.model_name.clone());
+    let stats_hook = stats.hook_for_model(config.model.model_name.clone());
     let task = runtime.spawn({
         let llm = llm.clone();
         async move {

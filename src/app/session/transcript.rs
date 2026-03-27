@@ -123,8 +123,11 @@ impl PendingReply {
 
 pub fn startup_banner_message(model_name: &str, mode: AccessMode) -> String {
     let _ = mode;
+    let provider = crate::model_registry::find_model(model_name)
+        .map(|model| model.provider.display_name())
+        .unwrap_or("configured");
     format!(
-        "Loaded Azure model `{model_name}` from config. Send a message to start a one-shot response, or type / for commands."
+        "Loaded {provider} model `{model_name}` from config. Send a message to start a one-shot response, or type / for commands."
     )
 }
 

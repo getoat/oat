@@ -1,5 +1,8 @@
 use crate::{
-    app::{AppState, ModelPickerTab, PickerSelection, ReasoningPickerTarget, SelectionPicker},
+    app::{
+        AppState, ModelPickerTab, PickerSelection, ReasoningPickerTarget, SelectionPicker,
+        selectable_models_for_tab,
+    },
     features::planning::{PlanningAgentConfig, default_planning_reasoning},
     model_registry,
 };
@@ -25,34 +28,22 @@ pub(crate) fn move_picker_tab_right(state: &mut AppState) {
 }
 
 pub(crate) fn open_model_picker(state: &mut AppState) {
-    let normal_selected_index = model_registry::models()
-        .iter()
-        .position(|model| model.name == state.session.model_name)
-        .unwrap_or(0);
-    let safety_selected_index = model_registry::models()
-        .iter()
-        .position(|model| model.name == state.session.safety_model_name)
-        .unwrap_or(0);
     state.ui.picker = Some(SelectionPicker::Model {
         active_tab: ModelPickerTab::NormalAgent,
-        normal_selected_index,
-        planning_selected_index: 0,
-        safety_selected_index,
+        normal_selected_model: state.session.model_name.clone(),
+        planning_selected_model: initial_planning_selected_model(state),
+        safety_selected_model: state.session.safety_model_name.clone(),
     });
 }
 
 pub(crate) fn toggle_picker_selection(state: &mut AppState) -> Option<Vec<PlanningAgentConfig>> {
-    let planning_selected_index = match state.ui.picker.as_ref()? {
+    let model_name = match state.ui.picker.as_ref()? {
         SelectionPicker::Model {
             active_tab: ModelPickerTab::PlanningAgents,
-            planning_selected_index,
+            planning_selected_model,
             ..
-        } => *planning_selected_index,
+        } if !planning_selected_model.is_empty() => planning_selected_model.clone(),
         _ => return None,
-    };
-    let model_name = match planning_models(&state.session.model_name).get(planning_selected_index) {
-        Some(model) => model.name.to_string(),
-        None => return None,
     };
 
     if let Some(existing_index) = state
@@ -64,13 +55,8 @@ pub(crate) fn toggle_picker_selection(state: &mut AppState) -> Option<Vec<Planni
         state.session.planning_agents.remove(existing_index);
     } else {
         state.session.planning_agents.push(PlanningAgentConfig {
-            model_name,
-            reasoning: default_planning_reasoning(
-                planning_models(&state.session.model_name)
-                    .get(planning_selected_index)
-                    .map(|model| model.name)
-                    .unwrap_or_default(),
-            ),
+            model_name: model_name.clone(),
+            reasoning: default_planning_reasoning(&model_name),
         });
     }
 
@@ -82,25 +68,32 @@ pub(crate) fn apply_picker_selection(state: &mut AppState) -> Option<PickerSelec
     match picker {
         SelectionPicker::Model {
             active_tab,
-            normal_selected_index,
-            planning_selected_index,
-            safety_selected_index,
+            normal_selected_model,
+            planning_selected_model,
+            safety_selected_model,
         } => match active_tab {
-            ModelPickerTab::NormalAgent => model_registry::models()
-                .get(normal_selected_index)
-                .map(|model| PickerSelection::Model(model.name.to_string())),
+            ModelPickerTab::NormalAgent => (!normal_selected_model.is_empty())
+                .then_some(PickerSelection::Model(normal_selected_model)),
             ModelPickerTab::PlanningAgents => {
-                let model_name = planning_models(&state.session.model_name)
-                    .get(planning_selected_index)
-                    .map(|model| model.name.to_string())?;
-                open_reasoning_picker_for(state, ReasoningPickerTarget::PlanningAgent, model_name);
+                if planning_selected_model.is_empty() {
+                    return None;
+                }
+                open_reasoning_picker_for(
+                    state,
+                    ReasoningPickerTarget::PlanningAgent,
+                    planning_selected_model,
+                );
                 None
             }
             ModelPickerTab::SafetyModel => {
-                let model_name = model_registry::models()
-                    .get(safety_selected_index)
-                    .map(|model| model.name.to_string())?;
-                open_reasoning_picker_for(state, ReasoningPickerTarget::SafetyModel, model_name);
+                if safety_selected_model.is_empty() {
+                    return None;
+                }
+                open_reasoning_picker_for(
+                    state,
+                    ReasoningPickerTarget::SafetyModel,
+                    safety_selected_model,
+                );
                 None
             }
         },
@@ -204,11 +197,21 @@ pub(crate) fn open_reasoning_picker_for(
     });
 }
 
-fn planning_models(current_main_model: &str) -> Vec<&'static model_registry::ModelInfo> {
-    model_registry::models()
+fn initial_planning_selected_model(state: &AppState) -> String {
+    let selectable =
+        selectable_models_for_tab(ModelPickerTab::PlanningAgents, &state.session.model_name);
+    state
+        .session
+        .planning_agents
         .iter()
-        .filter(|model| model.name != current_main_model)
-        .collect()
+        .find_map(|agent| {
+            selectable
+                .iter()
+                .find(|model| model.name == agent.model_name)
+                .map(|model| model.name.to_string())
+        })
+        .or_else(|| selectable.first().map(|model| model.name.to_string()))
+        .unwrap_or_default()
 }
 
 fn move_picker_tab(state: &mut AppState, direction: isize) {
@@ -220,7 +223,6 @@ fn move_picker_tab(state: &mut AppState, direction: isize) {
 }
 
 fn move_picker_selection(state: &mut AppState, direction: isize) {
-    let planning_len = planning_models(&state.session.model_name).len();
     let Some(picker) = state.ui.picker.as_mut() else {
         return;
     };
@@ -228,34 +230,27 @@ fn move_picker_selection(state: &mut AppState, direction: isize) {
     match picker {
         SelectionPicker::Model {
             active_tab,
-            normal_selected_index,
-            planning_selected_index,
-            safety_selected_index,
-        } => match active_tab {
-            ModelPickerTab::NormalAgent => {
-                let len = model_registry::models().len();
-                if len > 0 {
-                    *normal_selected_index = (*normal_selected_index as isize + direction)
-                        .rem_euclid(len as isize)
-                        as usize;
-                }
+            normal_selected_model,
+            planning_selected_model,
+            safety_selected_model,
+        } => {
+            let selectable = selectable_models_for_tab(*active_tab, &state.session.model_name);
+            if selectable.is_empty() {
+                return;
             }
-            ModelPickerTab::PlanningAgents => {
-                if planning_len > 0 {
-                    *planning_selected_index = (*planning_selected_index as isize + direction)
-                        .rem_euclid(planning_len as isize)
-                        as usize;
-                }
-            }
-            ModelPickerTab::SafetyModel => {
-                let len = model_registry::models().len();
-                if len > 0 {
-                    *safety_selected_index = (*safety_selected_index as isize + direction)
-                        .rem_euclid(len as isize)
-                        as usize;
-                }
-            }
-        },
+            let current = match active_tab {
+                ModelPickerTab::NormalAgent => normal_selected_model,
+                ModelPickerTab::PlanningAgents => planning_selected_model,
+                ModelPickerTab::SafetyModel => safety_selected_model,
+            };
+            let current_index = selectable
+                .iter()
+                .position(|model| model.name == current.as_str())
+                .unwrap_or(0);
+            let next_index =
+                (current_index as isize + direction).rem_euclid(selectable.len() as isize) as usize;
+            *current = selectable[next_index].name.to_string();
+        }
         SelectionPicker::Reasoning {
             selected_index,
             options,

@@ -225,7 +225,7 @@ impl EffectExecutor<'_> {
                             .map_err(|error| {
                                 format!("Failed to start planning synthesis: {error}")
                             })?;
-                            let stats_hook = stats.hook_for_model(config.azure.model_name.clone());
+                            let stats_hook = stats.hook_for_model(config.model.model_name.clone());
                             let emit = Arc::new(move |reply_id, event| {
                                 stream_tx.send((reply_id, event)).is_ok()
                             });

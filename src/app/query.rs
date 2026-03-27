@@ -312,9 +312,9 @@ pub fn command_palette_height(state: &AppState) -> u16 {
     line_count + 2
 }
 
-pub fn overlay_height(state: &AppState) -> u16 {
+pub fn overlay_height(state: &AppState, screen_height: u16) -> u16 {
     if let Some(picker) = selection_picker(state) {
-        return picker_height(picker);
+        return picker_height(picker, screen_height);
     }
 
     command_palette_height(state)
@@ -505,9 +505,9 @@ mod tests {
         state.session.planning.review = None;
         state.ui.picker = Some(SelectionPicker::Model {
             active_tab: ModelPickerTab::NormalAgent,
-            normal_selected_index: 0,
-            planning_selected_index: 0,
-            safety_selected_index: 0,
+            normal_selected_model: "gpt-5.4-mini".into(),
+            planning_selected_model: "gpt-5.4".into(),
+            safety_selected_model: "gpt-5.4-mini".into(),
         });
         assert_eq!(input_context(&state), InputContext::Picker);
 

@@ -13,7 +13,7 @@ use tokio::sync::oneshot;
 use super::{
     AskUserController, InteractionResolveResult, LlmService, ResumeOverride, ResumeRequest,
     WriteApprovalController,
-    agent_builder::{azure_openai_base_url, mode_preamble, reasoning_params},
+    agent_builder::{mode_preamble, openai_base_url_for_model, reasoning_params},
     compaction::{
         COMPACTION_SUMMARY_PREFIX, message_contains_tool_state, rebuild_compacted_history,
     },
@@ -34,23 +34,26 @@ use crate::{
     },
     completion_request::CompletionRequestSnapshot,
     config::{
-        AppConfig, AzureConfig, KimiThinkingMode, ReasoningEffort, ReasoningSetting, SafetyConfig,
-        SubagentConfig, ToolConfig, UiConfig,
+        AppConfig, AzureConfig, KimiThinkingMode, ModelSelectionConfig, ReasoningEffort,
+        ReasoningSetting, SafetyConfig, SubagentConfig, ToolConfig, UiConfig,
     },
     features::planning::PlanningConfig,
 };
 
 fn sample_config() -> AppConfig {
     AppConfig {
-        azure: AzureConfig {
+        azure: Some(AzureConfig {
             resource_name: "demo-resource".into(),
             api_key: "secret".into(),
-            model_name: "gpt-5-mini".into(),
-            reasoning: ReasoningEffort::Minimal.into(),
             api_version: "2025-01-01-preview".into(),
+        }),
+        chutes: None,
+        model: ModelSelectionConfig {
+            model_name: "gpt-5.4-mini".into(),
+            reasoning: ReasoningEffort::Minimal.into(),
         },
         safety: SafetyConfig {
-            model_name: "gpt-5-mini".into(),
+            model_name: "gpt-5.4-mini".into(),
             reasoning: ReasoningEffort::Low.into(),
         },
         ui: UiConfig {
@@ -67,8 +70,8 @@ fn sample_config() -> AppConfig {
 #[test]
 fn reasoning_params_match_requested_effort() {
     let params = reasoning_params(
-        &sample_config().azure.model_name,
-        sample_config().azure.reasoning,
+        &sample_config().model.model_name,
+        sample_config().model.reasoning,
     );
     assert_eq!(params, json!({ "reasoning_effort": "minimal" }));
 }
@@ -83,9 +86,17 @@ fn kimi_reasoning_params_match_requested_mode() {
 }
 
 #[test]
-fn azure_openai_base_url_targets_v1_endpoint() {
+fn default_reasoning_params_emit_no_extra_fields() {
     assert_eq!(
-        azure_openai_base_url(&sample_config()),
+        reasoning_params("zai-org/GLM-5-TEE", ReasoningSetting::Default),
+        json!({})
+    );
+}
+
+#[test]
+fn openai_base_url_targets_provider_endpoint() {
+    assert_eq!(
+        openai_base_url_for_model(&sample_config(), "gpt-5.4-mini").expect("base url"),
         "https://demo-resource.openai.azure.com/openai/v1"
     );
 }

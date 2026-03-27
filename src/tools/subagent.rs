@@ -132,7 +132,7 @@ impl Tool for SpawnSubagentTool {
             ));
         }
 
-        let model_name = &self.config.azure.model_name;
+        let model_name = &self.config.model.model_name;
         if let Some(budget) = model_registry::recommended_prompt_token_budget(model_name) {
             let estimated_tokens = estimate_prompt_tokens(&args.prompt);
             if estimated_tokens > budget {
@@ -243,7 +243,8 @@ mod tests {
     use crate::{
         app::ApprovalMode,
         config::{
-            AzureConfig, ReasoningEffort, SafetyConfig, SubagentConfig, ToolConfig, UiConfig,
+            AzureConfig, ModelSelectionConfig, ReasoningEffort, SafetyConfig, SubagentConfig,
+            ToolConfig, UiConfig,
         },
         features::planning::PlanningConfig,
         stats::StatsStore,
@@ -251,12 +252,15 @@ mod tests {
 
     fn sample_config() -> AppConfig {
         AppConfig {
-            azure: AzureConfig {
+            azure: Some(AzureConfig {
                 resource_name: "demo-resource".into(),
                 api_key: "secret".into(),
+                api_version: "2025-01-01-preview".into(),
+            }),
+            chutes: None,
+            model: ModelSelectionConfig {
                 model_name: "gpt-5.4-mini".into(),
                 reasoning: ReasoningEffort::Medium.into(),
-                api_version: "2025-01-01-preview".into(),
             },
             safety: SafetyConfig {
                 model_name: "gpt-5.4-mini".into(),

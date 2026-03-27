@@ -24,7 +24,9 @@ pub(crate) use types::{
     AppConfig, KimiThinkingMode, RawReasoningSetting, ReasoningEffort, ReasoningSetting,
 };
 #[cfg(test)]
-pub(crate) use types::{AzureConfig, SafetyConfig, SubagentConfig, ToolConfig, UiConfig};
+pub(crate) use types::{
+    AzureConfig, ModelSelectionConfig, SafetyConfig, SubagentConfig, ToolConfig, UiConfig,
+};
 use updates::write_config_updates_at_path;
 
 const DEFAULT_CONFIG_PATH: &str = "config.toml";

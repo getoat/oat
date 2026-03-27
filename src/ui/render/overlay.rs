@@ -1,12 +1,14 @@
 use ratatui::{
     Frame,
     layout::Rect,
-    style::{Color, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Padding, Paragraph, Wrap},
 };
 
-use crate::app::{App, ModelPickerTab, SelectionPicker, query};
+use crate::app::{
+    App, ModelPickerEntry, ModelPickerTab, SelectionPicker, display_entries_for_tab, query,
+};
 
 use super::helpers::{
     command_palette_line, model_picker_detail, model_picker_tab_line, selection_picker_line,
@@ -60,80 +62,58 @@ fn render_selection_picker(
     let (title, lines) = match picker {
         SelectionPicker::Model {
             active_tab,
-            normal_selected_index,
-            planning_selected_index,
-            safety_selected_index,
+            normal_selected_model,
+            planning_selected_model,
+            safety_selected_model,
         } => {
             let mut lines = vec![model_picker_tab_line(*active_tab, accent)];
             let row_budget = visible_rows.saturating_sub(1);
-            match active_tab {
-                ModelPickerTab::NormalAgent => {
-                    lines.extend(
-                        crate::model_registry::models()
-                            .iter()
-                            .take(row_budget)
-                            .enumerate()
-                            .map(|(index, model)| {
-                                selection_picker_line(
-                                    index == *normal_selected_index,
-                                    model.name,
-                                    model_picker_detail(model),
-                                    accent,
-                                )
-                            }),
-                    );
-                }
-                ModelPickerTab::PlanningAgents => {
-                    lines.extend(
-                        crate::model_registry::models()
-                            .iter()
-                            .filter(|model| model.name != query::model_name(app.state()))
-                            .take(row_budget)
-                            .enumerate()
-                            .map(|(index, model)| {
-                                let planning_agent = query::planning_agents(app.state())
-                                    .iter()
-                                    .find(|agent| agent.model_name == model.name);
-                                let detail = planning_agent
-                                    .map(|agent| {
-                                        format!("selected  reasoning: {}", agent.reasoning.as_str())
-                                    })
-                                    .unwrap_or_else(|| {
-                                        "not selected  Space toggles  Enter sets reasoning".into()
-                                    });
-                                selection_picker_line(
-                                    index == *planning_selected_index,
-                                    model.name,
-                                    detail,
-                                    accent,
-                                )
-                            }),
-                    );
-                }
-                ModelPickerTab::SafetyModel => {
-                    lines.extend(
-                        crate::model_registry::models()
-                            .iter()
-                            .take(row_budget)
-                            .enumerate()
-                            .map(|(index, model)| {
-                                let detail = if query::safety_model_name(app.state()) == model.name
-                                {
+            let selected_model = match active_tab {
+                ModelPickerTab::NormalAgent => normal_selected_model.as_str(),
+                ModelPickerTab::PlanningAgents => planning_selected_model.as_str(),
+                ModelPickerTab::SafetyModel => safety_selected_model.as_str(),
+            };
+            let entries = display_entries_for_tab(*active_tab, query::model_name(app.state()));
+            for entry in visible_model_entries(&entries, row_budget, selected_model) {
+                match entry {
+                    ModelPickerEntry::ProviderHeading(provider) => {
+                        lines.push(Line::from(vec![Span::styled(
+                            provider.display_name(),
+                            Style::default()
+                                .fg(Color::DarkGray)
+                                .add_modifier(Modifier::BOLD),
+                        )]))
+                    }
+                    ModelPickerEntry::Model(model) => {
+                        let detail = match active_tab {
+                            ModelPickerTab::NormalAgent => model_picker_detail(model),
+                            ModelPickerTab::PlanningAgents => query::planning_agents(app.state())
+                                .iter()
+                                .find(|agent| agent.model_name == model.name)
+                                .map(|agent| {
+                                    format!("selected  reasoning: {}", agent.reasoning.as_str())
+                                })
+                                .unwrap_or_else(|| {
+                                    "not selected  Space toggles  Enter sets reasoning".into()
+                                }),
+                            ModelPickerTab::SafetyModel => {
+                                if query::safety_model_name(app.state()) == model.name {
                                     format!(
                                         "selected  reasoning: {}",
                                         query::safety_reasoning(app.state()).as_str()
                                     )
                                 } else {
                                     "Enter sets reasoning".into()
-                                };
-                                selection_picker_line(
-                                    index == *safety_selected_index,
-                                    model.name,
-                                    detail,
-                                    accent,
-                                )
-                            }),
-                    );
+                                }
+                            }
+                        };
+                        lines.push(selection_picker_line(
+                            model.name == selected_model,
+                            model.name,
+                            detail,
+                            accent,
+                        ));
+                    }
                 }
             }
             (" Models ", lines)
@@ -186,6 +166,44 @@ fn render_selection_picker(
         )
         .wrap(Wrap { trim: false });
     frame.render_widget(picker, area);
+}
+
+fn visible_model_entries<'a>(
+    entries: &'a [ModelPickerEntry],
+    row_budget: usize,
+    selected_model: &str,
+) -> &'a [ModelPickerEntry] {
+    if row_budget == 0 {
+        return &entries[..0];
+    }
+
+    if entries.len() <= row_budget {
+        return entries;
+    }
+
+    let selected_index = entries
+        .iter()
+        .position(
+            |entry| matches!(entry, ModelPickerEntry::Model(model) if model.name == selected_model),
+        )
+        .or_else(|| entries.iter().position(ModelPickerEntry::is_model))
+        .unwrap_or(0);
+    let provider_heading_index = entries[..=selected_index]
+        .iter()
+        .rposition(|entry| matches!(entry, ModelPickerEntry::ProviderHeading(_)))
+        .unwrap_or(0);
+
+    let mut start = if selected_index.saturating_sub(provider_heading_index) < row_budget {
+        provider_heading_index
+    } else {
+        selected_index + 1 - row_budget
+    };
+    let mut end = (start + row_budget).min(entries.len());
+    if end - start < row_budget && end == entries.len() {
+        start = end.saturating_sub(row_budget);
+    }
+    end = (start + row_budget).min(entries.len());
+    &entries[start..end]
 }
 
 #[cfg(test)]

@@ -24,27 +24,35 @@ pub(super) fn write_config_updates_at_path(
     let root = value
         .as_table_mut()
         .context("config root must be a TOML table")?;
-    let azure = root
-        .entry("azure")
+    let model = root
+        .entry("model")
         .or_insert_with(|| toml::Value::Table(Default::default()))
         .as_table_mut()
-        .context("config azure value must be a TOML table")?;
+        .context("config model value must be a TOML table")?;
     if let Some(model_name) = model_name {
-        azure.insert(
+        model.insert(
             "model_name".into(),
             toml::Value::String(model_name.to_string()),
         );
     }
     if let Some(reasoning) = reasoning {
-        azure.insert(
+        model.insert(
             "reasoning".into(),
             toml::Value::String(reasoning.as_str().to_string()),
         );
-        azure.remove("reasoning_effort");
+        model.remove("reasoning_effort");
     }
-    let current_main_model = azure
-        .get("model_name")
+    let current_main_model = root
+        .get("model")
+        .and_then(toml::Value::as_table)
+        .and_then(|model| model.get("model_name"))
         .and_then(toml::Value::as_str)
+        .or_else(|| {
+            root.get("azure")
+                .and_then(toml::Value::as_table)
+                .and_then(|azure| azure.get("model_name"))
+                .and_then(toml::Value::as_str)
+        })
         .unwrap_or_default()
         .to_string();
     if let Some(planning_agents) = planning_agents {
@@ -54,7 +62,6 @@ pub(super) fn write_config_updates_at_path(
             .map(toml::Value::try_from)
             .collect::<std::result::Result<Vec<_>, _>>()
             .context("failed to serialize planning agents")?;
-        let _ = azure;
         let planning = root
             .entry("planning")
             .or_insert_with(|| toml::Value::Table(Default::default()))

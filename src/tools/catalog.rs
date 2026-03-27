@@ -323,12 +323,15 @@ mod tests {
 
     fn sample_config() -> AppConfig {
         AppConfig {
-            azure: crate::config::AzureConfig {
+            azure: Some(crate::config::AzureConfig {
                 resource_name: "demo-resource".into(),
                 api_key: "secret".into(),
+                api_version: "2025-01-01-preview".into(),
+            }),
+            chutes: None,
+            model: crate::config::ModelSelectionConfig {
                 model_name: "gpt-5.4-mini".into(),
                 reasoning: crate::config::ReasoningEffort::Medium.into(),
-                api_version: "2025-01-01-preview".into(),
             },
             safety: crate::config::SafetyConfig {
                 model_name: "gpt-5.4-mini".into(),

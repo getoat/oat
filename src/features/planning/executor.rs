@@ -29,8 +29,8 @@ pub async fn run_planning_workflow(
     synthesize: PlanningSynthesizer,
 ) {
     let jobs = planning_jobs(
-        &config.azure.model_name,
-        config.azure.reasoning,
+        &config.model.model_name,
+        config.model.reasoning,
         &config.planning.agents,
     );
     let mut successful_plans = Vec::new();
@@ -93,8 +93,8 @@ async fn spawn_planning_subagent(
     job: PlanningJob,
 ) -> anyhow::Result<String> {
     let mut planner_config = config.clone();
-    planner_config.azure.model_name = job.model_name.clone();
-    planner_config.azure.reasoning = job.reasoning;
+    planner_config.model.model_name = job.model_name.clone();
+    planner_config.model.reasoning = job.reasoning;
     let snapshot = subagents
         .spawn(SubagentSpawnRequest {
             prompt: planner_prompt(description),

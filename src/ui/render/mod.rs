@@ -36,7 +36,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     } else {
         ops::composer::composer_height(app.state_mut()).max(3)
     };
-    let overlay_height = query::overlay_height(app.state());
+    let overlay_height = query::overlay_height(app.state(), screen.height);
     let mut constraints = vec![Constraint::Min(1)];
     if overlay_height > 0 {
         constraints.push(Constraint::Length(overlay_height));

@@ -11,15 +11,19 @@ const KIMI_K2_5_REASONING_SETTINGS: [ReasoningSetting; 2] = [
     ReasoningSetting::Kimi(KimiThinkingMode::Off),
 ];
 
+const DEFAULT_REASONING_SETTINGS: [ReasoningSetting; 1] = [ReasoningSetting::Default];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelProvider {
     AzureOpenAi,
+    ChutesAi,
 }
 
 impl ModelProvider {
     pub fn display_name(self) -> &'static str {
         match self {
             Self::AzureOpenAi => "Azure OpenAI",
+            Self::ChutesAi => "Chutes AI",
         }
     }
 }
@@ -131,7 +135,7 @@ impl ParseReasoningSettingError {
     }
 }
 
-const MODELS: [ModelInfo; 4] = [
+const MODELS: [ModelInfo; 6] = [
     ModelInfo {
         name: "gpt-5.4",
         provider: ModelProvider::AzureOpenAi,
@@ -188,6 +192,34 @@ const MODELS: [ModelInfo; 4] = [
         long_context_pricing: None,
         supported_reasoning_settings: &KIMI_K2_5_REASONING_SETTINGS,
     },
+    ModelInfo {
+        name: "zai-org/GLM-5-TEE",
+        provider: ModelProvider::ChutesAi,
+        context_length: 200_000,
+        context_length_display: Some("200K"),
+        compaction_trigger_percent_used: 90,
+        pricing: ModelPricing {
+            input_per_million_tokens: 0.0,
+            cache_read_per_million_tokens: 0.0,
+            output_per_million_tokens: 0.0,
+        },
+        long_context_pricing: None,
+        supported_reasoning_settings: &DEFAULT_REASONING_SETTINGS,
+    },
+    ModelInfo {
+        name: "MiniMaxAI/MiniMax-M2.5-TEE",
+        provider: ModelProvider::ChutesAi,
+        context_length: 200_000,
+        context_length_display: Some("200K"),
+        compaction_trigger_percent_used: 90,
+        pricing: ModelPricing {
+            input_per_million_tokens: 0.0,
+            cache_read_per_million_tokens: 0.0,
+            output_per_million_tokens: 0.0,
+        },
+        long_context_pricing: None,
+        supported_reasoning_settings: &DEFAULT_REASONING_SETTINGS,
+    },
 ];
 
 pub fn models() -> &'static [ModelInfo] {
@@ -233,11 +265,13 @@ mod tests {
 
     #[test]
     fn seeded_models_are_available() {
-        assert_eq!(models().len(), 4);
+        assert_eq!(models().len(), 6);
         assert!(find_model("gpt-5.4").is_some());
         assert!(find_model("gpt-5.4-mini").is_some());
         assert!(find_model("gpt-5.4-nano").is_some());
         assert!(find_model("kimi-k2.5").is_some());
+        assert!(find_model("zai-org/GLM-5-TEE").is_some());
+        assert!(find_model("MiniMaxAI/MiniMax-M2.5-TEE").is_some());
     }
 
     #[test]
@@ -267,6 +301,27 @@ mod tests {
         assert_eq!(
             parse_reasoning_setting_for_model("custom-model", "medium"),
             Err(ParseReasoningSettingError::UnknownModel)
+        );
+    }
+
+    #[test]
+    fn chutes_models_use_default_reasoning() {
+        let glm = find_model("zai-org/GLM-5-TEE").expect("registry model");
+        let minimax = find_model("MiniMaxAI/MiniMax-M2.5-TEE").expect("registry model");
+
+        assert_eq!(glm.provider, ModelProvider::ChutesAi);
+        assert_eq!(
+            glm.supported_reasoning_settings,
+            &DEFAULT_REASONING_SETTINGS
+        );
+        assert_eq!(minimax.provider, ModelProvider::ChutesAi);
+        assert_eq!(
+            minimax.supported_reasoning_settings,
+            &DEFAULT_REASONING_SETTINGS
+        );
+        assert_eq!(
+            parse_reasoning_setting_for_model("zai-org/GLM-5-TEE", "default"),
+            Ok(ReasoningSetting::Default)
         );
     }
 
@@ -328,11 +383,13 @@ mod tests {
         let gpt_54_mini = find_model("gpt-5.4-mini").expect("registry model");
         let gpt_54_nano = find_model("gpt-5.4-nano").expect("registry model");
         let kimi = find_model("kimi-k2.5").expect("registry model");
+        let glm = find_model("zai-org/GLM-5-TEE").expect("registry model");
 
         assert_eq!(gpt_54.recommended_prompt_token_budget(), 104_000);
         assert_eq!(gpt_54_mini.recommended_prompt_token_budget(), 104_000);
         assert_eq!(gpt_54_nano.recommended_prompt_token_budget(), 104_000);
         assert_eq!(kimi.recommended_prompt_token_budget(), 99_072);
+        assert_eq!(glm.recommended_prompt_token_budget(), 68_000);
     }
 
     #[test]

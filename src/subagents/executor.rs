@@ -23,7 +23,7 @@ impl SubagentManager {
             request
                 .model_name_override
                 .clone()
-                .unwrap_or_else(|| request.config.azure.model_name.clone()),
+                .unwrap_or_else(|| request.config.model.model_name.clone()),
         )?;
 
         let _ = self.inner.ui_tx.send(SubagentUiEvent::Spawned {
@@ -77,7 +77,7 @@ impl SubagentManager {
             request
                 .model_name_override
                 .clone()
-                .unwrap_or_else(|| request.config.azure.model_name.clone()),
+                .unwrap_or_else(|| request.config.model.model_name.clone()),
         );
         let subagent_id = id.clone();
         let callback_manager = self.clone();
@@ -142,7 +142,7 @@ impl SubagentManager {
                 model_name: request
                     .model_name_override
                     .clone()
-                    .unwrap_or_else(|| request.config.azure.model_name.clone()),
+                    .unwrap_or_else(|| request.config.model.model_name.clone()),
                 access_mode: request.access_mode.label().to_ascii_lowercase(),
                 prompt: request.prompt.clone(),
                 raw_error: failure.raw_error,

@@ -19,6 +19,6 @@ pub use session::{
 pub use shell::App;
 pub use state::AppState;
 pub use ui::{
-    ModelPickerTab, PickerSelection, ReasoningPickerTarget, SelectionPicker, ShellApprovalEditMode,
-    UiState,
+    ModelPickerEntry, ModelPickerTab, PickerSelection, ReasoningPickerTarget, SelectionPicker,
+    ShellApprovalEditMode, UiState, display_entries_for_tab, selectable_models_for_tab,
 };

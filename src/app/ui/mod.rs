@@ -14,5 +14,8 @@ pub use composer::{
     split_command_query, textarea_input,
 };
 pub use history::{HistoryRenderCache, HistoryViewState};
-pub use picker::{ModelPickerTab, PickerSelection, ReasoningPickerTarget, SelectionPicker};
+pub use picker::{
+    ModelPickerEntry, ModelPickerTab, PickerSelection, ReasoningPickerTarget, SelectionPicker,
+    display_entries_for_tab, selectable_models_for_tab,
+};
 pub use state::UiState;

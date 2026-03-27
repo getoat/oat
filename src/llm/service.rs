@@ -22,7 +22,7 @@ use crate::{
 use super::{
     CompletionCapture, EventCallback, HistoryCompactionResult, InteractionResolveResult,
     PromptRunResult, ResumeOverride, StreamEvent,
-    agent_builder::{azure_openai_base_url, build_agent, mode_preamble, run_plain_prompt},
+    agent_builder::{build_agent, mode_preamble, openai_base_url_for_model, run_plain_prompt},
     compaction::{
         COMPACTION_NOTICE, COMPACTION_PROMPT, compaction_model_for_pre_turn,
         drop_oldest_compaction_source_message, is_retryable_compaction_error,
@@ -64,11 +64,16 @@ impl LlmService {
         subagents: Option<SubagentManager>,
     ) -> Result<Self> {
         let workspace_root = env::current_dir().context("failed to determine workspace root")?;
+        let model_name = context
+            .model_name_override
+            .clone()
+            .unwrap_or_else(|| config.model.model_name.clone());
+        let provider_config = config.provider_config_for_model(&model_name)?;
         let client = openai::CompletionsClient::builder()
-            .api_key(&config.azure.api_key)
-            .base_url(azure_openai_base_url(config))
+            .api_key(provider_config.api_key())
+            .base_url(openai_base_url_for_model(config, &model_name)?)
             .build()
-            .context("failed to build OpenAI-compatible Azure client")?;
+            .context("failed to build OpenAI-compatible client")?;
 
         let preamble = mode_preamble(&context);
         let tool_context = ToolContext {
@@ -81,24 +86,32 @@ impl LlmService {
         };
         let tool_names = tool_names_for_context(&tool_context);
         let approval_mode = approvals.mode();
-        let model_name = context
-            .model_name_override
-            .clone()
-            .unwrap_or_else(|| config.azure.model_name.clone());
         let agent = build_agent(
             &client,
             &model_name,
             &preamble,
-            config.azure.reasoning,
+            config.model.reasoning,
             Some(tool_context),
         );
-        let safety = SafetyClassifier::from_client(&client, config);
+        let safety_client = {
+            let safety_provider_config =
+                config.provider_config_for_model(&config.safety.model_name)?;
+            openai::CompletionsClient::builder()
+                .api_key(safety_provider_config.api_key())
+                .base_url(openai_base_url_for_model(
+                    config,
+                    &config.safety.model_name,
+                )?)
+                .build()
+                .context("failed to build safety OpenAI-compatible client")?
+        };
+        let safety = SafetyClassifier::from_client(&safety_client, config);
 
         Ok(Self {
             agent,
             client,
             model_name,
-            reasoning: config.azure.reasoning,
+            reasoning: config.model.reasoning,
             access_mode: context.access_mode,
             role: context.role,
             approvals,
