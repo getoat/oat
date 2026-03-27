@@ -1,4 +1,10 @@
-use std::{env, sync::Arc};
+use std::{
+    env,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
 use anyhow::{Context, Result};
 use rig::{completion::Message as RigMessage, providers::openai};
@@ -39,6 +45,7 @@ use super::{
 };
 
 const MAX_TOOL_STEPS_PER_TURN: usize = 64;
+static NEXT_INTERACTION_SCOPE_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone)]
 enum AgentVariant {
@@ -142,6 +149,7 @@ pub struct LlmService {
     pub(crate) tool_names: Vec<String>,
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) preamble: String,
+    interaction_scope: String,
 }
 
 impl LlmService {
@@ -149,6 +157,25 @@ impl LlmService {
         config: &AppConfig,
         context: AgentContext,
         approvals: WriteApprovalController,
+        ask_user: Option<AskUserController>,
+        subagents: Option<SubagentManager>,
+    ) -> Result<Self> {
+        let shell_approvals = ShellApprovalController::new(approvals.mode());
+        Self::from_config_with_controllers(
+            config,
+            context,
+            approvals,
+            shell_approvals,
+            ask_user,
+            subagents,
+        )
+    }
+
+    pub fn from_config_with_controllers(
+        config: &AppConfig,
+        context: AgentContext,
+        approvals: WriteApprovalController,
+        shell_approvals: ShellApprovalController,
         ask_user: Option<AskUserController>,
         subagents: Option<SubagentManager>,
     ) -> Result<Self> {
@@ -163,12 +190,12 @@ impl LlmService {
             root: workspace_root,
             agent: context.clone(),
             config: config.clone(),
-            approval_mode: approvals.mode(),
+            write_approvals: approvals.clone(),
+            shell_approvals: shell_approvals.clone(),
             ask_user_available: ask_user.is_some(),
             subagents,
         };
         let tool_names = tool_names_for_context(&tool_context);
-        let approval_mode = approvals.mode();
         let (client, agent) = build_client_and_agent(
             config,
             &model_name,
@@ -187,16 +214,25 @@ impl LlmService {
             access_mode: context.access_mode,
             role: context.role,
             approvals,
-            shell_approvals: ShellApprovalController::new(approval_mode),
+            shell_approvals,
             safety,
             ask_user,
             tool_names,
             preamble,
+            interaction_scope: next_interaction_scope_id(),
         })
     }
 
     pub fn approvals(&self) -> WriteApprovalController {
         self.approvals.clone()
+    }
+
+    pub fn shell_approvals(&self) -> ShellApprovalController {
+        self.shell_approvals.clone()
+    }
+
+    pub(crate) fn interaction_scope(&self) -> &str {
+        &self.interaction_scope
     }
 
     pub fn ask_user_controller(&self) -> Option<AskUserController> {
@@ -510,4 +546,11 @@ impl LlmService {
             });
         }
     }
+}
+
+fn next_interaction_scope_id() -> String {
+    format!(
+        "svc-{}",
+        NEXT_INTERACTION_SCOPE_ID.fetch_add(1, Ordering::Relaxed)
+    )
 }

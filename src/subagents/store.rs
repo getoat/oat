@@ -41,6 +41,8 @@ pub(super) struct SubagentRecord {
     pub(super) error: Option<String>,
     pub(super) failure_log_path: Option<String>,
     pub(super) last_activity_at: Instant,
+    pub(super) waiting_for_approval: bool,
+    pub(super) pending_approval_request_id: Option<String>,
 }
 
 impl SubagentManager {
@@ -89,6 +91,8 @@ impl SubagentManager {
                     record.error = None;
                     record.failure_log_path = None;
                     record.last_activity_at = Instant::now();
+                    record.waiting_for_approval = false;
+                    record.pending_approval_request_id = None;
                 }
             }
 
@@ -165,6 +169,8 @@ impl SubagentManager {
                 error: None,
                 failure_log_path: None,
                 last_activity_at: now,
+                waiting_for_approval: false,
+                pending_approval_request_id: None,
             },
         );
         self.bump_generation(&mut state);
@@ -188,6 +194,8 @@ impl SubagentManager {
             && record.status == SubagentStatus::Running
         {
             record.last_activity_at = Instant::now();
+            record.waiting_for_approval = false;
+            record.pending_approval_request_id = None;
             self.bump_generation(&mut state);
             return true;
         }
@@ -202,6 +210,8 @@ impl SubagentManager {
         {
             record.last_activity_at = Instant::now();
             record.latest_tool_name = Some(tool_name.clone());
+            record.waiting_for_approval = false;
+            record.pending_approval_request_id = None;
             self.bump_generation(&mut state);
             drop(state);
             let _ = self.inner.ui_tx.send(SubagentUiEvent::Updated {
@@ -212,6 +222,51 @@ impl SubagentManager {
         }
 
         false
+    }
+
+    pub(super) fn record_approval_wait(
+        &self,
+        id: &str,
+        request_id: String,
+        tool_name: String,
+    ) -> bool {
+        let mut state = self.inner.state.lock().expect("subagent state lock");
+        if let Some(record) = state.records.get_mut(id)
+            && record.status == SubagentStatus::Running
+        {
+            record.last_activity_at = Instant::now();
+            record.latest_tool_name = Some(tool_name.clone());
+            record.waiting_for_approval = true;
+            record.pending_approval_request_id = Some(request_id);
+            self.bump_generation(&mut state);
+            drop(state);
+            let _ = self.inner.ui_tx.send(SubagentUiEvent::Updated {
+                id: id.to_string(),
+                latest_tool_name: Some(tool_name),
+            });
+            return true;
+        }
+
+        false
+    }
+
+    pub(crate) fn clear_waiting_for_approval(&self, request_id: &str) -> bool {
+        let mut state = self.inner.state.lock().expect("subagent state lock");
+        let mut cleared = false;
+        for record in state.records.values_mut() {
+            if record.status == SubagentStatus::Running
+                && record.pending_approval_request_id.as_deref() == Some(request_id)
+            {
+                record.last_activity_at = Instant::now();
+                record.waiting_for_approval = false;
+                record.pending_approval_request_id = None;
+                cleared = true;
+            }
+        }
+        if cleared {
+            self.bump_generation(&mut state);
+        }
+        cleared
     }
 
     pub(super) fn mark_completed(&self, id: &str, output: String) {
@@ -225,6 +280,8 @@ impl SubagentManager {
             record.error = None;
             record.failure_log_path = None;
             record.last_activity_at = Instant::now();
+            record.waiting_for_approval = false;
+            record.pending_approval_request_id = None;
             state.tasks.remove(id);
             self.bump_generation(&mut state);
             let _ = self
@@ -246,6 +303,8 @@ impl SubagentManager {
             record.error = Some(error.clone());
             record.failure_log_path = failure_log_path.clone();
             record.last_activity_at = Instant::now();
+            record.waiting_for_approval = false;
+            record.pending_approval_request_id = None;
             state.tasks.remove(id);
             self.bump_generation(&mut state);
             let _ = self.inner.ui_tx.send(SubagentUiEvent::Failed {
@@ -280,6 +339,8 @@ impl SubagentManager {
                 error: None,
                 failure_log_path: None,
                 last_activity_at: Instant::now() - last_activity_ago,
+                waiting_for_approval: false,
+                pending_approval_request_id: None,
             },
         );
         self.bump_generation(&mut state);
@@ -303,5 +364,20 @@ impl SubagentManager {
     #[cfg(test)]
     pub(crate) fn mark_activity_for_test(&self, id: &str) {
         self.mark_activity(id);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn record_approval_wait_for_test(
+        &self,
+        id: &str,
+        request_id: &str,
+        tool_name: &str,
+    ) {
+        self.record_approval_wait(id, request_id.to_string(), tool_name.to_string());
+    }
+
+    #[cfg(test)]
+    pub(crate) fn clear_waiting_for_approval_for_test(&self, request_id: &str) {
+        self.clear_waiting_for_approval(request_id);
     }
 }

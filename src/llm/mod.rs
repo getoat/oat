@@ -16,7 +16,7 @@ pub(crate) type OpenAiResponsesAgent = rig::agent::Agent<
 >;
 
 pub(crate) use crate::app::StreamEvent;
-pub(crate) use hooks::{AskUserController, WriteApprovalController};
+pub(crate) use hooks::{AskUserController, ShellApprovalController, WriteApprovalController};
 pub(crate) use service::LlmService;
 pub(crate) use types::{
     CompletionCapture, EventCallback, HistoryCompactionResult, InteractionResolveResult,

@@ -6,7 +6,7 @@ use tokio::sync::oneshot;
 use crate::{
     agent::AgentContext,
     app::StreamEvent,
-    llm::{CompletionCapture, LlmService, PromptRunResult, WriteApprovalController},
+    llm::{CompletionCapture, LlmService, PromptRunResult},
 };
 
 use super::{
@@ -62,10 +62,11 @@ impl SubagentManager {
     ) -> std::result::Result<String, SubagentExecutionFailure> {
         let context =
             AgentContext::subagent(request.access_mode, request.model_name_override.clone());
-        let service = LlmService::from_config(
+        let service = LlmService::from_config_with_controllers(
             &request.config,
             context,
-            WriteApprovalController::new(request.approval_mode),
+            request.write_approvals.clone(),
+            request.shell_approvals.clone(),
             None,
             Some(self.clone()),
         )

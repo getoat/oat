@@ -11,7 +11,7 @@ use crate::{
     config::AppConfig,
     features::planning::run_planning_workflow,
     features::planning::sanitize_planning_agents,
-    llm::{LlmService, WriteApprovalController, history_from_rig, history_into_rig},
+    llm::{LlmService, history_from_rig, history_into_rig},
     model_registry::{self, ModelProvider},
     stats::StatsStore,
     subagents::SubagentManager,
@@ -237,6 +237,8 @@ impl EffectExecutor<'_> {
                 let config = self.config.clone();
                 let subagents = self.subagents.clone();
                 let ask_user = self.llm.ask_user_controller();
+                let write_approvals = self.llm.approvals();
+                let shell_approvals = self.llm.shell_approvals();
                 let stream_tx = self.stream_tx.clone();
                 let stats = self.stats.clone();
                 let task = self.runtime.spawn(async move {
@@ -252,16 +254,21 @@ impl EffectExecutor<'_> {
                     let synth_config = config.clone();
                     let synth_stream_tx = stream_tx.clone();
                     let synth_stats = stats.clone();
+                    let workflow_write_approvals = write_approvals.clone();
+                    let workflow_shell_approvals = shell_approvals.clone();
                     let synthesize = Arc::new(move |prompt, history, history_model_name| {
                         let config = synth_config.clone();
                         let stream_tx = synth_stream_tx.clone();
                         let stats = synth_stats.clone();
                         let ask_user = ask_user.clone();
+                        let write_approvals = write_approvals.clone();
+                        let shell_approvals = shell_approvals.clone();
                         Box::pin(async move {
-                            let llm = LlmService::from_config(
+                            let llm = LlmService::from_config_with_controllers(
                                 &config,
                                 AgentContext::main(app::AccessMode::ReadOnly),
-                                WriteApprovalController::new(app::ApprovalMode::Manual),
+                                write_approvals,
+                                shell_approvals,
                                 ask_user,
                                 None,
                             )
@@ -295,6 +302,8 @@ impl EffectExecutor<'_> {
                         history_model_name,
                         config,
                         subagents,
+                        workflow_write_approvals,
+                        workflow_shell_approvals,
                         on_finalization_started,
                         on_failure,
                         synthesize,
@@ -312,27 +321,33 @@ impl EffectExecutor<'_> {
             Effect::ResolveWriteApproval {
                 request_id,
                 decision,
-            } => self.reply_driver.resolve_write_approval(
-                self.runtime,
-                self.app,
-                self.stats,
-                self.llm,
-                self.stream_tx.clone(),
-                request_id,
-                decision,
-            ),
+            } => {
+                self.subagents.clear_waiting_for_approval(&request_id);
+                self.reply_driver.resolve_write_approval(
+                    self.runtime,
+                    self.app,
+                    self.stats,
+                    self.llm,
+                    self.stream_tx.clone(),
+                    request_id,
+                    decision,
+                )
+            }
             Effect::ResolveShellApproval {
                 request_id,
                 decision,
-            } => self.reply_driver.resolve_shell_approval(
-                self.runtime,
-                self.app,
-                self.stats,
-                self.llm,
-                self.stream_tx.clone(),
-                request_id,
-                decision,
-            ),
+            } => {
+                self.subagents.clear_waiting_for_approval(&request_id);
+                self.reply_driver.resolve_shell_approval(
+                    self.runtime,
+                    self.app,
+                    self.stats,
+                    self.llm,
+                    self.stream_tx.clone(),
+                    request_id,
+                    decision,
+                )
+            }
             Effect::ResolveAskUser {
                 request_id,
                 response,
@@ -373,10 +388,11 @@ impl EffectExecutor<'_> {
 
     fn rebuild_llm(&self, config: &AppConfig, access_mode: app::AccessMode) -> Result<LlmService> {
         let _guard = self.runtime.enter();
-        LlmService::from_config(
+        LlmService::from_config_with_controllers(
             config,
             AgentContext::main(access_mode),
             self.llm.approvals(),
+            self.llm.shell_approvals(),
             self.llm.ask_user_controller(),
             Some(self.subagents.clone()),
         )

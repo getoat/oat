@@ -5,8 +5,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::{
-    app::{AccessMode, ApprovalMode},
+    app::AccessMode,
     config::AppConfig,
+    llm::{ShellApprovalController, WriteApprovalController},
     model_registry,
     subagents::{SubagentManager, SubagentSpawnRequest, estimate_prompt_tokens},
 };
@@ -22,7 +23,8 @@ pub struct SpawnSubagentTool {
     manager: SubagentManager,
     config: AppConfig,
     main_access_mode: AccessMode,
-    approval_mode: ApprovalMode,
+    write_approvals: WriteApprovalController,
+    shell_approvals: ShellApprovalController,
 }
 
 #[derive(Clone)]
@@ -73,13 +75,15 @@ impl SpawnSubagentTool {
         manager: SubagentManager,
         config: AppConfig,
         main_access_mode: AccessMode,
-        approval_mode: ApprovalMode,
+        write_approvals: WriteApprovalController,
+        shell_approvals: ShellApprovalController,
     ) -> Self {
         Self {
             manager,
             config,
             main_access_mode,
-            approval_mode,
+            write_approvals,
+            shell_approvals,
         }
     }
 }
@@ -150,7 +154,8 @@ impl Tool for SpawnSubagentTool {
                 activity_kind: crate::subagents::SubagentActivityKind::General,
                 model_name_override: None,
                 config: self.config.clone(),
-                approval_mode: self.approval_mode,
+                write_approvals: self.write_approvals.clone(),
+                shell_approvals: self.shell_approvals.clone(),
             })
             .await
             .map_err(|error| ToolExecError::new(error.to_string()))?;
@@ -241,7 +246,6 @@ mod tests {
 
     use super::*;
     use crate::{
-        app::ApprovalMode,
         config::{
             AzureConfig, ModelSelectionConfig, ReasoningEffort, SafetyConfig, SubagentConfig,
             ToolConfig, UiConfig,
@@ -286,7 +290,8 @@ mod tests {
             manager(),
             sample_config(),
             AccessMode::ReadOnly,
-            ApprovalMode::Manual,
+            WriteApprovalController::default(),
+            ShellApprovalController::default(),
         );
 
         let error = tool

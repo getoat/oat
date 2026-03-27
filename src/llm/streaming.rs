@@ -66,6 +66,7 @@ where
         reply_id,
         emit: emit.clone(),
         approvals: service.approvals.clone(),
+        request_id_prefix: service.interaction_scope().to_string(),
         capture: capture.clone(),
         resume: resume.clone(),
     };
@@ -74,6 +75,7 @@ where
         emit: emit.clone(),
         access_mode: service.access_mode,
         approvals: service.shell_approvals.clone(),
+        request_id_prefix: service.interaction_scope().to_string(),
         safety: service.safety.clone(),
         capture: capture.clone(),
         resume: resume.clone(),

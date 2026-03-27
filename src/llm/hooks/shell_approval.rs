@@ -24,6 +24,7 @@ use super::super::{
     resume::ResumeOverrideController,
     safety::{SafetyClassifier, shell_pattern_matches},
 };
+use super::write_approval::scoped_request_id;
 
 #[derive(Clone)]
 pub struct ShellApprovalController {
@@ -68,6 +69,7 @@ pub(crate) struct ShellApprovalHook {
     pub(crate) emit: EventCallback,
     pub(crate) access_mode: AccessMode,
     pub(crate) approvals: ShellApprovalController,
+    pub(crate) request_id_prefix: String,
     pub(crate) safety: SafetyClassifier,
     pub(crate) capture: Option<CompletionCapture>,
     pub(crate) resume: Option<ResumeOverrideController>,
@@ -315,7 +317,7 @@ where
             .request_approval(
                 self.reply_id,
                 self.access_mode,
-                internal_call_id,
+                &scoped_request_id(&self.request_id_prefix, internal_call_id),
                 &args,
                 &self.emit,
                 &self.safety,

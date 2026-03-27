@@ -5,8 +5,9 @@ use rig::tool::ToolDyn;
 
 use crate::{
     agent::{AgentContext, AgentRole},
-    app::{AccessMode, ApprovalMode},
+    app::AccessMode,
     config::AppConfig,
+    llm::{ShellApprovalController, WriteApprovalController},
     subagents::SubagentManager,
     tool_policy::{SearchPathPolicy, ToolOutputPolicy},
 };
@@ -23,7 +24,8 @@ pub struct ToolContext {
     pub root: PathBuf,
     pub agent: AgentContext,
     pub config: AppConfig,
-    pub approval_mode: ApprovalMode,
+    pub write_approvals: WriteApprovalController,
+    pub shell_approvals: ShellApprovalController,
     pub ask_user_available: bool,
     pub subagents: Option<SubagentManager>,
 }
@@ -99,7 +101,8 @@ const TOOL_DESCRIPTORS: [ToolDescriptor; 13] = [
                     .expect("main agent subagent tools require a manager"),
                 context.config,
                 context.agent.access_mode,
-                context.approval_mode,
+                context.write_approvals,
+                context.shell_approvals,
             ))
         },
     ),
@@ -216,7 +219,8 @@ mod tests {
             root: PathBuf::from("."),
             agent: AgentContext::main(AccessMode::ReadOnly),
             config: sample_config(),
-            approval_mode: ApprovalMode::Manual,
+            write_approvals: WriteApprovalController::default(),
+            shell_approvals: ShellApprovalController::default(),
             ask_user_available: true,
             subagents: Some(test_subagent_manager()),
         });
@@ -244,7 +248,8 @@ mod tests {
             root: PathBuf::from("."),
             agent: AgentContext::main(AccessMode::ReadWrite),
             config: sample_config(),
-            approval_mode: ApprovalMode::Manual,
+            write_approvals: WriteApprovalController::default(),
+            shell_approvals: ShellApprovalController::default(),
             ask_user_available: true,
             subagents: Some(test_subagent_manager()),
         });
@@ -264,7 +269,8 @@ mod tests {
             root: PathBuf::from("."),
             agent: AgentContext::main(AccessMode::ReadOnly),
             config: sample_config(),
-            approval_mode: ApprovalMode::Manual,
+            write_approvals: WriteApprovalController::default(),
+            shell_approvals: ShellApprovalController::default(),
             ask_user_available: true,
             subagents: Some(test_subagent_manager()),
         }) {
@@ -286,7 +292,8 @@ mod tests {
             root: PathBuf::from("."),
             agent: AgentContext::subagent(AccessMode::ReadOnly, None),
             config: sample_config(),
-            approval_mode: ApprovalMode::Manual,
+            write_approvals: WriteApprovalController::default(),
+            shell_approvals: ShellApprovalController::default(),
             ask_user_available: true,
             subagents: Some(test_subagent_manager()),
         });
@@ -303,7 +310,8 @@ mod tests {
             root: PathBuf::from("."),
             agent: AgentContext::main(AccessMode::ReadOnly),
             config: sample_config(),
-            approval_mode: ApprovalMode::Manual,
+            write_approvals: WriteApprovalController::default(),
+            shell_approvals: ShellApprovalController::default(),
             ask_user_available: false,
             subagents: None,
         });

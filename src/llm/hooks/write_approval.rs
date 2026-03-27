@@ -43,6 +43,7 @@ pub(crate) struct WriteApprovalHook {
     pub(crate) reply_id: u64,
     pub(crate) emit: EventCallback,
     pub(crate) approvals: WriteApprovalController,
+    pub(crate) request_id_prefix: String,
     pub(crate) capture: Option<CompletionCapture>,
     pub(crate) resume: Option<ResumeOverrideController>,
 }
@@ -195,6 +196,10 @@ impl WriteApprovalController {
     }
 }
 
+pub(crate) fn scoped_request_id(prefix: &str, internal_call_id: &str) -> String {
+    format!("{prefix}:{internal_call_id}")
+}
+
 impl<M> PromptHook<M> for WriteApprovalHook
 where
     M: CompletionModel,
@@ -214,12 +219,22 @@ where
             .request_approval(
                 self.reply_id,
                 tool_name,
-                internal_call_id,
+                &scoped_request_id(&self.request_id_prefix, internal_call_id),
                 args,
                 &self.emit,
                 self.capture.as_ref().and_then(CompletionCapture::snapshot),
                 self.resume.as_ref(),
             )
             .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scoped_request_id;
+
+    #[test]
+    fn scoped_request_id_prefixes_internal_call_ids() {
+        assert_eq!(scoped_request_id("svc-7", "call-3"), "svc-7:call-3");
     }
 }

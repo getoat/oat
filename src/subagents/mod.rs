@@ -9,8 +9,9 @@ use std::sync::Arc;
 use serde::Serialize;
 
 use crate::{
-    app::{AccessMode, ApprovalMode, CommandRisk},
+    app::{AccessMode, CommandRisk},
     config::AppConfig,
+    llm::{ShellApprovalController, WriteApprovalController},
     token_counting::count_text_tokens,
 };
 pub use failures::normalize_subagent_failure;
@@ -87,7 +88,8 @@ pub struct SubagentSpawnRequest {
     pub activity_kind: SubagentActivityKind,
     pub model_name_override: Option<String>,
     pub config: AppConfig,
-    pub approval_mode: ApprovalMode,
+    pub write_approvals: WriteApprovalController,
+    pub shell_approvals: ShellApprovalController,
 }
 
 #[derive(Clone, Debug, Serialize)]

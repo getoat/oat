@@ -23,7 +23,7 @@ impl SubagentManager {
                 tool_name,
                 arguments,
             } => {
-                if self.record_tool_activity(id, tool_name.clone()) {
+                if self.record_approval_wait(id, request_id.clone(), tool_name.clone()) {
                     let _ = self
                         .inner
                         .ui_tx
@@ -43,7 +43,7 @@ impl SubagentManager {
                 working_directory,
                 reason,
             } => {
-                if self.record_tool_activity(id, "RunShellScript".into()) {
+                if self.record_approval_wait(id, request_id.clone(), "RunShellScript".into()) {
                     let _ = self
                         .inner
                         .ui_tx

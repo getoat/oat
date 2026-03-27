@@ -1,8 +1,8 @@
 use std::{future::Future, pin::Pin, sync::Arc};
 
 use crate::{
-    app::ApprovalMode,
     config::AppConfig,
+    llm::{ShellApprovalController, WriteApprovalController},
     subagents::{SubagentActivityKind, SubagentManager, SubagentSpawnRequest, SubagentStatus},
 };
 
@@ -24,6 +24,8 @@ pub async fn run_planning_workflow(
     history_model_name: Option<String>,
     config: AppConfig,
     subagents: SubagentManager,
+    write_approvals: WriteApprovalController,
+    shell_approvals: ShellApprovalController,
     on_finalization_started: PlanningFinalizationHandler,
     on_failure: PlanningFailureHandler,
     synthesize: PlanningSynthesizer,
@@ -37,9 +39,16 @@ pub async fn run_planning_workflow(
     let mut failed_models = Vec::new();
 
     for batch in jobs.chunks(config.subagents.max_concurrent.max(1)) {
-        let batch_ids =
-            spawn_planning_batch(&subagents, &config, &description, batch, &mut failed_models)
-                .await;
+        let batch_ids = spawn_planning_batch(
+            &subagents,
+            &config,
+            &description,
+            batch,
+            write_approvals.clone(),
+            shell_approvals.clone(),
+            &mut failed_models,
+        )
+        .await;
         let (successful, failed) = collect_planning_batch_results(&subagents, batch_ids).await;
         successful_plans.extend(successful);
         failed_models.extend(failed);
@@ -72,12 +81,23 @@ async fn spawn_planning_batch(
     config: &AppConfig,
     description: &str,
     batch: &[PlanningJob],
+    write_approvals: WriteApprovalController,
+    shell_approvals: ShellApprovalController,
     failed_models: &mut Vec<String>,
 ) -> Vec<(PlanningJob, String)> {
     let mut spawned = Vec::new();
 
     for job in batch {
-        match spawn_planning_subagent(subagents, config, description, job.clone()).await {
+        match spawn_planning_subagent(
+            subagents,
+            config,
+            description,
+            job.clone(),
+            write_approvals.clone(),
+            shell_approvals.clone(),
+        )
+        .await
+        {
             Ok(id) => spawned.push((job.clone(), id)),
             Err(_) => failed_models.push(job.model_name.clone()),
         }
@@ -91,6 +111,8 @@ async fn spawn_planning_subagent(
     config: &AppConfig,
     description: &str,
     job: PlanningJob,
+    write_approvals: WriteApprovalController,
+    shell_approvals: ShellApprovalController,
 ) -> anyhow::Result<String> {
     let mut planner_config = config.clone();
     planner_config.model.model_name = job.model_name.clone();
@@ -104,7 +126,8 @@ async fn spawn_planning_subagent(
             },
             model_name_override: Some(job.model_name.clone()),
             config: planner_config,
-            approval_mode: ApprovalMode::Manual,
+            write_approvals,
+            shell_approvals,
         })
         .await?;
 

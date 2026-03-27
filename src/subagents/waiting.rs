@@ -11,6 +11,7 @@ pub(crate) struct WaitStateSnapshot {
     pub(crate) cancelled_id: Option<String>,
     pub(crate) inactive_id: Option<String>,
     pub(crate) deadline: Option<Instant>,
+    pub(crate) has_running: bool,
 }
 
 impl SubagentManager {
@@ -35,20 +36,24 @@ impl SubagentManager {
             if snapshot.is_terminal() {
                 return Ok(snapshot.into_result());
             }
-
-            let deadline = snapshot.deadline.expect("deadline for running subagents");
-            tokio::select! {
-                changed = rx.changed() => {
-                    if changed.is_err() {
-                        return Ok(self.wait_state_snapshot(ids, inactivity_timeout)?.into_result());
+            if let Some(deadline) = snapshot.deadline {
+                tokio::select! {
+                    changed = rx.changed() => {
+                        if changed.is_err() {
+                            return Ok(self.wait_state_snapshot(ids, inactivity_timeout)?.into_result());
+                        }
+                    }
+                    _ = tokio::time::sleep_until(deadline) => {
+                        let timed_out = self.wait_state_snapshot(ids, inactivity_timeout)?;
+                        if let Some(inactive_id) = timed_out.inactive_id.clone() {
+                            return Ok(timed_out.into_result_with_inactive(inactive_id));
+                        }
                     }
                 }
-                _ = tokio::time::sleep_until(deadline) => {
-                    let timed_out = self.wait_state_snapshot(ids, inactivity_timeout)?;
-                    if let Some(inactive_id) = timed_out.inactive_id.clone() {
-                        return Ok(timed_out.into_result_with_inactive(inactive_id));
-                    }
-                }
+            } else if rx.changed().await.is_err() {
+                return Ok(self
+                    .wait_state_snapshot(ids, inactivity_timeout)?
+                    .into_result());
             }
         }
     }
@@ -74,20 +79,24 @@ impl SubagentManager {
             if snapshot.all_terminal() {
                 return Ok(snapshot.into_result());
             }
-
-            let deadline = snapshot.deadline.expect("deadline for running subagents");
-            tokio::select! {
-                changed = rx.changed() => {
-                    if changed.is_err() {
-                        return Ok(self.wait_state_snapshot(ids, inactivity_timeout)?.into_result());
+            if let Some(deadline) = snapshot.deadline {
+                tokio::select! {
+                    changed = rx.changed() => {
+                        if changed.is_err() {
+                            return Ok(self.wait_state_snapshot(ids, inactivity_timeout)?.into_result());
+                        }
+                    }
+                    _ = tokio::time::sleep_until(deadline) => {
+                        let timed_out = self.wait_state_snapshot(ids, inactivity_timeout)?;
+                        if let Some(inactive_id) = timed_out.inactive_id.clone() {
+                            return Ok(timed_out.into_result_with_inactive(inactive_id));
+                        }
                     }
                 }
-                _ = tokio::time::sleep_until(deadline) => {
-                    let timed_out = self.wait_state_snapshot(ids, inactivity_timeout)?;
-                    if let Some(inactive_id) = timed_out.inactive_id.clone() {
-                        return Ok(timed_out.into_result_with_inactive(inactive_id));
-                    }
-                }
+            } else if rx.changed().await.is_err() {
+                return Ok(self
+                    .wait_state_snapshot(ids, inactivity_timeout)?
+                    .into_result());
             }
         }
     }
@@ -105,6 +114,7 @@ impl SubagentManager {
         let mut cancelled_id = None;
         let mut inactive_id = None;
         let mut deadline = None;
+        let mut has_running = false;
 
         for id in ids {
             let record = state
@@ -123,14 +133,17 @@ impl SubagentManager {
                     cancelled_id = Some(record.id.clone());
                 }
                 SubagentStatus::Running => {
-                    let record_deadline = record.last_activity_at + inactivity_timeout;
-                    if record_deadline <= now && inactive_id.is_none() {
-                        inactive_id = Some(record.id.clone());
+                    has_running = true;
+                    if !record.waiting_for_approval {
+                        let record_deadline = record.last_activity_at + inactivity_timeout;
+                        if record_deadline <= now && inactive_id.is_none() {
+                            inactive_id = Some(record.id.clone());
+                        }
+                        deadline = Some(match deadline {
+                            Some(current) if current <= record_deadline => current,
+                            _ => record_deadline,
+                        });
                     }
-                    deadline = Some(match deadline {
-                        Some(current) if current <= record_deadline => current,
-                        _ => record_deadline,
-                    });
                 }
                 _ => {}
             }
@@ -144,6 +157,7 @@ impl SubagentManager {
             cancelled_id,
             inactive_id,
             deadline,
+            has_running,
         })
     }
 }
@@ -154,7 +168,7 @@ impl WaitStateSnapshot {
     }
 
     pub(crate) fn all_terminal(&self) -> bool {
-        self.deadline.is_none() && self.inactive_id.is_none()
+        !self.has_running && self.inactive_id.is_none()
     }
 
     pub(crate) fn into_result(self) -> WaitResult {

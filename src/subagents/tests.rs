@@ -86,6 +86,32 @@ async fn wait_resets_timeout_on_activity() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn wait_pauses_timeout_while_subagent_is_waiting_for_approval() {
+    let (manager, _rx) = manager(4);
+    manager.register_running_for_test("subagent-1", Duration::from_secs(0));
+    manager.record_approval_wait_for_test("subagent-1", "req-1", "RunShellScript");
+
+    let wait = tokio::spawn({
+        let manager = manager.clone();
+        async move {
+            manager
+                .wait(&["subagent-1".into()], Some(Duration::from_millis(100)))
+                .await
+        }
+    });
+
+    advance(Duration::from_secs(1)).await;
+    assert!(!wait.is_finished());
+
+    manager.clear_waiting_for_approval_for_test("req-1");
+    advance(Duration::from_millis(101)).await;
+    let result = wait.await.expect("join").expect("wait succeeds");
+
+    assert_eq!(result.inactive_id.as_deref(), Some("subagent-1"));
+    assert!(result.timed_out_on_inactivity);
+}
+
+#[tokio::test(start_paused = true)]
 async fn wait_returns_cancelled_subagent_immediately() {
     let (manager, _rx) = manager(4);
     manager.register_running_for_test("subagent-1", Duration::from_secs(0));
@@ -161,6 +187,32 @@ async fn wait_all_reports_inactivity_when_one_id_stalls() {
     assert_eq!(result.completed_id.as_deref(), Some("subagent-1"));
     assert_eq!(result.inactive_id.as_deref(), Some("subagent-2"));
     assert!(result.timed_out_on_inactivity);
+}
+
+#[tokio::test(start_paused = true)]
+async fn wait_all_does_not_treat_approval_wait_as_terminal() {
+    let (manager, _rx) = manager(4);
+    manager.register_running_for_test("subagent-1", Duration::from_secs(0));
+    manager.record_approval_wait_for_test("subagent-1", "req-1", "WriteFile");
+
+    let wait = tokio::spawn({
+        let manager = manager.clone();
+        async move {
+            manager
+                .wait_all(&["subagent-1".into()], Some(Duration::from_millis(100)))
+                .await
+        }
+    });
+
+    advance(Duration::from_secs(1)).await;
+    assert!(!wait.is_finished());
+
+    manager.clear_waiting_for_approval_for_test("req-1");
+    manager.complete_for_test("subagent-1", "done");
+    let result = wait.await.expect("join").expect("wait succeeds");
+
+    assert_eq!(result.completed_id.as_deref(), Some("subagent-1"));
+    assert!(!result.timed_out_on_inactivity);
 }
 
 #[test]
