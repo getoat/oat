@@ -5,6 +5,7 @@ use crate::{
     config::ReasoningSetting,
     features::planning::{PlanReviewState, PlanningAgentConfig, PlanningStage},
     stats::StatsTotals,
+    todo::TodoSnapshot,
 };
 
 use super::{
@@ -196,6 +197,11 @@ pub fn last_history_model_name(state: &AppState) -> Option<&str> {
 
 pub fn planning_agents(state: &AppState) -> &[PlanningAgentConfig] {
     &state.session.planning_agents
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn current_todo(state: &AppState) -> Option<&TodoSnapshot> {
+    state.session.current_todo.as_ref()
 }
 
 pub fn session_stats(state: &AppState) -> StatsTotals {

@@ -68,6 +68,7 @@ impl SubagentManager {
             request.write_approvals.clone(),
             request.shell_approvals.clone(),
             None,
+            false,
             Some(self.clone()),
         )
         .map_err(|error| SubagentExecutionFailure {

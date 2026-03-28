@@ -195,6 +195,10 @@ impl App {
         crate::app::query::history_pending_status_label_state(&self.state)
     }
 
+    pub(crate) fn current_todo(&self) -> Option<&crate::todo::TodoSnapshot> {
+        crate::app::query::current_todo(&self.state)
+    }
+
     pub(crate) fn sync_history_viewport(
         &mut self,
         total_lines: usize,

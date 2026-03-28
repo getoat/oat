@@ -11,10 +11,12 @@ use crate::app::{
     App, ChatMessage, MessageStyle, SubagentStatusEntry, ToolCall, ToolResultEntry,
     TranscriptEntry, query,
 };
+use crate::todo::TodoSnapshot;
 
 use super::{
     markdown::{push_message_lines, push_pending_lines, rendered_line_text},
     subagent_activity::push_subagent_status_lines,
+    todo_activity::push_todo_snapshot_lines,
     tool_activity::{push_tool_call_lines, push_tool_result_lines},
 };
 
@@ -37,6 +39,7 @@ enum VisibleEntry<'a> {
     ProposedPlan(&'a ProposedPlanEntry),
     ToolCall(&'a ToolCall),
     ToolResult(&'a ToolResultEntry),
+    TodoSnapshot(&'a TodoSnapshot),
     SubagentStatus(&'a SubagentStatusEntry),
 }
 
@@ -330,6 +333,7 @@ fn visible_entries(app: &App) -> Vec<VisibleEntry<'_>> {
             TranscriptEntry::ToolCall(tool_call) => Some(VisibleEntry::ToolCall(tool_call)),
             TranscriptEntry::ToolResult(tool_result) => query::show_tool_output(app.state())
                 .then_some(VisibleEntry::ToolResult(tool_result)),
+            TranscriptEntry::TodoSnapshot(snapshot) => Some(VisibleEntry::TodoSnapshot(snapshot)),
             TranscriptEntry::SubagentStatus(status) => Some(VisibleEntry::SubagentStatus(status)),
         })
         .collect()
@@ -366,6 +370,9 @@ fn push_visible_entry_lines(
         }
         VisibleEntry::ToolCall(tool_call) => push_tool_call_lines(lines, tool_call, width),
         VisibleEntry::ToolResult(tool_result) => push_tool_result_lines(lines, tool_result, width),
+        VisibleEntry::TodoSnapshot(snapshot) => {
+            push_todo_snapshot_lines(lines, snapshot, width, accent)
+        }
         VisibleEntry::SubagentStatus(status) => push_subagent_status_lines(lines, status, width),
     }
 }
@@ -397,6 +404,9 @@ fn push_tool_activity_run_lines(
             VisibleEntry::ToolCall(tool_call) => push_tool_call_lines(lines, tool_call, width),
             VisibleEntry::ToolResult(tool_result) => {
                 push_tool_result_lines(lines, tool_result, width)
+            }
+            VisibleEntry::TodoSnapshot(_) => {
+                unreachable!("todo snapshots are rendered outside tool activity runs")
             }
             VisibleEntry::SubagentStatus(status) => {
                 push_subagent_status_lines(lines, status, width)

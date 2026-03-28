@@ -43,6 +43,11 @@ pub(crate) fn on_stream_event(
             ops::transcript::push_tool_result(state, name, output);
             None
         }
+        StreamEvent::TodoSnapshot(snapshot) => {
+            ops::session::set_current_todo(state, snapshot.has_list.then_some(snapshot.clone()));
+            ops::transcript::push_todo_snapshot(state, snapshot);
+            None
+        }
         StreamEvent::AskUserRequested {
             request_id,
             request,
@@ -158,12 +163,13 @@ mod tests {
     use super::*;
     use crate::{
         app::{
-            Action, ChatMessage, MessageStyle, PendingReply, PendingReplyKind,
+            Action, ChatMessage, Effect, MessageStyle, PendingReply, PendingReplyKind,
             SessionHistoryMessage, Speaker, TranscriptEntry,
             session::test_support::{new_app, registry_app},
         },
         ask_user::{AskUserAnswer, AskUserQuestion, AskUserRequest},
         features::planning::PlanningStage,
+        todo::{TodoSnapshot, TodoStatus, TodoTask},
     };
 
     fn ask_user_request() -> AskUserRequest {
@@ -423,6 +429,85 @@ mod tests {
             }
             entry => panic!("expected tool result, got {entry:?}"),
         }
+    }
+
+    #[test]
+    fn stream_todo_snapshot_adds_transcript_entry() {
+        let mut app = new_app(true);
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(1, PendingReplyKind::Normal));
+
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: StreamEvent::TodoSnapshot(TodoSnapshot::new(vec![TodoTask {
+                description: "Implement transcript rendering.".into(),
+                status: TodoStatus::InProgress,
+            }])),
+        });
+
+        match &app.entries()[1] {
+            TranscriptEntry::TodoSnapshot(snapshot) => {
+                assert_eq!(
+                    snapshot,
+                    &TodoSnapshot::new(vec![TodoTask {
+                        description: "Implement transcript rendering.".into(),
+                        status: TodoStatus::InProgress,
+                    }])
+                );
+            }
+            entry => panic!("expected todo snapshot, got {entry:?}"),
+        }
+        assert_eq!(
+            app.current_todo(),
+            Some(&TodoSnapshot::new(vec![TodoTask {
+                description: "Implement transcript rendering.".into(),
+                status: TodoStatus::InProgress,
+            }]))
+        );
+    }
+
+    #[test]
+    fn new_session_clears_current_todo_state() {
+        let mut app = new_app(true);
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(1, PendingReplyKind::Normal));
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: StreamEvent::TodoSnapshot(TodoSnapshot::new(vec![TodoTask {
+                description: "Temporary task.".into(),
+                status: TodoStatus::Todo,
+            }])),
+        });
+        assert!(app.current_todo().is_some());
+
+        app.composer_mut().insert_str("/new");
+        app.sync_command_selection();
+        let effect = app.apply(Action::SubmitMessage);
+
+        assert_eq!(effect, Some(Effect::RotateSession));
+        assert!(app.current_todo().is_none());
+    }
+
+    #[test]
+    fn cleared_todo_snapshot_removes_current_todo_state() {
+        let mut app = new_app(true);
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(1, PendingReplyKind::Normal));
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: StreamEvent::TodoSnapshot(TodoSnapshot::new(vec![TodoTask {
+                description: "Short-lived task.".into(),
+                status: TodoStatus::InProgress,
+            }])),
+        });
+        assert!(app.current_todo().is_some());
+
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: StreamEvent::TodoSnapshot(TodoSnapshot::cleared()),
+        });
+
+        assert!(app.current_todo().is_none());
     }
 
     #[test]

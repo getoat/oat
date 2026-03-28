@@ -777,6 +777,69 @@ fn render_hides_tool_results_when_config_disables_them() {
 }
 
 #[test]
+fn render_shows_todo_snapshots_even_when_tool_output_is_disabled() {
+    let backend = TestBackend::new(80, 12);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    let mut app = App::new(true, false, "gpt-5-mini", ReasoningEffort::Medium);
+    app.composer_mut().insert_str("track work");
+    app.apply(Action::SubmitMessage);
+    app.apply(Action::StreamEvent {
+        reply_id: 1,
+        event: crate::app::StreamEvent::TodoSnapshot(crate::todo::TodoSnapshot::new(vec![
+            crate::todo::TodoTask {
+                description: "Inspect the stream parser.".into(),
+                status: crate::todo::TodoStatus::InProgress,
+            },
+            crate::todo::TodoTask {
+                description: "Add render coverage.".into(),
+                status: crate::todo::TodoStatus::Done,
+            },
+            crate::todo::TodoTask {
+                description: "Run cargo test.".into(),
+                status: crate::todo::TodoStatus::Todo,
+            },
+        ])),
+    });
+
+    terminal
+        .draw(|frame| render(frame, &mut app))
+        .expect("render succeeds");
+
+    let buffer = terminal.backend().buffer();
+    let rendered = buffer_string(terminal.backend());
+    let accent = accent_color(app.mode(), app.plan_active());
+
+    assert!(rendered.contains("[ ] Inspect the stream parser."));
+    assert!(rendered.contains("[x] Add render coverage."));
+    assert!(rendered.contains("[ ] Run cargo test."));
+    assert!(word_has_foreground(buffer, "Inspect", accent));
+    assert!(word_has_modifier(buffer, "Inspect", Modifier::BOLD));
+    assert!(word_has_foreground(buffer, "Add", Color::Green));
+}
+
+#[test]
+fn render_shows_cleared_todo_snapshot_empty_state() {
+    let backend = TestBackend::new(80, 10);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    let mut app = App::new(true, false, "gpt-5-mini", ReasoningEffort::Medium);
+    app.composer_mut().insert_str("clear work");
+    app.apply(Action::SubmitMessage);
+    app.apply(Action::StreamEvent {
+        reply_id: 1,
+        event: crate::app::StreamEvent::TodoSnapshot(crate::todo::TodoSnapshot::cleared()),
+    });
+
+    terminal
+        .draw(|frame| render(frame, &mut app))
+        .expect("render succeeds");
+
+    assert!(
+        buffer_string(terminal.backend()).contains("No active todo items."),
+        "expected cleared todo snapshot to render an empty-state message"
+    );
+}
+
+#[test]
 fn render_collapses_long_tool_runs_to_the_last_five_entries() {
     let backend = TestBackend::new(100, 30);
     let mut terminal = Terminal::new(backend).expect("test terminal");
@@ -838,6 +901,42 @@ fn render_ignores_hidden_tool_results_when_collapsing_runs() {
     let rendered = buffer_string(terminal.backend());
     assert!(rendered.contains("... 1 more tool calls"));
     assert!(!rendered.contains("hidden result"));
+}
+
+#[test]
+fn render_keeps_todo_snapshots_outside_tool_run_collapsing() {
+    let backend = TestBackend::new(100, 20);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    let mut app = App::new(true, false, "gpt-5-mini", ReasoningEffort::Medium);
+    app.composer_mut().insert_str("mixed activity");
+    app.apply(Action::SubmitMessage);
+
+    for index in 1..=6 {
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: crate::app::StreamEvent::ToolCall {
+                name: format!("List{index}"),
+                arguments: format!(r#"{{"dir":"src/{index}"}}"#),
+            },
+        });
+    }
+    app.apply(Action::StreamEvent {
+        reply_id: 1,
+        event: crate::app::StreamEvent::TodoSnapshot(crate::todo::TodoSnapshot::new(vec![
+            crate::todo::TodoTask {
+                description: "Review the last visible tool run.".into(),
+                status: crate::todo::TodoStatus::InProgress,
+            },
+        ])),
+    });
+
+    terminal
+        .draw(|frame| render(frame, &mut app))
+        .expect("render succeeds");
+
+    let rendered = buffer_string(terminal.backend());
+    assert!(rendered.contains("... 1 more tool calls"));
+    assert!(rendered.contains("[ ] Review the last visible tool run."));
 }
 
 #[test]

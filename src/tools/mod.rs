@@ -12,6 +12,7 @@ mod read_file;
 mod read_files;
 mod run_shell_script;
 mod subagent;
+mod todo;
 mod write_file;
 
 pub(crate) use apply_patches::{ApplyPatchesArgs, ApplyPatchesTool, TextPatch};
@@ -38,4 +39,5 @@ pub(crate) use subagent::{
     INSPECT_SUBAGENT_TOOL_NAME, InspectSubagentTool, SPAWN_SUBAGENT_TOOL_NAME, SpawnSubagentTool,
     WAIT_SUBAGENT_TOOL_NAME, WaitSubagentTool,
 };
+pub(crate) use todo::TodoTool;
 pub(crate) use write_file::{WriteFileArgs, WriteFileTool};

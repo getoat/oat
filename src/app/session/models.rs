@@ -8,6 +8,7 @@ use crate::{
     ask_user::AskUserRequest,
     config::{ReasoningEffort, ReasoningSetting},
     model_registry,
+    todo::TodoSnapshot,
 };
 
 use super::CommandRisk;
@@ -240,6 +241,7 @@ pub enum StreamEvent {
         name: String,
         output: String,
     },
+    TodoSnapshot(TodoSnapshot),
     AskUserRequested {
         request_id: String,
         request: AskUserRequest,

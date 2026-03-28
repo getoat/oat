@@ -14,7 +14,8 @@ use rig::{
 use crate::{
     app::{PendingReplyReplaySeed, TurnEndReason},
     stats::StatsHook,
-    tools::{AskUserTool, CommentaryTool},
+    todo::parse_snapshot,
+    tools::{AskUserTool, CommentaryTool, TodoTool},
 };
 
 use super::{
@@ -200,6 +201,9 @@ where
                 if name == AskUserTool::NAME {
                     partial_tool_calls.remove(&internal_call_id);
                     None
+                } else if name == TodoTool::NAME {
+                    partial_tool_calls.remove(&internal_call_id);
+                    None
                 } else if name == CommentaryTool::NAME {
                     match resolve_commentary_message(
                         &mut partial_tool_calls,
@@ -256,6 +260,14 @@ where
                     .unwrap_or_else(|| tool_result.id.clone());
                 if name == AskUserTool::NAME {
                     None
+                } else if name == TodoTool::NAME {
+                    match parse_snapshot(&format_tool_result(&tool_result)) {
+                        Ok(snapshot) => Some(StreamEvent::TodoSnapshot(snapshot)),
+                        Err(_) => Some(StreamEvent::ToolResult {
+                            name,
+                            output: format_tool_result(&tool_result),
+                        }),
+                    }
                 } else if commentary_calls.contains(&internal_call_id) {
                     None
                 } else {

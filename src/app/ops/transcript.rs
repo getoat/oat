@@ -4,6 +4,7 @@ use crate::{
         AppState, ChatMessage, MessageStyle, Speaker, SubagentDisplayState, SubagentStatusEntry,
         SubagentStatusKind, ToolCall, ToolResultEntry, TranscriptEntry,
     },
+    todo::TodoSnapshot,
     tools::mutation_preview,
 };
 
@@ -59,6 +60,18 @@ pub(crate) fn push_tool_result(state: &mut AppState, name: String, output: Strin
             name,
             output,
         }));
+    bump_transcript_revision(state);
+}
+
+pub(crate) fn push_todo_snapshot(state: &mut AppState, snapshot: TodoSnapshot) {
+    if let Some(pending) = state.session.pending_reply.as_mut() {
+        pending.reset_active_stream_segment();
+        pending.has_visible_content = true;
+    }
+    state
+        .session
+        .entries
+        .push(TranscriptEntry::TodoSnapshot(snapshot));
     bump_transcript_revision(state);
 }
 

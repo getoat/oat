@@ -489,11 +489,13 @@ async fn read_write_mode_registers_mutation_tools() {
         AgentContext::main(AccessMode::ReadWrite),
         WriteApprovalController::default(),
         Some(AskUserController::default()),
+        true,
         None,
     )
     .expect("service builds");
 
     assert!(service.tool_names.contains(&"AskUser".to_string()));
+    assert!(service.tool_names.contains(&"Todo".to_string()));
     assert!(service.tool_names.contains(&"ApplyPatches".to_string()));
     assert!(service.tool_names.contains(&"WriteFile".to_string()));
     assert!(service.tool_names.contains(&"DeletePath".to_string()));
@@ -537,11 +539,13 @@ async fn read_only_mode_omits_mutation_tools() {
         AgentContext::main(AccessMode::ReadOnly),
         WriteApprovalController::default(),
         Some(AskUserController::default()),
+        true,
         None,
     )
     .expect("service builds");
 
     assert!(service.tool_names.contains(&"AskUser".to_string()));
+    assert!(service.tool_names.contains(&"Todo".to_string()));
     assert!(!service.tool_names.contains(&"ApplyPatches".to_string()));
     assert!(!service.tool_names.contains(&"WriteFile".to_string()));
     assert!(!service.tool_names.contains(&"DeletePath".to_string()));
@@ -787,6 +791,7 @@ async fn write_mode_preamble_is_the_same_for_both_approval_modes() {
         AgentContext::main(AccessMode::ReadWrite),
         WriteApprovalController::new(ApprovalMode::Manual),
         Some(AskUserController::default()),
+        true,
         None,
     )
     .expect("manual service builds")
@@ -796,12 +801,29 @@ async fn write_mode_preamble_is_the_same_for_both_approval_modes() {
         AgentContext::main(AccessMode::ReadWrite),
         WriteApprovalController::new(ApprovalMode::Disabled),
         Some(AskUserController::default()),
+        true,
         None,
     )
     .expect("disabled service builds")
     .preamble;
 
     assert_eq!(manual, disabled);
+}
+
+#[tokio::test]
+async fn todo_tool_can_be_disabled_independently_of_ask_user() {
+    let service = LlmService::from_config(
+        &sample_config(),
+        AgentContext::main(AccessMode::ReadOnly),
+        WriteApprovalController::default(),
+        Some(AskUserController::default()),
+        false,
+        None,
+    )
+    .expect("service builds");
+
+    assert!(service.tool_names.contains(&"AskUser".to_string()));
+    assert!(!service.tool_names.contains(&"Todo".to_string()));
 }
 
 #[test]

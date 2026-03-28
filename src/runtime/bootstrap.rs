@@ -70,6 +70,7 @@ pub(crate) fn bootstrap_tui(config: AppConfig, startup: StartupOptions) -> Resul
             AgentContext::main(query::mode(app.state())),
             WriteApprovalController::new(startup.approval_mode),
             Some(AskUserController::default()),
+            true,
             Some(subagents.clone()),
         )?
     };
@@ -113,6 +114,7 @@ pub(crate) fn bootstrap_headless(
             AgentContext::main(startup.access_mode),
             WriteApprovalController::new(startup.approval_mode),
             None,
+            false,
             None,
         )?
     };

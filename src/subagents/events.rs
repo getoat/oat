@@ -10,6 +10,7 @@ impl SubagentManager {
             | StreamEvent::Commentary(_)
             | StreamEvent::ReasoningDelta(_)
             | StreamEvent::ToolResult { .. }
+            | StreamEvent::TodoSnapshot(_)
             | StreamEvent::AskUserRequested { .. }
             | StreamEvent::PlanningFinalizationStarted
             | StreamEvent::CompactionFinished { .. }

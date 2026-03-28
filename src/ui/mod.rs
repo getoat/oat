@@ -3,6 +3,7 @@ mod markdown;
 mod render;
 mod subagent_activity;
 mod theme;
+mod todo_activity;
 mod tool_activity;
 mod wrap;
 

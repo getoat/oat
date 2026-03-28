@@ -13,6 +13,7 @@ mod model_registry;
 mod runtime;
 mod stats;
 mod subagents;
+mod todo;
 mod token_counting;
 mod tool_policy;
 mod tools;

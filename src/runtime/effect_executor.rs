@@ -46,6 +46,7 @@ fn rebuild_main_llm(
         llm.approvals(),
         llm.shell_approvals(),
         llm.ask_user_controller(),
+        llm.todo_available(),
         Some(subagents.clone()),
     )
 }
@@ -287,6 +288,7 @@ impl EffectExecutor<'_> {
                 let config = self.config.clone();
                 let subagents = self.subagents.clone();
                 let ask_user = self.llm.ask_user_controller();
+                let todo_available = self.llm.todo_available();
                 let write_approvals = self.llm.approvals();
                 let shell_approvals = self.llm.shell_approvals();
                 let stream_tx = self.stream_tx.clone();
@@ -320,6 +322,7 @@ impl EffectExecutor<'_> {
                                 write_approvals,
                                 shell_approvals,
                                 ask_user,
+                                todo_available,
                                 None,
                             )
                             .map_err(|error| {
@@ -637,6 +640,7 @@ mod tests {
             AgentContext::main(AccessMode::ReadOnly),
             WriteApprovalController::new(ApprovalMode::Manual),
             Some(AskUserController::default()),
+            true,
             Some(subagents.clone()),
         )
         .expect("service builds");

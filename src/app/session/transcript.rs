@@ -1,4 +1,6 @@
-use crate::{features::planning::pending_plain_text_is_visible, tools::MutationPreview};
+use crate::{
+    features::planning::pending_plain_text_is_visible, todo::TodoSnapshot, tools::MutationPreview,
+};
 
 use super::models::{AccessMode, Speaker};
 
@@ -66,6 +68,7 @@ pub enum TranscriptEntry {
     ProposedPlan(ProposedPlanEntry),
     ToolCall(ToolCall),
     ToolResult(ToolResultEntry),
+    TodoSnapshot(TodoSnapshot),
     SubagentStatus(SubagentStatusEntry),
 }
 

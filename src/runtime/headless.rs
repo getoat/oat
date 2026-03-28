@@ -57,6 +57,7 @@ pub(crate) fn run_headless(
                 | StreamEvent::PlanningFinalizationStarted
                 | StreamEvent::ToolCall { .. }
                 | StreamEvent::ToolResult { .. }
+                | StreamEvent::TodoSnapshot(_)
                 | StreamEvent::AskUserRequested { .. }
                 | StreamEvent::WriteApprovalRequested { .. }
                 | StreamEvent::ShellApprovalRequested { .. } => {}

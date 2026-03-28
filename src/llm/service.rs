@@ -153,6 +153,7 @@ pub struct LlmService {
     pub(crate) shell_approvals: ShellApprovalController,
     pub(crate) safety: SafetyClassifier,
     pub(crate) ask_user: Option<AskUserController>,
+    todo_available: bool,
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) tool_names: Vec<String>,
     #[cfg_attr(not(test), allow(dead_code))]
@@ -167,6 +168,7 @@ impl LlmService {
         context: AgentContext,
         approvals: WriteApprovalController,
         ask_user: Option<AskUserController>,
+        todo_available: bool,
         subagents: Option<SubagentManager>,
     ) -> Result<Self> {
         let shell_approvals = ShellApprovalController::new(approvals.mode());
@@ -176,6 +178,7 @@ impl LlmService {
             approvals,
             shell_approvals,
             ask_user,
+            todo_available,
             subagents,
         )
     }
@@ -186,6 +189,7 @@ impl LlmService {
         approvals: WriteApprovalController,
         shell_approvals: ShellApprovalController,
         ask_user: Option<AskUserController>,
+        todo_available: bool,
         subagents: Option<SubagentManager>,
     ) -> Result<Self> {
         let workspace_root = env::current_dir().context("failed to determine workspace root")?;
@@ -202,6 +206,7 @@ impl LlmService {
             write_approvals: approvals.clone(),
             shell_approvals: shell_approvals.clone(),
             ask_user_available: ask_user.is_some(),
+            todo_available,
             subagents,
         };
         let tool_names = tool_names_for_context(&tool_context);
@@ -226,6 +231,7 @@ impl LlmService {
             shell_approvals,
             safety,
             ask_user,
+            todo_available,
             tool_names,
             preamble,
             interaction_scope: next_interaction_scope_id(),
@@ -247,6 +253,10 @@ impl LlmService {
 
     pub fn ask_user_controller(&self) -> Option<AskUserController> {
         self.ask_user.clone()
+    }
+
+    pub fn todo_available(&self) -> bool {
+        self.todo_available
     }
 
     pub fn resolve_write_approval(

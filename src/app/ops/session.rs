@@ -4,6 +4,7 @@ use crate::{
         SessionState, UiState,
     },
     features::planning::PlanningStage,
+    todo::TodoSnapshot,
 };
 
 pub(crate) fn active_reply_id(state: &AppState) -> Option<u64> {
@@ -84,6 +85,10 @@ pub(crate) fn set_last_history_model_name(
     model_name: Option<impl Into<String>>,
 ) {
     state.session.last_history_model_name = model_name.map(Into::into);
+}
+
+pub(crate) fn set_current_todo(state: &mut AppState, todo: Option<TodoSnapshot>) {
+    state.session.current_todo = todo;
 }
 
 pub(crate) fn reset_session(state: &mut AppState) {

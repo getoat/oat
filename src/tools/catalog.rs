@@ -15,8 +15,8 @@ use crate::{
 use super::{
     ApplyPatchesTool, AskUserTool, CommentaryTool, DeletePathTool, GrepTool,
     INSPECT_SUBAGENT_TOOL_NAME, InspectSubagentTool, ListTool, ReadFileTool, ReadFilesTool,
-    RunShellScriptTool, SPAWN_SUBAGENT_TOOL_NAME, SpawnSubagentTool, WAIT_SUBAGENT_TOOL_NAME,
-    WaitSubagentTool, WriteFileTool, output_limit::OutputLimitedTool,
+    RunShellScriptTool, SPAWN_SUBAGENT_TOOL_NAME, SpawnSubagentTool, TodoTool,
+    WAIT_SUBAGENT_TOOL_NAME, WaitSubagentTool, WriteFileTool, output_limit::OutputLimitedTool,
 };
 
 #[derive(Clone)]
@@ -27,6 +27,7 @@ pub struct ToolContext {
     pub write_approvals: WriteApprovalController,
     pub shell_approvals: ShellApprovalController,
     pub ask_user_available: bool,
+    pub todo_available: bool,
     pub subagents: Option<SubagentManager>,
 }
 
@@ -58,12 +59,15 @@ enum ToolRoleScope {
     MainWithManager,
 }
 
-const TOOL_DESCRIPTORS: [ToolDescriptor; 13] = [
+const TOOL_DESCRIPTORS: [ToolDescriptor; 14] = [
     ToolDescriptor::read_only(AskUserTool::NAME, ToolRoleScope::MainOnly, |_context| {
         Box::new(AskUserTool)
     }),
     ToolDescriptor::read_only(CommentaryTool::NAME, ToolRoleScope::Any, |_context| {
         Box::new(CommentaryTool)
+    }),
+    ToolDescriptor::read_only(TodoTool::NAME, ToolRoleScope::MainOnly, |_context| {
+        Box::new(TodoTool)
     }),
     ToolDescriptor::read_only(ListTool::NAME, ToolRoleScope::Any, |context| {
         let search_policy = context.search_policy();
@@ -161,6 +165,9 @@ impl ToolDescriptor {
         if self.name == AskUserTool::NAME && !context.ask_user_available {
             return false;
         }
+        if self.name == TodoTool::NAME && !context.todo_available {
+            return false;
+        }
         let access_enabled = self.access_mode == ToolAccess::ReadOnly
             || context.agent.access_mode == AccessMode::ReadWrite;
         let role_enabled = match self.role_scope {
@@ -222,6 +229,7 @@ mod tests {
             write_approvals: WriteApprovalController::default(),
             shell_approvals: ShellApprovalController::default(),
             ask_user_available: true,
+            todo_available: true,
             subagents: Some(test_subagent_manager()),
         });
 
@@ -230,6 +238,7 @@ mod tests {
             vec![
                 "AskUser",
                 "Commentary",
+                "Todo",
                 "List",
                 "ReadFile",
                 "ReadFiles",
@@ -251,11 +260,13 @@ mod tests {
             write_approvals: WriteApprovalController::default(),
             shell_approvals: ShellApprovalController::default(),
             ask_user_available: true,
+            todo_available: true,
             subagents: Some(test_subagent_manager()),
         });
 
         assert!(tool_names.contains(&"AskUser".to_string()));
         assert!(tool_names.contains(&"Commentary".to_string()));
+        assert!(tool_names.contains(&"Todo".to_string()));
         assert!(tool_names.contains(&"RunShellScript".to_string()));
         assert!(tool_names.contains(&"ApplyPatches".to_string()));
         assert!(tool_names.contains(&"WriteFile".to_string()));
@@ -272,6 +283,7 @@ mod tests {
             write_approvals: WriteApprovalController::default(),
             shell_approvals: ShellApprovalController::default(),
             ask_user_available: true,
+            todo_available: true,
             subagents: Some(test_subagent_manager()),
         }) {
             assert!(
@@ -295,6 +307,7 @@ mod tests {
             write_approvals: WriteApprovalController::default(),
             shell_approvals: ShellApprovalController::default(),
             ask_user_available: true,
+            todo_available: true,
             subagents: Some(test_subagent_manager()),
         });
 
@@ -313,6 +326,7 @@ mod tests {
             write_approvals: WriteApprovalController::default(),
             shell_approvals: ShellApprovalController::default(),
             ask_user_available: false,
+            todo_available: false,
             subagents: None,
         });
 

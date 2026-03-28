@@ -4,6 +4,7 @@ use crate::{
     config::ReasoningSetting,
     features::planning::{PlanningAgentConfig, PlanningFeatureState},
     stats::StatsTotals,
+    todo::TodoSnapshot,
 };
 
 use super::{
@@ -42,6 +43,7 @@ pub struct SessionState {
     pub session_stats: StatsTotals,
     pub planning: PlanningFeatureState,
     pub pending_ask_user: Option<PendingAskUser>,
+    pub current_todo: Option<TodoSnapshot>,
     pub queued_messages: VecDeque<String>,
 }
 
@@ -108,6 +110,7 @@ impl SessionState {
             session_stats: StatsTotals::default(),
             planning: PlanningFeatureState::default(),
             pending_ask_user: None,
+            current_todo: None,
             queued_messages: VecDeque::new(),
         }
     }
