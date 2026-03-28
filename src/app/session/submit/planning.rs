@@ -1,5 +1,5 @@
 use super::super::{Effect, PendingReplyKind};
-use crate::app::{AppState, ops, query};
+use crate::app::{AccessMode, AppState, ops, query};
 use crate::features::planning::planning_conversation_prompt;
 
 pub(crate) fn submit_plan_acceptance(state: &mut AppState) -> Option<Effect> {
@@ -11,6 +11,7 @@ pub(crate) fn submit_plan_acceptance(state: &mut AppState) -> Option<Effect> {
     let prompt = accepted_plan_implementation_prompt(state);
     ops::composer::record_submitted_input(state, &visible_prompt);
     ops::planning::accept_plan_review_for_implementation(state);
+    state.session.mode = AccessMode::ReadWrite;
     ops::transcript::push_user_message(state, visible_prompt);
     ops::history::resume_history_follow(state);
     ops::composer::clear_composer(state);
@@ -137,7 +138,7 @@ fn accepted_plan_implementation_prompt(state: &AppState) -> String {
 #[cfg(test)]
 mod tests {
     use crate::{
-        app::{Action, Effect, PendingReplyKind, session::test_support::registry_app},
+        app::{AccessMode, Action, Effect, PendingReplyKind, session::test_support::registry_app},
         features::planning::planning_conversation_prompt,
     };
 
@@ -196,8 +197,34 @@ mod tests {
         ));
         assert!(app.state_mut().session.pending_reply.is_some());
         assert!(!app.plan_review_selection_active());
+        assert_eq!(app.state().session.mode, AccessMode::ReadWrite);
         assert_eq!(
             app.state_mut()
+                .session
+                .pending_reply
+                .as_ref()
+                .map(|pending| pending.kind),
+            Some(PendingReplyKind::Normal)
+        );
+    }
+
+    #[test]
+    fn accepting_plan_preserves_write_mode_when_already_enabled() {
+        let mut app = registry_app(true);
+        app.state_mut().session.mode = AccessMode::ReadWrite;
+        app.state_mut().session.planning.proposed_plan =
+            Some(crate::features::planning::ProposedPlan {
+                markdown: "# Test Plan\n\n- step one".into(),
+                raw_block: "<proposed_plan>\n# Test Plan\n\n- step one\n</proposed_plan>".into(),
+            });
+        app.begin_plan_review();
+
+        let effect = app.apply(Action::AcceptPlanAndImplement);
+
+        assert!(matches!(effect, Some(Effect::PromptModel { .. })));
+        assert_eq!(app.state().session.mode, AccessMode::ReadWrite);
+        assert_eq!(
+            app.state()
                 .session
                 .pending_reply
                 .as_ref()

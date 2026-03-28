@@ -82,3 +82,32 @@ fn render_shows_plan_footer_while_planning_run_is_pending() {
     assert!(!app.planning_draft_mode());
     assert!(app.plan_active());
 }
+
+#[test]
+fn render_shows_write_footer_after_accepting_plan() {
+    let backend = TestBackend::new(120, 12);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    let mut app = App::new(true, false, "gpt-5.4-mini", ReasoningEffort::Medium);
+    app.state_mut().session.planning.proposed_plan =
+        Some(crate::features::planning::ProposedPlan {
+            markdown: "# Test Plan\n\n- step one".into(),
+            raw_block: "<proposed_plan>\n# Test Plan\n\n- step one\n</proposed_plan>".into(),
+        });
+    app.begin_plan_review();
+
+    let effect = app.apply(Action::AcceptPlanAndImplement);
+    assert!(matches!(effect, Some(Effect::PromptModel { .. })));
+
+    terminal
+        .draw(|frame| render(frame, &mut app))
+        .expect("render succeeds");
+
+    let rendered = buffer_string(terminal.backend());
+    assert!(rendered.contains("Write"));
+    assert!(!rendered.contains("Plan Ready"));
+    assert!(word_has_foreground(
+        terminal.backend().buffer(),
+        "Write",
+        accent_color(app.mode(), false),
+    ));
+}

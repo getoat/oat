@@ -32,6 +32,39 @@ pub(crate) struct EffectExecutor<'a> {
     pub(crate) subagents: &'a SubagentManager,
 }
 
+fn rebuild_main_llm(
+    runtime: &Runtime,
+    config: &AppConfig,
+    llm: &LlmService,
+    access_mode: app::AccessMode,
+    subagents: &SubagentManager,
+) -> Result<LlmService> {
+    let _guard = runtime.enter();
+    LlmService::from_config_with_controllers(
+        config,
+        AgentContext::main(access_mode),
+        llm.approvals(),
+        llm.shell_approvals(),
+        llm.ask_user_controller(),
+        Some(subagents.clone()),
+    )
+}
+
+fn sync_main_llm_access_mode(
+    runtime: &Runtime,
+    config: &AppConfig,
+    llm: &mut LlmService,
+    access_mode: app::AccessMode,
+    subagents: &SubagentManager,
+) -> Result<bool> {
+    if llm.access_mode == access_mode {
+        return Ok(false);
+    }
+
+    *llm = rebuild_main_llm(runtime, config, llm, access_mode, subagents)?;
+    Ok(true)
+}
+
 impl EffectExecutor<'_> {
     pub(crate) fn run(&mut self, effect: Effect) -> Result<()> {
         match effect {
@@ -42,6 +75,7 @@ impl EffectExecutor<'_> {
                 history_model_name,
             } => {
                 self.refresh_codex_auth_if_needed()?;
+                self.sync_llm_access_mode(query::mode(self.app.state()))?;
                 let model_names = vec![
                     self.config.model.model_name.clone(),
                     self.config.safety.model_name.clone(),
@@ -387,14 +421,16 @@ impl EffectExecutor<'_> {
     }
 
     fn rebuild_llm(&self, config: &AppConfig, access_mode: app::AccessMode) -> Result<LlmService> {
-        let _guard = self.runtime.enter();
-        LlmService::from_config_with_controllers(
-            config,
-            AgentContext::main(access_mode),
-            self.llm.approvals(),
-            self.llm.shell_approvals(),
-            self.llm.ask_user_controller(),
-            Some(self.subagents.clone()),
+        rebuild_main_llm(self.runtime, config, self.llm, access_mode, self.subagents)
+    }
+
+    fn sync_llm_access_mode(&mut self, access_mode: app::AccessMode) -> Result<bool> {
+        sync_main_llm_access_mode(
+            self.runtime,
+            self.config,
+            self.llm,
+            access_mode,
+            self.subagents,
         )
     }
 
@@ -527,5 +563,86 @@ impl EffectExecutor<'_> {
     fn draw_ui(&mut self) -> Result<()> {
         self.terminal.draw(|frame| ui::render(frame, self.app))?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::{runtime::Runtime, sync::mpsc};
+
+    use super::sync_main_llm_access_mode;
+    use crate::{
+        agent::AgentContext,
+        app::{AccessMode, ApprovalMode},
+        config::{
+            AppConfig, AzureConfig, ModelSelectionConfig, ReasoningEffort, SafetyConfig,
+            SubagentConfig, ToolConfig, UiConfig,
+        },
+        features::planning::PlanningConfig,
+        llm::{AskUserController, LlmService, WriteApprovalController},
+        stats::StatsStore,
+        subagents::SubagentManager,
+    };
+
+    fn sample_config() -> AppConfig {
+        AppConfig {
+            azure: Some(AzureConfig {
+                resource_name: "demo-resource".into(),
+                api_key: "secret".into(),
+                api_version: "2025-01-01-preview".into(),
+            }),
+            chutes: None,
+            codex: None,
+            openrouter: None,
+            model: ModelSelectionConfig {
+                model_name: "gpt-5.4-mini".into(),
+                reasoning: ReasoningEffort::Medium.into(),
+            },
+            safety: SafetyConfig {
+                model_name: "gpt-5.4-mini".into(),
+                reasoning: ReasoningEffort::Medium.into(),
+            },
+            ui: UiConfig::default(),
+            subagents: SubagentConfig::default(),
+            planning: PlanningConfig::default(),
+            tools: ToolConfig::default(),
+        }
+    }
+
+    #[test]
+    fn syncing_prompt_runtime_mode_rebuilds_llm_with_write_tools() {
+        let runtime = Runtime::new().expect("runtime");
+        let config = sample_config();
+        let (subagent_tx, _) = mpsc::unbounded_channel();
+        let subagents = SubagentManager::new(4, subagent_tx, StatsStore::new());
+        let _guard = runtime.enter();
+        let mut llm = LlmService::from_config(
+            &config,
+            AgentContext::main(AccessMode::ReadOnly),
+            WriteApprovalController::new(ApprovalMode::Manual),
+            Some(AskUserController::default()),
+            Some(subagents.clone()),
+        )
+        .expect("service builds");
+        drop(_guard);
+
+        let rebuilt = sync_main_llm_access_mode(
+            &runtime,
+            &config,
+            &mut llm,
+            AccessMode::ReadWrite,
+            &subagents,
+        )
+        .expect("runtime mode sync succeeds");
+
+        assert!(rebuilt);
+        assert_eq!(llm.access_mode, AccessMode::ReadWrite);
+        assert!(llm.tool_names.contains(&"ApplyPatches".to_string()));
+        assert!(llm.tool_names.contains(&"WriteFile".to_string()));
+        assert!(llm.preamble.contains("You are currently in write mode."));
+        assert!(
+            !llm.preamble
+                .contains("You are currently in read-only mode.")
+        );
     }
 }
