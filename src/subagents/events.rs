@@ -5,7 +5,8 @@ use super::{SubagentManager, SubagentUiEvent};
 impl SubagentManager {
     pub(super) fn handle_stream_event(&self, id: &str, event: StreamEvent) {
         match event {
-            StreamEvent::TextDelta(_)
+            StreamEvent::SessionTitleGenerated(_)
+            | StreamEvent::TextDelta(_)
             | StreamEvent::Commentary(_)
             | StreamEvent::ReasoningDelta(_)
             | StreamEvent::ToolResult { .. }

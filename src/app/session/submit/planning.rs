@@ -1,4 +1,5 @@
 use super::super::{Effect, PendingReplyKind};
+use super::should_request_session_title;
 use crate::app::{AccessMode, AppState, ops, query};
 use crate::features::planning::planning_conversation_prompt;
 
@@ -23,6 +24,7 @@ pub(crate) fn submit_plan_acceptance(state: &mut AppState) -> Option<Effect> {
         prompt,
         history: Vec::new(),
         history_model_name: None,
+        session_title_prompt: None,
     })
 }
 
@@ -42,6 +44,7 @@ pub(super) fn submit_planning_draft(state: &mut AppState, submitted: &str) -> Op
         return None;
     }
 
+    let session_title_prompt = should_request_session_title(state).then(|| submitted.to_string());
     ops::planning::consume_planning_draft_mode(state);
     ops::composer::record_submitted_input(state, submitted);
     ops::transcript::push_user_message(state, submitted.to_string());
@@ -55,6 +58,7 @@ pub(super) fn submit_planning_draft(state: &mut AppState, submitted: &str) -> Op
         prompt: planning_conversation_prompt(submitted),
         history: state.session.session_history.to_vec(),
         history_model_name: state.session.last_history_model_name.clone(),
+        session_title_prompt,
     })
 }
 
@@ -63,6 +67,7 @@ pub(super) fn submit_planning_turn(state: &mut AppState, submitted: &str) -> Opt
         return None;
     }
 
+    let session_title_prompt = should_request_session_title(state).then(|| submitted.to_string());
     ops::composer::record_submitted_input(state, submitted);
     ops::transcript::push_user_message(state, submitted.to_string());
     ops::history::resume_history_follow(state);
@@ -75,6 +80,7 @@ pub(super) fn submit_planning_turn(state: &mut AppState, submitted: &str) -> Opt
         prompt: submitted.to_string(),
         history: state.session.session_history.to_vec(),
         history_model_name: state.session.last_history_model_name.clone(),
+        session_title_prompt,
     })
 }
 
@@ -126,6 +132,7 @@ mod tests {
                 prompt: planning_conversation_prompt("Add a planning workflow"),
                 history: Vec::new(),
                 history_model_name: None,
+                session_title_prompt: Some("Add a planning workflow".into()),
             })
         );
         assert!(!app.planning_draft_mode());
@@ -251,6 +258,7 @@ mod tests {
                 prompt: "Cover rollback and tests.".into(),
                 history: Vec::new(),
                 history_model_name: None,
+                session_title_prompt: Some("Cover rollback and tests.".into()),
             })
         );
         assert!(app.state_mut().session.pending_reply.is_some());

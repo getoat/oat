@@ -7,6 +7,11 @@ pub(crate) fn on_stream_event(
     reply_id: u64,
     event: StreamEvent,
 ) -> Option<Effect> {
+    if let StreamEvent::SessionTitleGenerated(title) = event {
+        let _ = ops::session::store_session_title(state, reply_id, title);
+        return None;
+    }
+
     if ops::session::active_reply_id(state) != Some(reply_id) {
         return None;
     }
@@ -140,6 +145,7 @@ pub(crate) fn on_stream_event(
             ops::transcript::push_error_message(state, format!("Request failed: {error}"));
             None
         }
+        StreamEvent::SessionTitleGenerated(_) => None,
     }
 }
 
@@ -760,5 +766,36 @@ mod tests {
             app.session_history(),
             &[SessionHistoryMessage::assistant("stable")]
         );
+    }
+
+    #[test]
+    fn session_title_event_updates_title_without_active_reply() {
+        let mut app = new_app(true);
+        app.state_mut().session.pending_session_title_reply_id = Some(7);
+
+        app.apply(Action::StreamEvent {
+            reply_id: 7,
+            event: StreamEvent::SessionTitleGenerated("Fix planning rejection flow".into()),
+        });
+
+        assert_eq!(
+            app.state().session.session_title.as_deref(),
+            Some("Fix planning rejection flow")
+        );
+        assert_eq!(app.state().session.pending_session_title_reply_id, None);
+    }
+
+    #[test]
+    fn stale_session_title_event_is_ignored() {
+        let mut app = new_app(true);
+        app.state_mut().session.pending_session_title_reply_id = Some(8);
+
+        app.apply(Action::StreamEvent {
+            reply_id: 9,
+            event: StreamEvent::SessionTitleGenerated("Stale title".into()),
+        });
+
+        assert_eq!(app.state().session.session_title, None);
+        assert_eq!(app.state().session.pending_session_title_reply_id, Some(8));
     }
 }

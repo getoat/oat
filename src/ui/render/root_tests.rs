@@ -89,6 +89,7 @@ fn render_shows_mode_line_and_initial_prompt() {
     assert!(rendered.contains("out 345"));
     assert!(rendered.contains("ctx 0%"));
     assert!(rendered.contains("$0.123456"));
+    assert!(!rendered.contains("test title"));
     assert!(
         buffer_lines(terminal.backend())
             .iter()
@@ -150,6 +151,49 @@ fn render_keeps_startup_banner_sparkling() {
         before != after,
         "expected startup banner sparkle colors to change over time"
     );
+}
+
+#[test]
+fn render_shows_top_status_bar_after_startup_banner_is_gone() {
+    let backend = TestBackend::new(120, 12);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    let mut app = App::new(true, false, "gpt-5.4-mini", ReasoningEffort::Medium);
+    app.push_agent_message("hello");
+    app.state_mut().session.session_title = Some("Fix plan rejection flow".into());
+
+    terminal
+        .draw(|frame| render(frame, &mut app))
+        .expect("render succeeds");
+
+    let rendered = buffer_string(terminal.backend());
+    let lines = buffer_lines(terminal.backend());
+    assert!(rendered.contains("Fix plan rejection flow"));
+    assert!(
+        lines
+            .first()
+            .is_some_and(|line| line.contains(" Fix plan rejection flow "))
+    );
+    assert!(lines.first().is_some_and(|line| line.contains("─")));
+    assert!(rendered.contains("Read-only"));
+}
+
+#[test]
+fn render_shows_loading_indicator_in_top_status_bar_while_title_is_pending() {
+    let backend = TestBackend::new(120, 12);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    let mut app = App::new(true, false, "gpt-5.4-mini", ReasoningEffort::Medium);
+    app.push_agent_message("hello");
+    app.state_mut().session.pending_session_title_reply_id = Some(1);
+
+    terminal
+        .draw(|frame| render(frame, &mut app))
+        .expect("render succeeds");
+
+    let rendered = buffer_string(terminal.backend());
+    let lines = buffer_lines(terminal.backend());
+    assert!(rendered.contains("⠋"));
+    assert!(lines.first().is_some_and(|line| line.contains(" ⠋ ")));
+    assert!(lines.first().is_some_and(|line| line.contains("─")));
 }
 
 #[test]
@@ -375,7 +419,7 @@ fn render_shows_latest_subagent_tool_name() {
 
 #[test]
 fn render_shows_tool_calls_and_results() {
-    let backend = TestBackend::new(80, 10);
+    let backend = TestBackend::new(80, 11);
     let mut terminal = Terminal::new(backend).expect("test terminal");
     let mut app = App::new(true, true, "gpt-5-mini", ReasoningEffort::Medium);
     app.composer_mut().insert_str("show tools");
@@ -1089,7 +1133,7 @@ fn render_scrollback_reveals_older_messages() {
 
 #[test]
 fn render_home_and_end_jump_history_viewport() {
-    let backend = TestBackend::new(100, 8);
+    let backend = TestBackend::new(100, 9);
     let mut terminal = Terminal::new(backend).expect("test terminal");
     let mut app = App::new(true, false, "gpt-5-mini", ReasoningEffort::Medium);
 
@@ -1126,7 +1170,7 @@ fn render_home_and_end_jump_history_viewport() {
 
 #[test]
 fn render_keeps_pinned_history_stable_while_streaming() {
-    let backend = TestBackend::new(70, 10);
+    let backend = TestBackend::new(70, 11);
     let mut terminal = Terminal::new(backend).expect("test terminal");
     let mut app = App::new(true, false, "gpt-5-mini", ReasoningEffort::Medium);
     app.composer_mut().insert_str("start");

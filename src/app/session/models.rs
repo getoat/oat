@@ -228,6 +228,7 @@ fn estimated_text_content_message_tokens(text: &str) -> u64 {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum StreamEvent {
+    SessionTitleGenerated(String),
     TextDelta(String),
     ReasoningDelta(String),
     Commentary(String),

@@ -54,6 +54,7 @@ pub(crate) fn submit_message(state: &mut AppState) -> Option<Effect> {
         return None;
     }
 
+    let session_title_prompt = should_request_session_title(state).then(|| submitted.clone());
     ops::composer::record_submitted_input(state, &submitted);
     ops::planning::clear_plan_review(state);
     ops::transcript::push_user_message(state, submitted.clone());
@@ -67,7 +68,13 @@ pub(crate) fn submit_message(state: &mut AppState) -> Option<Effect> {
         prompt: submitted,
         history: state.session.session_history.to_vec(),
         history_model_name: state.session.last_history_model_name.clone(),
+        session_title_prompt,
     })
+}
+
+pub(super) fn should_request_session_title(state: &AppState) -> bool {
+    query::shows_startup_banner_state(state)
+        && state.session.pending_session_title_reply_id.is_none()
 }
 
 #[cfg(test)]
@@ -126,6 +133,7 @@ mod tests {
                 prompt: "hello\nworld".into(),
                 history: Vec::new(),
                 history_model_name: None,
+                session_title_prompt: Some("hello\nworld".into()),
             })
         );
         assert_eq!(app.entries().len(), 2);
@@ -180,6 +188,7 @@ mod tests {
                 prompt: "next".into(),
                 history: vec![SessionHistoryMessage::assistant("previous")],
                 history_model_name: None,
+                session_title_prompt: None,
             })
         );
     }

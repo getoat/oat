@@ -41,6 +41,7 @@ pub(crate) fn run_headless(
             }
 
             match event {
+                StreamEvent::SessionTitleGenerated(_) => {}
                 StreamEvent::TextDelta(delta) => output.push_str(&delta),
                 StreamEvent::Finished { .. } => return Ok(output),
                 StreamEvent::CompactionFinished { .. } => {}

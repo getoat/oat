@@ -1,13 +1,15 @@
 use ratatui::{
     Frame,
+    layout::Alignment,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::Paragraph,
+    widgets::{Block, Borders, Paragraph},
 };
 
 use crate::{
     app::{App, ModelPickerTab, SlashCommand, query},
     composer::ComposerLayout,
+    ui::markdown::loading_frame,
 };
 
 use crate::ui::wrap::wrap_text;
@@ -269,6 +271,29 @@ pub(super) fn render_mode(
     }
 
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+pub(super) fn render_top_status_bar(
+    frame: &mut Frame,
+    app: &App,
+    area: ratatui::layout::Rect,
+    accent: Color,
+) {
+    let title = query::session_title(app.state())
+        .map(str::to_string)
+        .or_else(|| query::session_title_pending(app.state()).then(|| loading_frame(app).into()))
+        .unwrap_or_default();
+    let bar = Block::default()
+        .borders(Borders::BOTTOM)
+        .border_style(Style::default().fg(accent))
+        .title_bottom(
+            Line::from(Span::styled(
+                format!(" {title} "),
+                Style::default().fg(accent).add_modifier(Modifier::BOLD),
+            ))
+            .alignment(Alignment::Center),
+        );
+    frame.render_widget(bar, area);
 }
 
 pub(super) fn command_palette_line(

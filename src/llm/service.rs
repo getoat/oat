@@ -45,6 +45,14 @@ use super::{
 };
 
 const MAX_TOOL_STEPS_PER_TURN: usize = 64;
+const SESSION_TITLE_PROMPT_PREFIX: &str = concat!(
+    "Write a concise title for this session based on the user's first request.\n",
+    "Respond with only the title.\n",
+    "Maximum 6 words.\n",
+    "No quotes.\n",
+    "No markdown.\n\n",
+    "User request:\n"
+);
 static NEXT_INTERACTION_SCOPE_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone)]
@@ -317,6 +325,34 @@ impl LlmService {
             .await;
     }
 
+    pub async fn generate_session_title(&self, user_request: String) -> Result<Option<String>> {
+        let prompt = format!("{SESSION_TITLE_PROMPT_PREFIX}{}", user_request.trim());
+        let raw = match &self.client {
+            ClientVariant::Completions(client) => {
+                let agent = build_agent(
+                    client,
+                    &self.model_name,
+                    &self.preamble,
+                    self.reasoning,
+                    None,
+                );
+                run_plain_prompt(&agent, prompt, Vec::new()).await?
+            }
+            ClientVariant::Responses(client) => {
+                let agent = build_agent(
+                    client,
+                    &self.model_name,
+                    &self.preamble,
+                    self.reasoning,
+                    None,
+                );
+                run_plain_prompt(&agent, prompt, Vec::new()).await?
+            }
+        };
+
+        Ok(sanitize_session_title(&raw))
+    }
+
     pub async fn stream_resumed_prompt(
         &self,
         reply_id: u64,
@@ -553,4 +589,43 @@ fn next_interaction_scope_id() -> String {
         "svc-{}",
         NEXT_INTERACTION_SCOPE_ID.fetch_add(1, Ordering::Relaxed)
     )
+}
+
+fn sanitize_session_title(raw: &str) -> Option<String> {
+    let first_non_empty = raw.lines().find(|line| !line.trim().is_empty())?.trim();
+    let trimmed = first_non_empty
+        .trim_matches(|ch| matches!(ch, '"' | '\'' | '`'))
+        .trim_start_matches(|ch: char| matches!(ch, '-' | '*' | '•') || ch.is_whitespace())
+        .trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let words = trimmed.split_whitespace().take(6).collect::<Vec<_>>();
+    if words.is_empty() {
+        None
+    } else {
+        Some(words.join(" "))
+    }
+}
+
+#[cfg(test)]
+mod session_title_tests {
+    use super::sanitize_session_title;
+
+    #[test]
+    fn sanitize_session_title_trims_quotes_and_whitespace() {
+        assert_eq!(
+            sanitize_session_title("  \"Fix planning rejection flow\"  "),
+            Some("Fix planning rejection flow".into())
+        );
+    }
+
+    #[test]
+    fn sanitize_session_title_limits_to_six_words() {
+        assert_eq!(
+            sanitize_session_title("One two three four five six seven"),
+            Some("One two three four five six".into())
+        );
+    }
 }

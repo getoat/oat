@@ -11,6 +11,7 @@ pub enum Effect {
         prompt: String,
         history: Vec<SessionHistoryMessage>,
         history_model_name: Option<String>,
+        session_title_prompt: Option<String>,
     },
     CompactHistory,
     ShowStats,

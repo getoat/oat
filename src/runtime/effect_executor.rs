@@ -73,6 +73,7 @@ impl EffectExecutor<'_> {
                 prompt,
                 history,
                 history_model_name,
+                session_title_prompt,
             } => {
                 self.refresh_codex_auth_if_needed()?;
                 self.sync_llm_access_mode(query::mode(self.app.state()))?;
@@ -87,6 +88,21 @@ impl EffectExecutor<'_> {
                     .stats
                     .hook_for_model(query::model_name(self.app.state()).to_string());
                 let stream_tx = self.stream_tx.clone();
+                if let Some(session_title_prompt) = session_title_prompt {
+                    app::ops::session::begin_session_title_request(self.app.state_mut(), reply_id);
+                    let title_llm = self.llm.clone();
+                    let title_stream_tx = self.stream_tx.clone();
+                    self.runtime.spawn(async move {
+                        let title = title_llm
+                            .generate_session_title(session_title_prompt)
+                            .await
+                            .ok()
+                            .flatten()
+                            .unwrap_or_default();
+                        let _ = title_stream_tx
+                            .send((reply_id, StreamEvent::SessionTitleGenerated(title)));
+                    });
+                }
                 let task = self.runtime.spawn(async move {
                     llm.stream_prompt(
                         reply_id,

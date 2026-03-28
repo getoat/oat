@@ -46,6 +46,23 @@ pub(crate) fn set_pending_reply(state: &mut AppState, reply_id: u64, kind: Pendi
     state.session.pending_reply = Some(PendingReply::new(reply_id, kind));
 }
 
+pub(crate) fn begin_session_title_request(state: &mut AppState, reply_id: u64) {
+    state.session.pending_session_title_reply_id = Some(reply_id);
+}
+
+pub(crate) fn store_session_title(state: &mut AppState, reply_id: u64, title: String) -> bool {
+    if state.session.pending_session_title_reply_id != Some(reply_id) {
+        return false;
+    }
+
+    state.session.pending_session_title_reply_id = None;
+    let title = title.trim();
+    if !title.is_empty() {
+        state.session.session_title = Some(title.to_string());
+    }
+    true
+}
+
 pub(crate) fn clear_pending_reply_only(state: &mut AppState) {
     state.session.pending_reply = None;
 }

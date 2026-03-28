@@ -145,6 +145,14 @@ pub fn session_history(state: &AppState) -> &[SessionHistoryMessage] {
     &state.session.session_history
 }
 
+pub fn session_title(state: &AppState) -> Option<&str> {
+    state.session.session_title.as_deref()
+}
+
+pub fn session_title_pending(state: &AppState) -> bool {
+    state.session.pending_session_title_reply_id.is_some()
+}
+
 pub fn shows_startup_banner_state(state: &AppState) -> bool {
     shows_startup_banner(&state.session)
 }
