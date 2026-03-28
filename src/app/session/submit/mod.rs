@@ -7,10 +7,7 @@ use approvals::{submit_ask_user, submit_shell_approval};
 use commands::submit_command;
 use picker::submit_picker_selection;
 pub(crate) use planning::submit_plan_acceptance;
-use planning::{
-    submit_plan_review_selection, submit_plan_revision_feedback, submit_planning_draft,
-    submit_planning_turn,
-};
+use planning::{submit_plan_review_selection, submit_planning_draft, submit_planning_turn};
 
 use super::{Effect, PendingReplyKind};
 use crate::app::{AppState, InputContext, ops, query};
@@ -31,10 +28,6 @@ pub(crate) fn submit_message(state: &mut AppState) -> Option<Effect> {
     }
 
     let submitted = ops::composer::submitted_composer_text(state);
-
-    if query::plan_review_feedback_active(state) {
-        return submit_plan_revision_feedback(state, &submitted);
-    }
 
     if ops::composer::command_query(state).is_some() {
         let command_name = ops::composer::command_name(state)

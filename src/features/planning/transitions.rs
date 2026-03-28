@@ -37,10 +37,6 @@ pub fn accept_review_for_implementation(state: &mut PlanningFeatureState) {
     clear_planning(state);
 }
 
-pub fn request_review_changes(state: &mut PlanningFeatureState) {
-    show_review(state, PlanReviewState::Feedback);
-}
-
 pub fn clear_planning(state: &mut PlanningFeatureState) {
     *state = PlanningFeatureState::default();
 }

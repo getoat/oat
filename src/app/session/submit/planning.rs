@@ -30,42 +30,11 @@ pub(super) fn submit_plan_review_selection(state: &mut AppState) -> Option<Effec
     match query::selected_plan_review_index(state).unwrap_or(0) {
         0 => submit_plan_acceptance(state),
         1 => {
-            ops::planning::begin_plan_review_feedback(state);
+            ops::planning::begin_plan_discussion(state);
             None
         }
         _ => None,
     }
-}
-
-pub(super) fn submit_plan_revision_feedback(
-    state: &mut AppState,
-    submitted: &str,
-) -> Option<Effect> {
-    if query::has_pending_reply(state)
-        || submitted.is_empty()
-        || !query::plan_review_feedback_active(state)
-    {
-        return None;
-    }
-
-    let prompt = format!(
-        "Revise the proposed plan based on these comments. Respond with an updated <proposed_plan> block and do not begin implementation yet. Do not use subagents for this revision.\n\n{}",
-        submitted
-    );
-    ops::composer::record_submitted_input(state, submitted);
-    ops::planning::clear_plan_review(state);
-    ops::transcript::push_user_message(state, prompt.clone());
-    ops::history::resume_history_follow(state);
-    ops::composer::clear_composer(state);
-    let reply_id = ops::session::next_reply_id(state);
-    ops::session::set_pending_reply(state, reply_id, PendingReplyKind::Planning);
-
-    Some(Effect::PromptModel {
-        reply_id,
-        prompt,
-        history: state.session.session_history.to_vec(),
-        history_model_name: state.session.last_history_model_name.clone(),
-    })
 }
 
 pub(super) fn submit_planning_draft(state: &mut AppState, submitted: &str) -> Option<Effect> {
@@ -139,7 +108,7 @@ fn accepted_plan_implementation_prompt(state: &AppState) -> String {
 mod tests {
     use crate::{
         app::{AccessMode, Action, Effect, PendingReplyKind, session::test_support::registry_app},
-        features::planning::planning_conversation_prompt,
+        features::planning::{PlanningStage, planning_conversation_prompt},
     };
 
     #[test]
@@ -234,19 +203,23 @@ mod tests {
     }
 
     #[test]
-    fn suggesting_plan_changes_enters_feedback_mode() {
+    fn suggesting_plan_changes_returns_to_planning_finalization() {
         let mut app = registry_app(true);
         app.begin_plan_review();
 
         let effect = app.apply(Action::SuggestPlanChanges);
 
         assert!(effect.is_none());
-        assert!(app.plan_review_feedback_active());
         assert!(!app.plan_review_selection_active());
+        assert_eq!(
+            app.state().session.planning.stage,
+            PlanningStage::Finalizing
+        );
+        assert_eq!(app.state().session.planning.review, None);
     }
 
     #[test]
-    fn plan_review_arrow_selection_and_enter_can_choose_feedback() {
+    fn plan_review_arrow_selection_and_enter_can_choose_discussion() {
         let mut app = registry_app(true);
         app.begin_plan_review();
 
@@ -256,13 +229,17 @@ mod tests {
 
         let submit_effect = app.apply(Action::SubmitMessage);
         assert!(submit_effect.is_none());
-        assert!(app.plan_review_feedback_active());
+        assert_eq!(
+            app.state().session.planning.stage,
+            PlanningStage::Finalizing
+        );
     }
 
     #[test]
-    fn submitting_plan_feedback_regenerates_plan_with_main_agent_prompt() {
+    fn plan_discussion_submission_uses_raw_user_text() {
         let mut app = registry_app(true);
-        app.begin_plan_review_feedback();
+        app.begin_plan_review();
+        app.apply(Action::SuggestPlanChanges);
         app.composer_mut().insert_str("Cover rollback and tests.");
 
         let effect = app.apply(Action::SubmitMessage);
@@ -271,7 +248,7 @@ mod tests {
             effect,
             Some(Effect::PromptModel {
                 reply_id: 1,
-                prompt: "Revise the proposed plan based on these comments. Respond with an updated <proposed_plan> block and do not begin implementation yet. Do not use subagents for this revision.\n\nCover rollback and tests.".into(),
+                prompt: "Cover rollback and tests.".into(),
                 history: Vec::new(),
                 history_model_name: None,
             })
@@ -285,6 +262,12 @@ mod tests {
                 .map(|pending| pending.kind),
             Some(PendingReplyKind::Planning)
         );
-        assert!(!app.plan_review_feedback_active());
+        assert_eq!(
+            app.entries().last().and_then(|entry| match entry {
+                crate::app::TranscriptEntry::Message(message) => Some(message.text.as_str()),
+                _ => None,
+            }),
+            Some("Cover rollback and tests.")
+        );
     }
 }

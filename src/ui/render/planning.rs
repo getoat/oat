@@ -58,7 +58,7 @@ pub(super) fn render_plan_review_prompt(frame: &mut Frame, app: &App, area: Rect
                 },
             ),
             Span::styled(
-                " Suggest changes to the plan",
+                " Discuss this plan",
                 if selected_index == 1 {
                     selected_style
                 } else {
@@ -86,7 +86,7 @@ pub(super) fn pending_plan_review_height(panel_width: u16) -> u16 {
         content_width.max(1),
     )
     .len();
-    let option_two_lines = wrap_text("[2] Suggest changes to the plan", content_width.max(1)).len();
+    let option_two_lines = wrap_text("[2] Discuss this plan", content_width.max(1)).len();
 
     (title_lines + option_one_lines + option_two_lines + 2) as u16
 }

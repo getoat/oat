@@ -175,10 +175,6 @@ impl App {
         crate::app::query::plan_review_selection_active(&self.state)
     }
 
-    pub(crate) fn plan_review_feedback_active(&self) -> bool {
-        crate::app::query::plan_review_feedback_active(&self.state)
-    }
-
     pub(crate) fn history_is_pinned(&self) -> bool {
         crate::app::query::history_is_pinned(&self.state)
     }
@@ -251,10 +247,6 @@ impl App {
 
     pub(crate) fn begin_plan_review(&mut self) {
         crate::app::ops::planning::begin_plan_review(self.state_mut());
-    }
-
-    pub(crate) fn begin_plan_review_feedback(&mut self) {
-        crate::app::ops::planning::begin_plan_review_feedback(self.state_mut());
     }
 
     pub(crate) fn selected_plan_review_index(&self) -> Option<usize> {

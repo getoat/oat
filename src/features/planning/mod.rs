@@ -15,5 +15,5 @@ pub(crate) use state::{
 };
 pub(crate) use transitions::{
     accept_brief_and_start_fanout, accept_review_for_implementation, cancel_draft, clear_planning,
-    enter_draft, request_review_changes, show_review, start_conversation, start_finalization,
+    enter_draft, show_review, start_conversation, start_finalization,
 };

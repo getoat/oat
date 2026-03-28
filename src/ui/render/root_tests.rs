@@ -153,11 +153,12 @@ fn render_keeps_startup_banner_sparkling() {
 }
 
 #[test]
-fn render_restores_composer_in_plan_feedback_mode() {
+fn render_restores_composer_in_plan_discussion_mode() {
     let backend = TestBackend::new(120, 12);
     let mut terminal = Terminal::new(backend).expect("test terminal");
     let mut app = App::new(true, false, "gpt-5.4-mini", ReasoningEffort::Medium);
-    app.begin_plan_review_feedback();
+    app.begin_plan_review();
+    app.apply(Action::SuggestPlanChanges);
     app.composer_mut().insert_str("revise this");
 
     terminal

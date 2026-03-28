@@ -3,8 +3,8 @@ use crate::{
     app::{AppState, TranscriptEntry},
     features::planning::{
         PlanReviewState, PlanningBrief, PlanningStage, ProposedPlan, accept_brief_and_start_fanout,
-        accept_review_for_implementation, cancel_draft, clear_planning, request_review_changes,
-        show_review, start_conversation, start_finalization,
+        accept_review_for_implementation, cancel_draft, clear_planning, show_review,
+        start_conversation, start_finalization,
     },
 };
 
@@ -16,8 +16,9 @@ pub(crate) fn begin_plan_review(state: &mut AppState) {
     composer::clear_composer(state);
 }
 
-pub(crate) fn begin_plan_review_feedback(state: &mut AppState) {
-    request_review_changes(&mut state.session.planning);
+pub(crate) fn begin_plan_discussion(state: &mut AppState) {
+    start_finalization(&mut state.session.planning);
+    state.ui.plan_review_selected_index = 0;
     composer::clear_composer(state);
 }
 

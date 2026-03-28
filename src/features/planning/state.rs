@@ -29,7 +29,6 @@ pub enum PlanningStage {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PlanReviewState {
     Selection,
-    Feedback,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

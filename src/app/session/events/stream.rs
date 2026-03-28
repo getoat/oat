@@ -677,7 +677,6 @@ mod tests {
         });
 
         assert!(app.plan_review_selection_active());
-        assert!(!app.plan_review_feedback_active());
     }
 
     #[test]

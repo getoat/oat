@@ -108,11 +108,6 @@ pub fn plan_review_selection_active(state: &AppState) -> bool {
         && state.session.planning.review == Some(PlanReviewState::Selection)
 }
 
-pub fn plan_review_feedback_active(state: &AppState) -> bool {
-    state.session.planning.stage == PlanningStage::Review
-        && state.session.planning.review == Some(PlanReviewState::Feedback)
-}
-
 pub fn selected_plan_review_index(state: &AppState) -> Option<usize> {
     plan_review_selection_active(state).then_some(state.ui.plan_review_selected_index)
 }

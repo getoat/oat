@@ -43,7 +43,7 @@ fn render_replaces_input_with_plan_review_prompt() {
     let rendered = buffer_string(terminal.backend());
     assert!(rendered.contains("Plan Ready"));
     assert!(rendered.contains("Accept this plan and begin implementation"));
-    assert!(rendered.contains("Suggest changes to the plan"));
+    assert!(rendered.contains("Discuss this plan"));
     assert!(rendered.contains("› [1]"));
 }
 

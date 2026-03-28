@@ -6,7 +6,7 @@ pub(super) fn handle(state: &mut AppState, action: Action) -> Option<Effect> {
         Action::AcceptPlanAndImplement => submit_plan_acceptance(state),
         Action::SuggestPlanChanges => {
             if crate::app::query::plan_review_selection_active(state) {
-                ops::planning::begin_plan_review_feedback(state);
+                ops::planning::begin_plan_discussion(state);
             }
             None
         }
