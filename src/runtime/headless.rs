@@ -43,7 +43,11 @@ pub(crate) fn run_headless(
             match event {
                 StreamEvent::SessionTitleGenerated(_) => {}
                 StreamEvent::TextDelta(delta) => output.push_str(&delta),
-                StreamEvent::Finished { .. } => return Ok(output),
+                StreamEvent::TurnEnded { reason, .. } => {
+                    if reason == crate::app::TurnEndReason::Completed {
+                        return Ok(output);
+                    }
+                }
                 StreamEvent::CompactionFinished { .. } => {}
                 StreamEvent::Failed(error) => {
                     return Err(anyhow!("Request failed: {error}"));

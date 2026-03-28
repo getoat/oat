@@ -12,7 +12,7 @@ use rig::{
 };
 
 use crate::{
-    app::PendingReplyReplaySeed,
+    app::{PendingReplyReplaySeed, TurnEndReason},
     stats::StatsHook,
     tools::{AskUserTool, CommentaryTool},
 };
@@ -268,8 +268,9 @@ where
             Ok(MultiTurnStreamItem::FinalResponse(response)) => {
                 let history = response.history().map(ToOwned::to_owned);
                 let history = history.map(history_from_rig).transpose()?;
-                let event = StreamEvent::Finished {
-                    history: history.clone(),
+                let event = StreamEvent::TurnEnded {
+                    reason: TurnEndReason::Completed,
+                    history,
                 };
                 if !(emit)(reply_id, event) {
                     return Err(anyhow::anyhow!("event sink unavailable"));

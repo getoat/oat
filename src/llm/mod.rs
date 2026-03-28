@@ -20,9 +20,9 @@ pub(crate) use hooks::{AskUserController, ShellApprovalController, WriteApproval
 pub(crate) use service::LlmService;
 pub(crate) use types::{
     CompletionCapture, EventCallback, HistoryCompactionResult, InteractionResolveResult,
-    PromptRunResult, ResumeOverride, ResumeRequest,
+    PromptRunResult, ResumeOverride, ResumeRequest, TurnInterruptRequest,
 };
-pub(crate) use types::{history_from_rig, history_into_rig};
+pub(crate) use types::{history_from_rig, history_into_rig, history_with_prompt_from_rig};
 
 #[cfg(test)]
 mod tests;

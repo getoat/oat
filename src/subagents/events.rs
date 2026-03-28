@@ -13,7 +13,7 @@ impl SubagentManager {
             | StreamEvent::AskUserRequested { .. }
             | StreamEvent::PlanningFinalizationStarted
             | StreamEvent::CompactionFinished { .. }
-            | StreamEvent::Finished { .. } => {
+            | StreamEvent::TurnEnded { .. } => {
                 self.mark_activity(id);
             }
             StreamEvent::ToolCall { name, .. } => {

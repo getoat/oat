@@ -22,7 +22,7 @@ pub use effects::Effect;
 pub(crate) use models::compatible_reasoning_setting;
 pub use models::{
     AccessMode, ApprovalMode, EditorInput, EditorKey, SessionHistoryMessage, SlashCommand, Speaker,
-    StreamEvent,
+    StreamEvent, TurnEndReason,
 };
 pub(crate) use reducer::apply;
 #[cfg(test)]

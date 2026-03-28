@@ -262,10 +262,17 @@ pub enum StreamEvent {
         history: Vec<SessionHistoryMessage>,
         model_name: String,
     },
-    Finished {
+    TurnEnded {
+        reason: TurnEndReason,
         history: Option<Vec<SessionHistoryMessage>>,
     },
     Failed(String),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TurnEndReason {
+    Completed,
+    InterruptedAtStepBoundary,
 }
 
 #[cfg(test)]

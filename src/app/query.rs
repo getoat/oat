@@ -1,4 +1,5 @@
 use ratatui_textarea::TextArea;
+use std::collections::VecDeque;
 
 use crate::{
     config::ReasoningSetting,
@@ -159,6 +160,14 @@ pub fn shows_startup_banner_state(state: &AppState) -> bool {
 
 pub fn has_pending_reply(state: &AppState) -> bool {
     state.session.pending_reply.is_some()
+}
+
+pub fn queued_messages(state: &AppState) -> &VecDeque<String> {
+    &state.session.queued_messages
+}
+
+pub fn has_queued_messages(state: &AppState) -> bool {
+    !state.session.queued_messages.is_empty()
 }
 
 pub fn should_show_history_busy_indicator_state(state: &AppState) -> bool {
@@ -372,6 +381,16 @@ pub(crate) fn input_context_parts(session: &SessionState, ui: &UiState) -> Input
             InputContext::Composer
         }
     }
+}
+
+pub(crate) fn queue_dispatch_ready(state: &AppState) -> bool {
+    has_queued_messages(state)
+        && !has_pending_reply(state)
+        && pending_write_approval(state).is_none()
+        && !has_pending_shell_approval(state)
+        && !has_pending_ask_user(state)
+        && !plan_review_selection_active(state)
+        && input_context(state) == InputContext::Composer
 }
 
 #[cfg(test)]

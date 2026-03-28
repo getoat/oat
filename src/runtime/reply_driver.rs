@@ -16,7 +16,7 @@ impl ReplyDriver {
     pub(crate) fn clear_completed_task(&mut self, reply_id: u64, event: &StreamEvent) {
         if matches!(
             event,
-            StreamEvent::Finished { .. }
+            StreamEvent::TurnEnded { .. }
                 | StreamEvent::CompactionFinished { .. }
                 | StreamEvent::Failed(_)
         ) && self
@@ -50,6 +50,7 @@ impl ReplyDriver {
         if let Some((_, task)) = self.active_reply_task.take() {
             task.abort();
         }
+        llm.clear_turn_interrupt_request();
         llm.cancel_pending_interactions();
     }
 

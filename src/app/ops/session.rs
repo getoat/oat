@@ -67,6 +67,14 @@ pub(crate) fn clear_pending_reply_only(state: &mut AppState) {
     state.session.pending_reply = None;
 }
 
+pub(crate) fn enqueue_queued_message(state: &mut AppState, message: String) {
+    state.session.queued_messages.push_back(message);
+}
+
+pub(crate) fn dequeue_queued_message(state: &mut AppState) -> Option<String> {
+    state.session.queued_messages.pop_front()
+}
+
 pub(crate) fn replace_session_history(state: &mut AppState, history: Vec<SessionHistoryMessage>) {
     state.session.replace_session_history(history);
 }

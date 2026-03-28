@@ -14,7 +14,7 @@ pub use session::{
     PendingShellApproval, PendingWriteApproval, SessionHistoryMessage, SessionState,
     ShellApprovalDecision, SlashCommand, Speaker, StreamEvent, SubagentDisplayState,
     SubagentStatusEntry, SubagentStatusKind, ToolCall, ToolResultEntry, TranscriptEntry,
-    WriteApprovalDecision,
+    TurnEndReason, WriteApprovalDecision,
 };
 pub use shell::App;
 pub use state::AppState;

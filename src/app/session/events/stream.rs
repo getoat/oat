@@ -1,4 +1,4 @@
-use super::super::{Effect, PendingReplyKind, StreamEvent};
+use super::super::{Effect, PendingReplyKind, StreamEvent, TurnEndReason};
 use crate::app::{AppState, MessageStyle, ops, query};
 use crate::features::planning::{PlanningReply, PlanningStage, parse_planning_reply};
 
@@ -92,7 +92,7 @@ pub(crate) fn on_stream_event(
             ops::transcript::push_agent_message(state, "Context compacted.");
             None
         }
-        StreamEvent::Finished { history } => {
+        StreamEvent::TurnEnded { reason, history } => {
             let pending_kind = ops::session::active_reply_kind(state);
             let planning_stage = query::planning_session_stage(state);
             let final_text = ops::session::pending_reply_replay_seed(state)
@@ -104,6 +104,10 @@ pub(crate) fn on_stream_event(
                 ops::session::set_last_history_model_name(state, Some(model_name));
             }
             ops::ask_user::clear_pending_ask_user(state);
+            if reason == TurnEndReason::InterruptedAtStepBoundary {
+                ops::session::clear_pending_reply_only(state);
+                return None;
+            }
             let planning_reply = matches!(pending_kind, Some(PendingReplyKind::Planning))
                 .then(|| parse_planning_reply(&final_text));
             if planning_stage == Some(PlanningStage::Conversation) {
@@ -204,6 +208,25 @@ mod tests {
             }
             entry => panic!("expected agent message, got {entry:?}"),
         }
+    }
+
+    #[test]
+    fn interrupted_step_boundary_replaces_history_and_clears_pending_reply() {
+        let mut app = new_app(true);
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(1, PendingReplyKind::Normal));
+
+        let updated_history = vec![SessionHistoryMessage::assistant("tool-informed context")];
+        app.apply(Action::StreamEvent {
+            reply_id: 1,
+            event: StreamEvent::TurnEnded {
+                reason: TurnEndReason::InterruptedAtStepBoundary,
+                history: Some(updated_history.clone()),
+            },
+        });
+
+        assert_eq!(app.session_history(), updated_history.as_slice());
+        assert!(app.state_mut().session.pending_reply.is_none());
     }
 
     #[test]
@@ -647,7 +670,8 @@ mod tests {
 
         app.apply(Action::StreamEvent {
             reply_id: 2,
-            event: StreamEvent::Finished {
+            event: StreamEvent::TurnEnded {
+                reason: TurnEndReason::Completed,
                 history: Some(vec![
                     SessionHistoryMessage::user("hello"),
                     SessionHistoryMessage::assistant("world"),
@@ -679,7 +703,10 @@ mod tests {
         });
         app.apply(Action::StreamEvent {
             reply_id: 1,
-            event: StreamEvent::Finished { history: None },
+            event: StreamEvent::TurnEnded {
+                reason: TurnEndReason::Completed,
+                history: None,
+            },
         });
 
         assert!(app.plan_review_selection_active());
@@ -693,7 +720,10 @@ mod tests {
 
         app.apply(Action::StreamEvent {
             reply_id: 2,
-            event: StreamEvent::Finished { history: None },
+            event: StreamEvent::TurnEnded {
+                reason: TurnEndReason::Completed,
+                history: None,
+            },
         });
 
         assert!(app.state_mut().session.pending_reply.is_none());
@@ -725,7 +755,10 @@ mod tests {
         });
         let effect = app.apply(Action::StreamEvent {
             reply_id: 2,
-            event: StreamEvent::Finished { history: None },
+            event: StreamEvent::TurnEnded {
+                reason: TurnEndReason::Completed,
+                history: None,
+            },
         });
 
         assert!(matches!(

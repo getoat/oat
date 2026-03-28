@@ -1,7 +1,7 @@
 use std::{
     env,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
 };
@@ -14,7 +14,7 @@ use crate::{
     agent::AgentContext,
     app::{
         AccessMode, PendingReplyReplaySeed, SessionHistoryMessage, ShellApprovalDecision,
-        WriteApprovalDecision,
+        TurnEndReason, WriteApprovalDecision,
     },
     ask_user::AskUserResponse,
     completion_request::CompletionRequestSnapshot,
@@ -37,7 +37,7 @@ use super::{
         drop_oldest_compaction_source_message, is_retryable_compaction_error,
         rebuild_compacted_history, should_compact_before_follow_up,
     },
-    history_from_rig, history_into_rig,
+    history_from_rig, history_into_rig, history_with_prompt_from_rig,
     hooks::{AskUserController, ShellApprovalController, WriteApprovalController},
     resume::ResumeOverrideController,
     safety::SafetyClassifier,
@@ -158,6 +158,7 @@ pub struct LlmService {
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) preamble: String,
     interaction_scope: String,
+    turn_interrupt_request: Arc<Mutex<Option<super::TurnInterruptRequest>>>,
 }
 
 impl LlmService {
@@ -228,6 +229,7 @@ impl LlmService {
             tool_names,
             preamble,
             interaction_scope: next_interaction_scope_id(),
+            turn_interrupt_request: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -301,6 +303,27 @@ impl LlmService {
         }
     }
 
+    pub fn request_turn_interrupt(&self, request: super::TurnInterruptRequest) {
+        *self
+            .turn_interrupt_request
+            .lock()
+            .expect("turn interrupt request lock") = Some(request);
+    }
+
+    pub fn clear_turn_interrupt_request(&self) {
+        *self
+            .turn_interrupt_request
+            .lock()
+            .expect("turn interrupt request lock") = None;
+    }
+
+    fn take_turn_interrupt_request(&self) -> Option<super::TurnInterruptRequest> {
+        self.turn_interrupt_request
+            .lock()
+            .expect("turn interrupt request lock")
+            .take()
+    }
+
     pub async fn stream_prompt(
         &self,
         reply_id: u64,
@@ -310,6 +333,7 @@ impl LlmService {
         stats_hook: StatsHook,
         events: UnboundedSender<(u64, StreamEvent)>,
     ) {
+        self.clear_turn_interrupt_request();
         let emit: EventCallback =
             Arc::new(move |reply_id, event| events.send((reply_id, event)).is_ok());
         let _ = self
@@ -362,6 +386,7 @@ impl LlmService {
         override_action: ResumeOverride,
         replay_seed: Option<PendingReplyReplaySeed>,
     ) {
+        self.clear_turn_interrupt_request();
         let emit: EventCallback =
             Arc::new(move |reply_id, event| events.send((reply_id, event)).is_ok());
         let _ = self
@@ -478,6 +503,23 @@ impl LlmService {
                     return Ok(result);
                 }
                 PromptStepOutcome::Continue(next) => {
+                    if let Some(super::TurnInterruptRequest::AtStepBoundary) =
+                        self.take_turn_interrupt_request()
+                    {
+                        let history = history_with_prompt_from_rig(next.history, next.next_prompt)?;
+                        if !(emit)(
+                            reply_id,
+                            StreamEvent::TurnEnded {
+                                reason: TurnEndReason::InterruptedAtStepBoundary,
+                                history: Some(history),
+                            },
+                        ) {
+                            return Err(anyhow::anyhow!("event sink unavailable"));
+                        }
+                        return Ok(PromptRunResult {
+                            output: String::new(),
+                        });
+                    }
                     prompt = next.next_prompt;
                     history = next.history;
                     if should_compact_before_follow_up(&self.model_name, &history, &prompt) {

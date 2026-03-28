@@ -43,6 +43,11 @@ pub enum InteractionResolveResult {
     Missing,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TurnInterruptRequest {
+    AtStepBoundary,
+}
+
 pub type EventCallback = Arc<dyn Fn(u64, StreamEvent) -> bool + Send + Sync>;
 
 pub struct PromptRunResult {
@@ -95,9 +100,43 @@ pub(crate) fn history_from_rig(history: Vec<RigMessage>) -> Result<Vec<SessionHi
         .collect()
 }
 
+pub(crate) fn history_with_prompt_from_rig(
+    mut history: Vec<RigMessage>,
+    prompt: RigMessage,
+) -> Result<Vec<SessionHistoryMessage>> {
+    history.push(prompt);
+    history_from_rig(history)
+}
+
 pub(crate) fn history_into_rig(history: Vec<SessionHistoryMessage>) -> Result<Vec<RigMessage>> {
     history
         .into_iter()
         .map(SessionHistoryMessage::into_rig_message)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn history_with_prompt_from_rig_appends_prompt_after_history() {
+        let history = vec![
+            RigMessage::user("user prompt"),
+            RigMessage::assistant("tool call"),
+        ];
+        let prompt = RigMessage::user("tool result");
+
+        let rebuilt = history_with_prompt_from_rig(history, prompt.clone()).expect("history");
+        let rebuilt_rig = history_into_rig(rebuilt).expect("round trip");
+
+        assert_eq!(
+            rebuilt_rig,
+            vec![
+                RigMessage::user("user prompt"),
+                RigMessage::assistant("tool call"),
+                prompt,
+            ]
+        );
+    }
 }

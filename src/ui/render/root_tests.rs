@@ -339,6 +339,84 @@ fn render_shows_waiting_in_chat_when_write_approval_is_pending() {
 }
 
 #[test]
+fn render_shows_queued_messages_in_pinned_strip_above_composer() {
+    let backend = TestBackend::new(120, 14);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    let mut app = App::new(true, false, "gpt-5.4-mini", ReasoningEffort::Medium);
+    app.push_agent_message("history");
+    app.state_mut()
+        .session
+        .queued_messages
+        .push_back("queued follow-up".into());
+    app.composer_mut().insert_str("draft");
+
+    terminal
+        .draw(|frame| render(frame, &mut app))
+        .expect("render succeeds");
+
+    let rendered = buffer_string(terminal.backend());
+    let lines = buffer_lines(terminal.backend());
+    assert!(rendered.contains("Queued"));
+    assert!(rendered.contains("queued follow-up"));
+    assert!(rendered.contains("[queued]"));
+    assert!(rendered.contains("draft"));
+
+    let queue_row = lines
+        .iter()
+        .position(|line| line.contains("queued follow-up"))
+        .expect("queued strip row");
+    let draft_row = lines
+        .iter()
+        .position(|line| line.contains("draft"))
+        .expect("composer row");
+    assert!(queue_row < draft_row);
+}
+
+#[test]
+fn render_keeps_queue_strip_visible_while_history_is_pinned() {
+    let backend = TestBackend::new(120, 12);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    let mut app = App::new(true, false, "gpt-5.4-mini", ReasoningEffort::Medium);
+    for index in 0..10 {
+        app.push_agent_message(format!("history line {index}"));
+    }
+    app.state_mut()
+        .session
+        .queued_messages
+        .push_back("still queued".into());
+    app.apply(Action::ScrollHistoryToTop);
+
+    terminal
+        .draw(|frame| render(frame, &mut app))
+        .expect("render succeeds");
+
+    let rendered = buffer_string(terminal.backend());
+    assert!(rendered.contains("Pinned"));
+    assert!(rendered.contains("still queued"));
+}
+
+#[test]
+fn render_summarizes_overflowing_queue_strip() {
+    let backend = TestBackend::new(120, 12);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    let mut app = App::new(true, false, "gpt-5.4-mini", ReasoningEffort::Medium);
+    for index in 0..4 {
+        app.state_mut()
+            .session
+            .queued_messages
+            .push_back(format!("queued message {index}"));
+    }
+
+    terminal
+        .draw(|frame| render(frame, &mut app))
+        .expect("render succeeds");
+
+    let rendered = buffer_string(terminal.backend());
+    assert!(rendered.contains("queued message 0"));
+    assert!(rendered.contains("… +2 more queued"));
+}
+
+#[test]
 fn render_approval_pending_takes_precedence_over_pinned_history_busy_indicator() {
     let backend = TestBackend::new(120, 12);
     let mut terminal = Terminal::new(backend).expect("test terminal");
@@ -1110,7 +1188,10 @@ fn render_scrollback_reveals_older_messages() {
         app.apply(Action::SubmitMessage);
         app.apply(Action::StreamEvent {
             reply_id: index as u64,
-            event: crate::app::StreamEvent::Finished { history: None },
+            event: crate::app::StreamEvent::TurnEnded {
+                reason: crate::app::TurnEndReason::Completed,
+                history: None,
+            },
         });
     }
 
@@ -1142,7 +1223,10 @@ fn render_home_and_end_jump_history_viewport() {
         app.apply(Action::SubmitMessage);
         app.apply(Action::StreamEvent {
             reply_id: index as u64,
-            event: crate::app::StreamEvent::Finished { history: None },
+            event: crate::app::StreamEvent::TurnEnded {
+                reason: crate::app::TurnEndReason::Completed,
+                history: None,
+            },
         });
     }
 
@@ -1221,7 +1305,10 @@ fn render_draws_accented_scrollbar_for_overflowing_history() {
         app.apply(Action::SubmitMessage);
         app.apply(Action::StreamEvent {
             reply_id: index as u64,
-            event: crate::app::StreamEvent::Finished { history: None },
+            event: crate::app::StreamEvent::TurnEnded {
+                reason: crate::app::TurnEndReason::Completed,
+                history: None,
+            },
         });
     }
 

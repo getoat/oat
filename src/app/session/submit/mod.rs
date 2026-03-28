@@ -50,22 +50,53 @@ pub(crate) fn submit_message(state: &mut AppState) -> Option<Effect> {
         return submit_planning_turn(state, &submitted);
     }
 
-    if query::has_pending_reply(state) || submitted.is_empty() {
+    if submitted.is_empty() {
         return None;
     }
 
-    let session_title_prompt = should_request_session_title(state).then(|| submitted.clone());
-    ops::composer::record_submitted_input(state, &submitted);
-    ops::planning::clear_plan_review(state);
-    ops::transcript::push_user_message(state, submitted.clone());
-    ops::history::resume_history_follow(state);
+    if query::has_pending_reply(state) {
+        ops::composer::record_submitted_input(state, &submitted);
+        ops::session::enqueue_queued_message(state, submitted);
+        ops::history::resume_history_follow(state);
+        ops::composer::clear_composer(state);
+        return None;
+    }
+
     ops::composer::clear_composer(state);
+    submit_normal_message_text(state, submitted, true)
+}
+
+pub(crate) fn dispatch_next_queued_message_if_ready(state: &mut AppState) -> Option<Effect> {
+    if !query::queue_dispatch_ready(state) {
+        return None;
+    }
+
+    let prompt = ops::session::dequeue_queued_message(state)?;
+    submit_normal_message_text(state, prompt, false)
+}
+
+fn submit_normal_message_text(
+    state: &mut AppState,
+    prompt: String,
+    record_recall_history: bool,
+) -> Option<Effect> {
+    if prompt.is_empty() || query::has_pending_reply(state) {
+        return None;
+    }
+
+    let session_title_prompt = should_request_session_title(state).then(|| prompt.clone());
+    if record_recall_history {
+        ops::composer::record_submitted_input(state, &prompt);
+    }
+    ops::planning::clear_plan_review(state);
+    ops::transcript::push_user_message(state, prompt.clone());
+    ops::history::resume_history_follow(state);
     let reply_id = ops::session::next_reply_id(state);
     ops::session::set_pending_reply(state, reply_id, PendingReplyKind::Normal);
 
     Some(Effect::PromptModel {
         reply_id,
-        prompt: submitted,
+        prompt,
         history: state.session.session_history.to_vec(),
         history_model_name: state.session.last_history_model_name.clone(),
         session_title_prompt,
@@ -169,7 +200,11 @@ mod tests {
         let effect = app.apply(crate::app::Action::SubmitMessage);
 
         assert_eq!(app.entries().len(), 1);
-        assert!(app.composer_has_content());
+        assert!(!app.composer_has_content());
+        assert_eq!(
+            app.state().session.queued_messages,
+            std::collections::VecDeque::from(["new prompt".to_string()])
+        );
         assert!(effect.is_none());
     }
 
@@ -211,6 +246,127 @@ mod tests {
         assert_eq!(app.composer().lines(), ["boo"]);
         app.apply(crate::app::Action::SelectPreviousCommand);
         assert_eq!(app.composer().lines(), ["boo"]);
+    }
+
+    #[test]
+    fn queued_message_dispatches_in_fifo_order() {
+        let mut app = new_app(true);
+        app.state_mut()
+            .session
+            .queued_messages
+            .push_back("first".into());
+        app.state_mut()
+            .session
+            .queued_messages
+            .push_back("second".into());
+
+        let first = dispatch_next_queued_message_if_ready(app.state_mut());
+        assert!(matches!(
+            first,
+            Some(Effect::PromptModel {
+                prompt,
+                reply_id: 1,
+                ..
+            }) if prompt == "first"
+        ));
+        assert_eq!(
+            app.state().session.queued_messages,
+            std::collections::VecDeque::from(["second".to_string()])
+        );
+
+        app.state_mut().session.pending_reply = None;
+        let second = dispatch_next_queued_message_if_ready(app.state_mut());
+        assert!(matches!(
+            second,
+            Some(Effect::PromptModel {
+                prompt,
+                reply_id: 2,
+                ..
+            }) if prompt == "second"
+        ));
+        assert!(app.state().session.queued_messages.is_empty());
+    }
+
+    #[test]
+    fn queued_dispatch_waits_for_plain_composer_context() {
+        let mut app = new_app(true);
+        app.state_mut()
+            .session
+            .queued_messages
+            .push_back("next".into());
+        app.composer_mut().insert_str("/model");
+        app.sync_command_selection();
+
+        let effect = dispatch_next_queued_message_if_ready(app.state_mut());
+
+        assert!(effect.is_none());
+        assert_eq!(
+            app.state().session.queued_messages,
+            std::collections::VecDeque::from(["next".to_string()])
+        );
+    }
+
+    #[test]
+    fn queued_dispatch_does_not_double_record_recall_history() {
+        let mut app = new_app(true);
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(5, PendingReplyKind::Normal));
+        app.composer_mut().insert_str("queued once");
+
+        let queued = app.apply(crate::app::Action::SubmitMessage);
+        assert!(queued.is_none());
+        assert_eq!(
+            app.state().session.queued_messages,
+            std::collections::VecDeque::from(["queued once".to_string()])
+        );
+
+        app.state_mut().session.pending_reply = None;
+        let dispatched = dispatch_next_queued_message_if_ready(app.state_mut());
+        assert!(matches!(dispatched, Some(Effect::PromptModel { .. })));
+        app.state_mut().session.pending_reply = None;
+
+        app.apply(crate::app::Action::SelectPreviousCommand);
+        assert_eq!(app.composer().lines(), ["queued once"]);
+        app.apply(crate::app::Action::SelectPreviousCommand);
+        assert_eq!(app.composer().lines(), ["queued once"]);
+    }
+
+    #[test]
+    fn queued_dispatch_can_start_immediately_after_cancellation() {
+        let mut app = new_app(true);
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(3, PendingReplyKind::Normal));
+        app.state_mut()
+            .session
+            .queued_messages
+            .push_back("next prompt".into());
+
+        let cancel = app.apply(crate::app::Action::CancelPendingReply);
+        assert_eq!(cancel, Some(Effect::CancelPendingReply));
+
+        let dispatch = dispatch_next_queued_message_if_ready(app.state_mut());
+        assert!(matches!(
+            dispatch,
+            Some(Effect::PromptModel { prompt, .. }) if prompt == "next prompt"
+        ));
+    }
+
+    #[test]
+    fn queued_dispatch_does_not_clobber_a_new_composer_draft() {
+        let mut app = new_app(true);
+        app.state_mut()
+            .session
+            .queued_messages
+            .push_back("queued".into());
+        app.composer_mut().insert_str("fresh draft");
+
+        let effect = dispatch_next_queued_message_if_ready(app.state_mut());
+
+        assert!(matches!(
+            effect,
+            Some(Effect::PromptModel { prompt, .. }) if prompt == "queued"
+        ));
+        assert_eq!(app.composer().lines(), ["fresh draft"]);
     }
 
     #[test]

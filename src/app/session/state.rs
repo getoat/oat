@@ -42,6 +42,7 @@ pub struct SessionState {
     pub session_stats: StatsTotals,
     pub planning: PlanningFeatureState,
     pub pending_ask_user: Option<PendingAskUser>,
+    pub queued_messages: VecDeque<String>,
 }
 
 impl SessionState {
@@ -107,6 +108,7 @@ impl SessionState {
             session_stats: StatsTotals::default(),
             planning: PlanningFeatureState::default(),
             pending_ask_user: None,
+            queued_messages: VecDeque::new(),
         }
     }
 

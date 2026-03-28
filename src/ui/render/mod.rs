@@ -4,6 +4,7 @@ mod helpers;
 mod input;
 mod overlay;
 mod planning;
+mod queue;
 
 use ratatui::{
     Frame,
@@ -18,6 +19,7 @@ use helpers::{composer_content_width, render_mode, render_top_status_bar};
 use input::render_input;
 use overlay::render_overlay;
 use planning::pending_plan_review_height;
+use queue::{queued_message_strip_height, render_queued_message_strip};
 
 use super::{history::render_history, markdown::loading_frame, theme::accent_color};
 
@@ -38,6 +40,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         ops::composer::composer_height(app.state_mut()).max(3)
     };
     let overlay_height = query::overlay_height(app.state(), screen.height);
+    let queue_height = queued_message_strip_height(app, screen.width, screen.height);
     let mut constraints = Vec::new();
     if show_top_status_bar {
         constraints.push(Constraint::Length(1));
@@ -45,6 +48,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     constraints.push(Constraint::Min(1));
     if overlay_height > 0 {
         constraints.push(Constraint::Length(overlay_height));
+    }
+    if queue_height > 0 {
+        constraints.push(Constraint::Length(queue_height));
     }
     constraints.push(Constraint::Length(input_height));
     constraints.push(Constraint::Length(1));
@@ -63,6 +69,10 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     section += 1;
     if overlay_height > 0 {
         render_overlay(frame, app, layout[section], accent);
+        section += 1;
+    }
+    if queue_height > 0 {
+        render_queued_message_strip(frame, app, layout[section], accent);
         section += 1;
     }
     render_input(frame, app, layout[section], accent);
