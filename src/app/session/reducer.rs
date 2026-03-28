@@ -42,7 +42,9 @@ pub(crate) fn apply(state: &mut AppState, action: Action) -> Option<Effect> {
         Action::AcceptPlanAndImplement | Action::SuggestPlanChanges => {
             planning::handle(state, action)
         }
-        Action::StreamEvent { .. } | Action::SubagentEvent(_) => events::handle(state, action),
+        Action::StreamEvent { .. } | Action::SideChannelEvent { .. } | Action::SubagentEvent(_) => {
+            events::handle(state, action)
+        }
     }
 }
 

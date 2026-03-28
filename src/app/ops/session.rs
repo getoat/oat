@@ -1,7 +1,7 @@
 use crate::{
     app::{
-        AppState, PendingReply, PendingReplyKind, PendingReplyReplaySeed, SessionHistoryMessage,
-        SessionState, UiState,
+        AppState, MainRequestSeed, PendingReply, PendingReplyKind, PendingReplyReplaySeed,
+        PendingSideReply, SessionHistoryMessage, SessionState, SideChannelKind, UiState,
     },
     features::planning::PlanningStage,
     todo::TodoSnapshot,
@@ -80,6 +80,46 @@ pub(crate) fn replace_session_history(state: &mut AppState, history: Vec<Session
     state.session.replace_session_history(history);
 }
 
+pub(crate) fn set_active_main_request_seed(
+    state: &mut AppState,
+    history: Vec<SessionHistoryMessage>,
+    prompt: String,
+    history_model_name: Option<String>,
+) {
+    state.session.active_main_request_seed = Some(MainRequestSeed {
+        history,
+        prompt,
+        history_model_name,
+    });
+}
+
+pub(crate) fn clear_active_main_request_seed(state: &mut AppState) {
+    state.session.active_main_request_seed = None;
+}
+
+pub(crate) fn begin_side_reply(
+    state: &mut AppState,
+    reply_id: u64,
+    kind: SideChannelKind,
+) -> PendingSideReply {
+    let label_id = state.session.next_side_channel_label_id;
+    state.session.next_side_channel_label_id =
+        state.session.next_side_channel_label_id.wrapping_add(1);
+    let reply = PendingSideReply {
+        kind,
+        label: format!("{} {label_id}", kind.label_prefix()),
+    };
+    state
+        .session
+        .pending_side_replies
+        .insert(reply_id, reply.clone());
+    reply
+}
+
+pub(crate) fn finish_side_reply(state: &mut AppState, reply_id: u64) -> Option<PendingSideReply> {
+    state.session.pending_side_replies.remove(&reply_id)
+}
+
 pub(crate) fn set_last_history_model_name(
     state: &mut AppState,
     model_name: Option<impl Into<String>>,
@@ -130,6 +170,7 @@ pub(crate) fn cancel_pending_reply(state: &mut AppState) {
     state.session.pending_write_approvals.clear();
     state.session.pending_shell_approvals.clear();
     state.session.pending_ask_user = None;
+    clear_active_main_request_seed(state);
     state.ui.pending_shell_approval = None;
     state.ui.pending_ask_user = None;
     if state.session.planning.stage == PlanningStage::RunningFanout {

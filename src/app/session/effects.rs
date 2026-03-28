@@ -13,6 +13,12 @@ pub enum Effect {
         history_model_name: Option<String>,
         session_title_prompt: Option<String>,
     },
+    PromptSideChannel {
+        reply_id: u64,
+        prompt: String,
+        history: Vec<SessionHistoryMessage>,
+        history_model_name: Option<String>,
+    },
     CompactHistory,
     ShowStats,
     OpenModelPicker,

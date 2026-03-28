@@ -19,10 +19,10 @@ pub(crate) fn run_with_options(
     let mut state = bootstrap_tui(config, startup)?;
 
     while !query::should_quit(state.app.state()) {
-        while let Ok((reply_id, event)) = state.stream_rx.try_recv() {
+        while let Ok(event) = state.stream_rx.try_recv() {
             {
                 let mut controller = TurnController::from_bootstrap(terminal, &mut state);
-                controller.handle_stream_event(reply_id, event);
+                controller.handle_runtime_event(event);
             }
             persist_command_history_if_needed(&mut state.app, &state.command_history);
         }
@@ -63,6 +63,7 @@ pub(crate) fn run_with_options(
         }
     }
 
+    state.side_channel_task_manager.cancel_all();
     state.stats.finalize_current_session()?;
     Ok(())
 }

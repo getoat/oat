@@ -365,6 +365,7 @@ fn push_visible_entry_lines(
                 speaker: crate::app::Speaker::Agent,
                 text: plan.markdown.clone(),
                 style: MessageStyle::Plain,
+                tag: None,
             };
             push_message_lines(lines, &message, width, accent);
         }

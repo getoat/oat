@@ -163,6 +163,10 @@ pub fn has_pending_reply(state: &AppState) -> bool {
     state.session.pending_reply.is_some()
 }
 
+pub fn active_main_request_seed(state: &AppState) -> Option<&crate::app::MainRequestSeed> {
+    state.session.active_main_request_seed.as_ref()
+}
+
 pub fn queued_messages(state: &AppState) -> &VecDeque<String> {
     &state.session.queued_messages
 }

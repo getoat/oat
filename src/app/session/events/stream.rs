@@ -1,4 +1,4 @@
-use super::super::{Effect, PendingReplyKind, StreamEvent, TurnEndReason};
+use super::super::{Effect, PendingReplyKind, SideChannelEvent, StreamEvent, TurnEndReason};
 use crate::app::{AppState, MessageStyle, ops, query};
 use crate::features::planning::{PlanningReply, PlanningStage, parse_planning_reply};
 
@@ -110,6 +110,7 @@ pub(crate) fn on_stream_event(
             }
             ops::ask_user::clear_pending_ask_user(state);
             if reason == TurnEndReason::InterruptedAtStepBoundary {
+                ops::session::clear_active_main_request_seed(state);
                 ops::session::clear_pending_reply_only(state);
                 return None;
             }
@@ -134,6 +135,7 @@ pub(crate) fn on_stream_event(
             if let Some(PlanningReply::ProposedPlan(plan)) = planning_reply {
                 ops::planning::store_proposed_plan(state, plan);
             }
+            ops::session::clear_active_main_request_seed(state);
             ops::session::clear_pending_reply_only(state);
             if pending_kind == Some(PendingReplyKind::Planning)
                 && matches!(
@@ -150,6 +152,7 @@ pub(crate) fn on_stream_event(
                 ops::planning::begin_planning_conversation(state);
             }
             ops::ask_user::clear_pending_ask_user(state);
+            ops::session::clear_active_main_request_seed(state);
             ops::session::clear_pending_reply_only(state);
             ops::transcript::push_error_message(state, format!("Request failed: {error}"));
             None
@@ -158,13 +161,39 @@ pub(crate) fn on_stream_event(
     }
 }
 
+pub(crate) fn on_side_channel_event(
+    state: &mut AppState,
+    reply_id: u64,
+    event: SideChannelEvent,
+) -> Option<Effect> {
+    let Some(pending) = ops::session::finish_side_reply(state, reply_id) else {
+        return None;
+    };
+
+    match event {
+        SideChannelEvent::Finished { output } => {
+            ops::transcript::push_tagged_agent_message(state, pending.label, output);
+        }
+        SideChannelEvent::Failed(error) => {
+            ops::transcript::push_tagged_error_message(
+                state,
+                pending.label,
+                format!("Request failed: {error}"),
+            );
+        }
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
         app::{
             Action, ChatMessage, Effect, MessageStyle, PendingReply, PendingReplyKind,
-            SessionHistoryMessage, Speaker, TranscriptEntry,
+            PendingSideReply, SessionHistoryMessage, SideChannelEvent, SideChannelKind, Speaker,
+            TranscriptEntry,
             session::test_support::{new_app, registry_app},
         },
         ask_user::{AskUserAnswer, AskUserQuestion, AskUserRequest},
@@ -732,6 +761,7 @@ mod tests {
                 speaker: Speaker::User,
                 text: "hello".into(),
                 style: MessageStyle::Plain,
+                tag: None,
             }));
         app.composer_mut().insert_str("/new");
         app.sync_command_selection();
@@ -915,5 +945,60 @@ mod tests {
 
         assert_eq!(app.state().session.session_title, None);
         assert_eq!(app.state().session.pending_session_title_reply_id, Some(8));
+    }
+
+    #[test]
+    fn side_channel_completion_appends_tagged_message_without_touching_main_reply() {
+        let mut app = new_app(true);
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(3, PendingReplyKind::Normal));
+        app.state_mut().session.pending_side_replies.insert(
+            9,
+            PendingSideReply {
+                kind: SideChannelKind::Btw,
+                label: "btw 2".into(),
+            },
+        );
+
+        app.apply(Action::SideChannelEvent {
+            reply_id: 9,
+            event: SideChannelEvent::Finished {
+                output: "side answer".into(),
+            },
+        });
+
+        assert!(app.has_pending_reply());
+        assert!(app.state().session.pending_side_replies.is_empty());
+        let TranscriptEntry::Message(message) = app.entries().last().expect("message entry") else {
+            panic!("expected message entry");
+        };
+        assert_eq!(message.speaker, Speaker::Agent);
+        assert_eq!(message.tag.as_deref(), Some("btw 2"));
+        assert_eq!(message.text, "side answer");
+    }
+
+    #[test]
+    fn side_channel_failure_appends_tagged_error() {
+        let mut app = new_app(true);
+        app.state_mut().session.pending_side_replies.insert(
+            4,
+            PendingSideReply {
+                kind: SideChannelKind::Btw,
+                label: "btw 1".into(),
+            },
+        );
+
+        app.apply(Action::SideChannelEvent {
+            reply_id: 4,
+            event: SideChannelEvent::Failed("boom".into()),
+        });
+
+        assert!(app.state().session.pending_side_replies.is_empty());
+        let TranscriptEntry::Message(message) = app.entries().last().expect("message entry") else {
+            panic!("expected message entry");
+        };
+        assert_eq!(message.style, MessageStyle::Error);
+        assert_eq!(message.tag.as_deref(), Some("btw 1"));
+        assert_eq!(message.text, "Request failed: boom");
     }
 }

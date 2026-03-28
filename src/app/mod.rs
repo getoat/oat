@@ -10,11 +10,12 @@ pub(crate) use query::InputContext;
 pub(crate) use session::compatible_reasoning_setting;
 pub use session::{
     AccessMode, Action, ApprovalMode, ChatMessage, CommandRisk, EditorInput, EditorKey, Effect,
-    MessageStyle, PendingAskUser, PendingReply, PendingReplyKind, PendingReplyReplaySeed,
-    PendingShellApproval, PendingWriteApproval, SessionHistoryMessage, SessionState,
-    ShellApprovalDecision, SlashCommand, Speaker, StreamEvent, SubagentDisplayState,
-    SubagentStatusEntry, SubagentStatusKind, ToolCall, ToolResultEntry, TranscriptEntry,
-    TurnEndReason, WriteApprovalDecision,
+    MainRequestSeed, MessageStyle, PendingAskUser, PendingReply, PendingReplyKind,
+    PendingReplyReplaySeed, PendingShellApproval, PendingSideReply, PendingWriteApproval,
+    SessionHistoryMessage, SessionState, ShellApprovalDecision, SideChannelEvent, SideChannelKind,
+    SlashCommand, Speaker, StreamEvent, SubagentDisplayState, SubagentStatusEntry,
+    SubagentStatusKind, ToolCall, ToolResultEntry, TranscriptEntry, TurnEndReason,
+    WriteApprovalDecision,
 };
 pub use shell::App;
 pub use state::AppState;

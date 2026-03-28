@@ -48,6 +48,7 @@ pub(super) fn push_pending_lines(
         speaker: Speaker::Agent,
         text: pending,
         style: MessageStyle::Thinking,
+        tag: None,
     };
     push_message_lines(lines, &message, width, accent);
 }
@@ -143,8 +144,8 @@ fn push_plain_message_lines(
     width: usize,
     accent: Color,
 ) {
-    let prefix_text = prefix_text(message.speaker);
-    let content_width = width.saturating_sub(prefix_width(message.speaker)).max(1);
+    let prefix_text = prefix_text(message);
+    let content_width = width.saturating_sub(prefix_width(message)).max(1);
     let wrapped = wrap_text(&message.text, content_width);
     let body_style = message_style(message.style);
 
@@ -160,7 +161,7 @@ fn push_plain_message_lines(
             ]));
         } else {
             lines.push(Line::from(vec![
-                Span::raw(" ".repeat(prefix_width(message.speaker))),
+                Span::raw(" ".repeat(prefix_width(message))),
                 Span::styled(chunk, body_style),
             ]));
         }
@@ -173,10 +174,10 @@ fn push_markdown_message_lines(
     width: usize,
     accent: Color,
 ) {
-    let content_width = width.saturating_sub(prefix_width(message.speaker)).max(1);
+    let content_width = width.saturating_sub(prefix_width(message)).max(1);
     let display_text = planning_reply_visible_text(&message.text);
     let rendered = render_markdown_message_lines(&display_text, content_width);
-    push_prefixed_styled_lines(lines, rendered, message.speaker, accent);
+    push_prefixed_styled_lines(lines, rendered, message, accent);
 }
 
 fn should_render_markdown(message: &ChatMessage) -> bool {
@@ -383,16 +384,16 @@ fn into_owned_span(span: Span<'_>) -> Span<'static> {
 fn push_prefixed_styled_lines(
     lines: &mut Vec<Line<'static>>,
     body_lines: Vec<Line<'static>>,
-    speaker: Speaker,
+    message: &ChatMessage,
     accent: Color,
 ) {
-    let prefix_text = prefix_text(speaker);
-    let prefix_padding = " ".repeat(prefix_width(speaker));
+    let prefix_text = prefix_text(message);
+    let prefix_padding = " ".repeat(prefix_width(message));
 
     for (index, body_line) in body_lines.into_iter().enumerate() {
         let mut spans = Vec::new();
         if index == 0 {
-            let (marker, label_style) = prefix_marker(speaker, accent);
+            let (marker, label_style) = prefix_marker(message.speaker, accent);
             spans.push(Span::styled(marker, label_style));
             spans.push(Span::raw(" "));
             spans.push(Span::styled(prefix_text.clone(), label_style));
@@ -410,12 +411,15 @@ fn push_prefixed_styled_lines(
     }
 }
 
-fn prefix_text(speaker: Speaker) -> String {
-    speaker.label().to_string()
+fn prefix_text(message: &ChatMessage) -> String {
+    match &message.tag {
+        Some(tag) => format!("{} [{tag}]", message.speaker.label()),
+        None => message.speaker.label().to_string(),
+    }
 }
 
-fn prefix_width(speaker: Speaker) -> usize {
-    1 + 1 + speaker.label().chars().count() + 2
+fn prefix_width(message: &ChatMessage) -> usize {
+    1 + 1 + prefix_text(message).chars().count() + 2
 }
 
 fn prefix_marker(speaker: Speaker, accent: Color) -> (&'static str, Style) {
@@ -430,10 +434,14 @@ fn prefix_marker(speaker: Speaker, accent: Color) -> (&'static str, Style) {
 
 #[cfg(test)]
 mod tests {
+    use ratatui::style::Color;
     use ratatui::style::Modifier;
 
-    use super::{MarkdownSegment, markdown_segments, message_style, normalized_highlight_language};
-    use crate::app::MessageStyle;
+    use super::{
+        MarkdownSegment, markdown_segments, message_style, normalized_highlight_language,
+        push_message_lines, rendered_line_text,
+    };
+    use crate::app::{ChatMessage, MessageStyle, Speaker};
 
     #[test]
     fn markdown_segments_leave_plain_text_unchanged() {
@@ -493,6 +501,24 @@ mod tests {
             message_style(MessageStyle::Thinking)
                 .add_modifier
                 .contains(Modifier::ITALIC)
+        );
+    }
+
+    #[test]
+    fn tagged_message_prefix_includes_label() {
+        let mut lines = Vec::new();
+        let message = ChatMessage {
+            speaker: Speaker::Agent,
+            text: "background answer".into(),
+            style: MessageStyle::Plain,
+            tag: Some("btw 3".into()),
+        };
+
+        push_message_lines(&mut lines, &message, 80, Color::Blue);
+
+        assert_eq!(
+            rendered_line_text(&lines[0]),
+            "◦ oat [btw 3]  background answer"
         );
     }
 }

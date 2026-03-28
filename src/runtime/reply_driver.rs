@@ -7,6 +7,8 @@ use crate::{
     stats::StatsStore,
 };
 
+use super::RuntimeEvent;
+
 #[derive(Default)]
 pub(crate) struct ReplyDriver {
     active_reply_task: Option<(u64, JoinHandle<()>)>,
@@ -64,7 +66,7 @@ impl ReplyDriver {
         app: &mut App,
         stats: &StatsStore,
         llm: &LlmService,
-        stream_tx: mpsc::UnboundedSender<(u64, StreamEvent)>,
+        stream_tx: mpsc::UnboundedSender<RuntimeEvent>,
         request: ResumeRequest,
     ) -> Result<()> {
         if let Some((_, task)) = self.active_reply_task.take() {
@@ -98,7 +100,7 @@ impl ReplyDriver {
         app: &mut App,
         stats: &StatsStore,
         llm: &LlmService,
-        stream_tx: mpsc::UnboundedSender<(u64, StreamEvent)>,
+        stream_tx: mpsc::UnboundedSender<RuntimeEvent>,
         request_id: String,
         decision: crate::app::WriteApprovalDecision,
     ) -> Result<()> {
@@ -123,7 +125,7 @@ impl ReplyDriver {
         app: &mut App,
         stats: &StatsStore,
         llm: &LlmService,
-        stream_tx: mpsc::UnboundedSender<(u64, StreamEvent)>,
+        stream_tx: mpsc::UnboundedSender<RuntimeEvent>,
         request_id: String,
         decision: crate::app::ShellApprovalDecision,
     ) -> Result<()> {
@@ -148,7 +150,7 @@ impl ReplyDriver {
         app: &mut App,
         stats: &StatsStore,
         llm: &LlmService,
-        stream_tx: mpsc::UnboundedSender<(u64, StreamEvent)>,
+        stream_tx: mpsc::UnboundedSender<RuntimeEvent>,
         request_id: String,
         response: crate::ask_user::AskUserResponse,
     ) -> Result<()> {

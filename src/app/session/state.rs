@@ -1,4 +1,7 @@
-use std::{collections::VecDeque, path::PathBuf};
+use std::{
+    collections::{HashMap, VecDeque},
+    path::PathBuf,
+};
 
 use crate::{
     config::ReasoningSetting,
@@ -8,9 +11,9 @@ use crate::{
 };
 
 use super::{
-    AccessMode, ApprovalMode, ChatMessage, MessageStyle, PendingAskUser, PendingReply,
-    PendingReplyKind, PendingShellApproval, PendingWriteApproval, SessionHistoryMessage, Speaker,
-    TranscriptEntry, startup_banner_message,
+    AccessMode, ApprovalMode, ChatMessage, MainRequestSeed, MessageStyle, PendingAskUser,
+    PendingReply, PendingReplyKind, PendingShellApproval, PendingSideReply, PendingWriteApproval,
+    SessionHistoryMessage, Speaker, TranscriptEntry, startup_banner_message,
 };
 
 #[derive(Debug)]
@@ -45,6 +48,9 @@ pub struct SessionState {
     pub pending_ask_user: Option<PendingAskUser>,
     pub current_todo: Option<TodoSnapshot>,
     pub queued_messages: VecDeque<String>,
+    pub active_main_request_seed: Option<MainRequestSeed>,
+    pub pending_side_replies: HashMap<u64, PendingSideReply>,
+    pub next_side_channel_label_id: u64,
 }
 
 impl SessionState {
@@ -90,6 +96,7 @@ impl SessionState {
                 speaker: Speaker::Agent,
                 text: startup_banner_message(&model_name, initial_mode),
                 style: MessageStyle::Plain,
+                tag: None,
             })],
             transcript_revision: 0,
             session_history: Vec::new(),
@@ -112,6 +119,9 @@ impl SessionState {
             pending_ask_user: None,
             current_todo: None,
             queued_messages: VecDeque::new(),
+            active_main_request_seed: None,
+            pending_side_replies: HashMap::new(),
+            next_side_channel_label_id: 1,
         }
     }
 

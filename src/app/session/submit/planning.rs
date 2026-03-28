@@ -18,6 +18,7 @@ pub(crate) fn submit_plan_acceptance(state: &mut AppState) -> Option<Effect> {
     ops::composer::clear_composer(state);
     let reply_id = ops::session::next_reply_id(state);
     ops::session::set_pending_reply(state, reply_id, PendingReplyKind::Normal);
+    ops::session::set_active_main_request_seed(state, Vec::new(), prompt.clone(), None);
 
     Some(Effect::PromptModel {
         reply_id,
@@ -52,10 +53,17 @@ pub(super) fn submit_planning_draft(state: &mut AppState, submitted: &str) -> Op
     ops::composer::clear_composer(state);
     let reply_id = ops::session::next_reply_id(state);
     ops::session::set_pending_reply(state, reply_id, PendingReplyKind::Planning);
+    let prompt = planning_conversation_prompt(submitted);
+    ops::session::set_active_main_request_seed(
+        state,
+        state.session.session_history.to_vec(),
+        prompt.clone(),
+        state.session.last_history_model_name.clone(),
+    );
 
     Some(Effect::PromptModel {
         reply_id,
-        prompt: planning_conversation_prompt(submitted),
+        prompt,
         history: state.session.session_history.to_vec(),
         history_model_name: state.session.last_history_model_name.clone(),
         session_title_prompt,
@@ -74,6 +82,12 @@ pub(super) fn submit_planning_turn(state: &mut AppState, submitted: &str) -> Opt
     ops::composer::clear_composer(state);
     let reply_id = ops::session::next_reply_id(state);
     ops::session::set_pending_reply(state, reply_id, PendingReplyKind::Planning);
+    ops::session::set_active_main_request_seed(
+        state,
+        state.session.session_history.to_vec(),
+        submitted.to_string(),
+        state.session.last_history_model_name.clone(),
+    );
 
     Some(Effect::PromptModel {
         reply_id,

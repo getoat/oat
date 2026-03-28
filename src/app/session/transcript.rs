@@ -2,13 +2,17 @@ use crate::{
     features::planning::pending_plain_text_is_visible, todo::TodoSnapshot, tools::MutationPreview,
 };
 
-use super::models::{AccessMode, Speaker};
+use super::{
+    SessionHistoryMessage,
+    models::{AccessMode, Speaker},
+};
 
 #[derive(Clone, Debug)]
 pub struct ChatMessage {
     pub speaker: Speaker,
     pub text: String,
     pub style: MessageStyle,
+    pub tag: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -84,6 +88,32 @@ pub struct PendingReply {
     pub reasoning_text: String,
     pub commentary_messages: Vec<String>,
     pub has_visible_content: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MainRequestSeed {
+    pub history: Vec<SessionHistoryMessage>,
+    pub prompt: String,
+    pub history_model_name: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SideChannelKind {
+    Btw,
+}
+
+impl SideChannelKind {
+    pub fn label_prefix(self) -> &'static str {
+        match self {
+            Self::Btw => "btw",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingSideReply {
+    pub kind: SideChannelKind,
+    pub label: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

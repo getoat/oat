@@ -2,24 +2,29 @@ use tokio::{runtime::Runtime, sync::mpsc};
 
 use crate::{
     Tui,
-    app::{Action, App, Effect, StreamEvent, query},
+    app::{Action, App, Effect, query},
     config::AppConfig,
     llm::{LlmService, TurnInterruptRequest},
     stats::StatsStore,
     subagents::{SubagentManager, SubagentUiEvent},
 };
 
-use super::{bootstrap::TuiBootstrap, effect_executor::EffectExecutor, reply_driver::ReplyDriver};
+use super::side_channel_task_manager::SideChannelTaskManager;
+use super::{
+    RuntimeEvent, bootstrap::TuiBootstrap, effect_executor::EffectExecutor,
+    reply_driver::ReplyDriver,
+};
 
 pub(crate) struct TurnController<'a> {
     runtime: &'a Runtime,
     terminal: &'a mut Tui,
     reply_driver: &'a mut ReplyDriver,
+    side_channel_task_manager: &'a mut SideChannelTaskManager,
     llm: &'a mut LlmService,
     config: &'a mut AppConfig,
     app: &'a mut App,
     stats: &'a StatsStore,
-    stream_tx: mpsc::UnboundedSender<(u64, StreamEvent)>,
+    stream_tx: mpsc::UnboundedSender<RuntimeEvent>,
     subagents: &'a SubagentManager,
 }
 
@@ -29,17 +34,19 @@ impl<'a> TurnController<'a> {
         runtime: &'a Runtime,
         terminal: &'a mut Tui,
         reply_driver: &'a mut ReplyDriver,
+        side_channel_task_manager: &'a mut SideChannelTaskManager,
         llm: &'a mut LlmService,
         config: &'a mut AppConfig,
         app: &'a mut App,
         stats: &'a StatsStore,
-        stream_tx: mpsc::UnboundedSender<(u64, StreamEvent)>,
+        stream_tx: mpsc::UnboundedSender<RuntimeEvent>,
         subagents: &'a SubagentManager,
     ) -> Self {
         Self {
             runtime,
             terminal,
             reply_driver,
+            side_channel_task_manager,
             llm,
             config,
             app,
@@ -54,6 +61,7 @@ impl<'a> TurnController<'a> {
             &state.runtime,
             terminal,
             &mut state.reply_driver,
+            &mut state.side_channel_task_manager,
             &mut state.llm,
             &mut state.config,
             &mut state.app,
@@ -63,17 +71,26 @@ impl<'a> TurnController<'a> {
         )
     }
 
-    pub(crate) fn handle_stream_event(&mut self, reply_id: u64, event: StreamEvent) {
-        self.reply_driver.clear_completed_task(reply_id, &event);
-        if matches!(&event, StreamEvent::Failed(_))
-            && self
-                .reply_driver
-                .should_defer_failed_stream_event(self.app, self.llm, reply_id)
-        {
-            return;
-        }
+    pub(crate) fn handle_runtime_event(&mut self, runtime_event: RuntimeEvent) {
+        let effect = match runtime_event {
+            RuntimeEvent::MainReply { reply_id, event } => {
+                self.reply_driver.clear_completed_task(reply_id, &event);
+                if matches!(&event, crate::app::StreamEvent::Failed(_))
+                    && self
+                        .reply_driver
+                        .should_defer_failed_stream_event(self.app, self.llm, reply_id)
+                {
+                    return;
+                }
 
-        let effect = self.app.apply(Action::StreamEvent { reply_id, event });
+                self.app.apply(Action::StreamEvent { reply_id, event })
+            }
+            RuntimeEvent::SideChannel { reply_id, event } => {
+                self.side_channel_task_manager
+                    .clear_completed_task(reply_id);
+                self.app.apply(Action::SideChannelEvent { reply_id, event })
+            }
+        };
         self.process_follow_ups(effect);
     }
 
@@ -125,6 +142,7 @@ impl<'a> TurnController<'a> {
             runtime: self.runtime,
             terminal: self.terminal,
             reply_driver: self.reply_driver,
+            side_channel_task_manager: self.side_channel_task_manager,
             llm: self.llm,
             config: self.config,
             app: self.app,

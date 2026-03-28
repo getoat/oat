@@ -14,12 +14,13 @@ use crate::{
     agent::AgentContext,
     app::{
         AccessMode, PendingReplyReplaySeed, SessionHistoryMessage, ShellApprovalDecision,
-        TurnEndReason, WriteApprovalDecision,
+        SideChannelEvent, TurnEndReason, WriteApprovalDecision,
     },
     ask_user::AskUserResponse,
     completion_request::CompletionRequestSnapshot,
     config::{AppConfig, ReasoningSetting},
     model_registry,
+    runtime::RuntimeEvent,
     stats::StatsHook,
     subagents::SubagentManager,
     tools::{ToolContext, tool_names_for_context},
@@ -341,11 +342,14 @@ impl LlmService {
         history: Vec<SessionHistoryMessage>,
         history_model_name: Option<String>,
         stats_hook: StatsHook,
-        events: UnboundedSender<(u64, StreamEvent)>,
+        events: UnboundedSender<RuntimeEvent>,
     ) {
         self.clear_turn_interrupt_request();
-        let emit: EventCallback =
-            Arc::new(move |reply_id, event| events.send((reply_id, event)).is_ok());
+        let emit: EventCallback = Arc::new(move |reply_id, event| {
+            events
+                .send(RuntimeEvent::MainReply { reply_id, event })
+                .is_ok()
+        });
         let _ = self
             .run_prompt(
                 reply_id,
@@ -357,6 +361,25 @@ impl LlmService {
                 emit,
             )
             .await;
+    }
+
+    pub async fn stream_side_channel(
+        &self,
+        prompt: String,
+        reply_id: u64,
+        history: Vec<SessionHistoryMessage>,
+        history_model_name: Option<String>,
+        stats_hook: StatsHook,
+        events: UnboundedSender<RuntimeEvent>,
+    ) {
+        let event = match self
+            .run_side_channel(reply_id, prompt, history, history_model_name, stats_hook)
+            .await
+        {
+            Ok(output) => SideChannelEvent::Finished { output },
+            Err(error) => SideChannelEvent::Failed(error.to_string()),
+        };
+        let _ = events.send(RuntimeEvent::SideChannel { reply_id, event });
     }
 
     pub async fn generate_session_title(&self, user_request: String) -> Result<Option<String>> {
@@ -392,13 +415,16 @@ impl LlmService {
         reply_id: u64,
         snapshot: CompletionRequestSnapshot,
         stats_hook: StatsHook,
-        events: UnboundedSender<(u64, StreamEvent)>,
+        events: UnboundedSender<RuntimeEvent>,
         override_action: ResumeOverride,
         replay_seed: Option<PendingReplyReplaySeed>,
     ) {
         self.clear_turn_interrupt_request();
-        let emit: EventCallback =
-            Arc::new(move |reply_id, event| events.send((reply_id, event)).is_ok());
+        let emit: EventCallback = Arc::new(move |reply_id, event| {
+            events
+                .send(RuntimeEvent::MainReply { reply_id, event })
+                .is_ok()
+        });
         let _ = self
             .run_prompt_from_state(
                 reply_id,
@@ -423,6 +449,89 @@ impl LlmService {
         capture: Option<CompletionCapture>,
         emit: EventCallback,
     ) -> Result<PromptRunResult> {
+        let (prompt, history) = self
+            .prepare_prompt_state(
+                reply_id,
+                prompt,
+                history,
+                history_model_name,
+                emit.clone(),
+                self.role == crate::agent::AgentRole::Main,
+            )
+            .await?;
+
+        self.run_prompt_from_state(
+            reply_id, prompt, history, stats_hook, capture, emit, None, None,
+        )
+        .await
+    }
+
+    async fn run_side_channel(
+        &self,
+        reply_id: u64,
+        prompt: String,
+        history: Vec<SessionHistoryMessage>,
+        history_model_name: Option<String>,
+        stats_hook: StatsHook,
+    ) -> Result<String> {
+        let emit: EventCallback = Arc::new(|_, _| true);
+        let (prompt, history) = self
+            .prepare_prompt_state(
+                reply_id,
+                prompt,
+                history,
+                history_model_name,
+                emit.clone(),
+                false,
+            )
+            .await?;
+
+        let outcome = match &self.client {
+            ClientVariant::Completions(client) => {
+                let agent = build_agent(
+                    client,
+                    &self.model_name,
+                    &self.preamble,
+                    self.reasoning,
+                    None,
+                );
+                run_prompt_step(
+                    self, &agent, reply_id, prompt, history, stats_hook, None, emit, None, None, 0,
+                )
+                .await?
+            }
+            ClientVariant::Responses(client) => {
+                let agent = build_agent(
+                    client,
+                    &self.model_name,
+                    &self.preamble,
+                    self.reasoning,
+                    None,
+                );
+                run_prompt_step(
+                    self, &agent, reply_id, prompt, history, stats_hook, None, emit, None, None, 0,
+                )
+                .await?
+            }
+        };
+
+        match outcome {
+            PromptStepOutcome::Finished(result) => Ok(result.output),
+            PromptStepOutcome::Continue(_) => Err(anyhow::anyhow!(
+                "Background query unexpectedly required another step."
+            )),
+        }
+    }
+
+    async fn prepare_prompt_state(
+        &self,
+        reply_id: u64,
+        prompt: String,
+        history: Vec<SessionHistoryMessage>,
+        history_model_name: Option<String>,
+        emit: EventCallback,
+        emit_compaction_notice: bool,
+    ) -> Result<(RigMessage, Vec<RigMessage>)> {
         let prompt = RigMessage::user(prompt);
         let mut history = history_into_rig(history)?;
 
@@ -437,17 +546,14 @@ impl LlmService {
                     history.clone(),
                     &compaction_model_name,
                     reply_id,
-                    emit.clone(),
-                    self.role == crate::agent::AgentRole::Main,
+                    emit,
+                    emit_compaction_notice,
                 )
                 .await?;
             history = history_into_rig(result.history)?;
         }
 
-        self.run_prompt_from_state(
-            reply_id, prompt, history, stats_hook, capture, emit, None, None,
-        )
-        .await
+        Ok((prompt, history))
     }
 
     async fn run_prompt_from_state(

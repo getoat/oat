@@ -93,6 +93,12 @@ fn submit_normal_message_text(
     ops::history::resume_history_follow(state);
     let reply_id = ops::session::next_reply_id(state);
     ops::session::set_pending_reply(state, reply_id, PendingReplyKind::Normal);
+    ops::session::set_active_main_request_seed(
+        state,
+        state.session.session_history.to_vec(),
+        prompt.clone(),
+        state.session.last_history_model_name.clone(),
+    );
 
     Some(Effect::PromptModel {
         reply_id,

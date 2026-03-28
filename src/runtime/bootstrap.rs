@@ -6,7 +6,7 @@ use tokio::{runtime::Runtime, sync::mpsc};
 use crate::{
     StartupOptions,
     agent::AgentContext,
-    app::{App, StreamEvent, ops, query},
+    app::{App, ops, query},
     command_history::CommandHistoryStore,
     config::AppConfig,
     llm::{AskUserController, LlmService, WriteApprovalController},
@@ -14,7 +14,9 @@ use crate::{
     subagents::{SubagentManager, SubagentUiEvent},
 };
 
-use super::reply_driver::ReplyDriver;
+use super::{
+    RuntimeEvent, reply_driver::ReplyDriver, side_channel_task_manager::SideChannelTaskManager,
+};
 
 pub(crate) struct TuiBootstrap {
     pub(crate) runtime: Runtime,
@@ -24,10 +26,11 @@ pub(crate) struct TuiBootstrap {
     pub(crate) subagents: SubagentManager,
     pub(crate) command_history: CommandHistoryStore,
     pub(crate) llm: LlmService,
-    pub(crate) stream_tx: mpsc::UnboundedSender<(u64, StreamEvent)>,
-    pub(crate) stream_rx: mpsc::UnboundedReceiver<(u64, StreamEvent)>,
+    pub(crate) stream_tx: mpsc::UnboundedSender<RuntimeEvent>,
+    pub(crate) stream_rx: mpsc::UnboundedReceiver<RuntimeEvent>,
     pub(crate) subagent_rx: mpsc::UnboundedReceiver<SubagentUiEvent>,
     pub(crate) reply_driver: ReplyDriver,
+    pub(crate) side_channel_task_manager: SideChannelTaskManager,
     pub(crate) tick_rate: Duration,
     pub(crate) last_tick: Instant,
 }
@@ -88,6 +91,7 @@ pub(crate) fn bootstrap_tui(config: AppConfig, startup: StartupOptions) -> Resul
         stream_rx,
         subagent_rx,
         reply_driver: ReplyDriver::default(),
+        side_channel_task_manager: SideChannelTaskManager::default(),
         tick_rate: Duration::from_millis(125),
         last_tick: Instant::now(),
     })
@@ -96,7 +100,7 @@ pub(crate) fn bootstrap_tui(config: AppConfig, startup: StartupOptions) -> Resul
 pub(crate) struct HeadlessBootstrap {
     pub(crate) runtime: Runtime,
     pub(crate) stats: StatsStore,
-    pub(crate) stream_rx: mpsc::UnboundedReceiver<(u64, StreamEvent)>,
+    pub(crate) stream_rx: mpsc::UnboundedReceiver<RuntimeEvent>,
     pub(crate) task: tokio::task::JoinHandle<()>,
 }
 

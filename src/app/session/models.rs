@@ -1,8 +1,6 @@
 use serde::{Deserialize, Serialize};
-#[cfg(test)]
 use serde_json::json;
 
-#[cfg(test)]
 use crate::token_counting::count_text_tokens;
 use crate::{
     ask_user::AskUserRequest,
@@ -16,6 +14,7 @@ use super::CommandRisk;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SlashCommand {
     NewSession,
+    Btw,
     Compact,
     Stats,
     Model,
@@ -30,6 +29,7 @@ impl SlashCommand {
     pub fn canonical_name(self) -> &'static str {
         match self {
             Self::NewSession => "/new",
+            Self::Btw => "/btw",
             Self::Compact => "/compact",
             Self::Stats => "/stats",
             Self::Model => "/model",
@@ -44,6 +44,7 @@ impl SlashCommand {
     pub fn aliases(self) -> &'static [&'static str] {
         match self {
             Self::NewSession => &["/clear"],
+            Self::Btw => &[],
             Self::Compact => &[],
             Self::Stats => &["/status"],
             Self::Model => &["/models"],
@@ -58,6 +59,7 @@ impl SlashCommand {
     pub fn description(self) -> &'static str {
         match self {
             Self::NewSession => "Start a new session",
+            Self::Btw => "Ask a side question without affecting history",
             Self::Compact => "Compact the internal model history",
             Self::Stats => "Show session and historical usage stats",
             Self::Model => "Select the model and reasoning setting",
@@ -92,8 +94,9 @@ impl SlashCommand {
     }
 }
 
-const COMMANDS: [SlashCommand; 9] = [
+const COMMANDS: [SlashCommand; 10] = [
     SlashCommand::NewSession,
+    SlashCommand::Btw,
     SlashCommand::Compact,
     SlashCommand::Stats,
     SlashCommand::Model,
@@ -175,14 +178,13 @@ pub struct EditorInput {
     pub shift: bool,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SessionHistoryMessage {
     pub payload: serde_json::Value,
     pub estimated_tokens: u64,
 }
 
 impl SessionHistoryMessage {
-    #[cfg(test)]
     pub fn user(text: impl Into<String>) -> Self {
         Self::text_message("user", text.into())
     }
@@ -205,7 +207,6 @@ impl SessionHistoryMessage {
         }
     }
 
-    #[cfg(test)]
     fn text_message(role: &str, text: String) -> Self {
         Self {
             payload: json!({
@@ -222,7 +223,6 @@ impl SessionHistoryMessage {
     }
 }
 
-#[cfg(test)]
 fn estimated_text_content_message_tokens(text: &str) -> u64 {
     ESTIMATED_MESSAGE_OVERHEAD_TOKENS + ESTIMATED_CONTENT_OVERHEAD_TOKENS + count_text_tokens(text)
 }
@@ -271,15 +271,19 @@ pub enum StreamEvent {
     Failed(String),
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum SideChannelEvent {
+    Finished { output: String },
+    Failed(String),
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TurnEndReason {
     Completed,
     InterruptedAtStepBoundary,
 }
 
-#[cfg(test)]
 const ESTIMATED_MESSAGE_OVERHEAD_TOKENS: u64 = 4;
-#[cfg(test)]
 const ESTIMATED_CONTENT_OVERHEAD_TOKENS: u64 = 2;
 
 pub(crate) fn compatible_reasoning_setting(

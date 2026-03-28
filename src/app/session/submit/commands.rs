@@ -1,4 +1,6 @@
-use super::super::{Effect, PendingReplyKind, SlashCommand};
+use super::super::{
+    Effect, PendingReplyKind, SessionHistoryMessage, SideChannelKind, SlashCommand,
+};
 use crate::app::{AppState, ops, query};
 use crate::model_registry::{self, ParseReasoningSettingError};
 
@@ -11,7 +13,7 @@ pub(super) fn submit_command(
         ops::transcript::push_error_message(
             state,
             format!(
-                "Unknown command `{command_name}`. Try /new, /stats, /model, /login, /logout, /plan, /quit, or /effort."
+                "Unknown command `{command_name}`. Try /new, /btw, /stats, /model, /login, /logout, /plan, /quit, or /effort."
             ),
         );
         return None;
@@ -27,6 +29,7 @@ pub(super) fn submit_command(
             ops::session::reset_session(state);
             Some(Effect::RotateSession)
         }
+        SlashCommand::Btw => submit_btw_command(state, arguments),
         SlashCommand::Compact => submit_compact_command(state, arguments),
         SlashCommand::Stats => submit_stats_command(state, arguments),
         SlashCommand::Model => submit_model_command(state, arguments),
@@ -39,6 +42,41 @@ pub(super) fn submit_command(
         }
         SlashCommand::Effort => submit_effort_command(state, arguments),
     }
+}
+
+fn submit_btw_command(state: &mut AppState, arguments: &str) -> Option<Effect> {
+    let prompt = arguments.trim();
+    if prompt.is_empty() {
+        ops::transcript::push_error_message(state, "Usage: /btw <question>");
+        return None;
+    }
+
+    ops::composer::clear_composer(state);
+    let reply_id = ops::session::next_reply_id(state);
+    let pending = ops::session::begin_side_reply(state, reply_id, SideChannelKind::Btw);
+    let (history, history_model_name) = build_btw_request_context(state);
+    ops::transcript::push_tagged_user_message(state, pending.label.clone(), prompt.to_string());
+    ops::history::resume_history_follow(state);
+
+    Some(Effect::PromptSideChannel {
+        reply_id,
+        prompt: prompt.to_string(),
+        history,
+        history_model_name,
+    })
+}
+
+fn build_btw_request_context(state: &AppState) -> (Vec<SessionHistoryMessage>, Option<String>) {
+    if let Some(seed) = query::active_main_request_seed(state) {
+        let mut history = seed.history.clone();
+        history.push(SessionHistoryMessage::user(seed.prompt.clone()));
+        return (history, seed.history_model_name.clone());
+    }
+
+    (
+        state.session.session_history.to_vec(),
+        state.session.last_history_model_name.clone(),
+    )
 }
 
 fn submit_stats_command(state: &mut AppState, arguments: &str) -> Option<Effect> {
@@ -277,6 +315,77 @@ mod tests {
     }
 
     #[test]
+    fn btw_command_requires_a_question() {
+        let mut app = new_app(true);
+        app.composer_mut().insert_str("/btw   ");
+        app.sync_command_selection();
+
+        let effect = app.apply(crate::app::Action::SubmitMessage);
+
+        assert!(effect.is_none());
+        let TranscriptEntry::Message(message) = app.entries().last().expect("error entry exists")
+        else {
+            panic!("expected message entry");
+        };
+        assert_eq!(message.style, MessageStyle::Error);
+        assert_eq!(message.text, "Usage: /btw <question>");
+    }
+
+    #[test]
+    fn btw_command_uses_finalized_history_when_idle() {
+        let mut app = new_app(true);
+        app.replace_session_history(vec![SessionHistoryMessage::assistant("previous answer")]);
+        app.state_mut().session.last_history_model_name = Some("gpt-5-mini".into());
+        app.composer_mut().insert_str("/btw follow up?");
+        app.sync_command_selection();
+
+        let effect = app.apply(crate::app::Action::SubmitMessage);
+
+        assert_eq!(
+            effect,
+            Some(Effect::PromptSideChannel {
+                reply_id: 1,
+                prompt: "follow up?".into(),
+                history: vec![SessionHistoryMessage::assistant("previous answer")],
+                history_model_name: Some("gpt-5-mini".into()),
+            })
+        );
+        let TranscriptEntry::Message(message) = app.entries().last().expect("user entry exists")
+        else {
+            panic!("expected message entry");
+        };
+        assert_eq!(message.speaker, Speaker::User);
+        assert_eq!(message.tag.as_deref(), Some("btw 1"));
+        assert_eq!(message.text, "follow up?");
+    }
+
+    #[test]
+    fn btw_command_clones_active_main_request_prompt_while_reply_is_running() {
+        let mut app = new_app(true);
+        app.composer_mut().insert_str("main question");
+
+        let initial = app.apply(crate::app::Action::SubmitMessage);
+        assert!(matches!(initial, Some(Effect::PromptModel { .. })));
+
+        app.composer_mut().insert_str("/btw side question");
+        app.sync_command_selection();
+
+        let effect = app.apply(crate::app::Action::SubmitMessage);
+
+        assert_eq!(
+            effect,
+            Some(Effect::PromptSideChannel {
+                reply_id: 2,
+                prompt: "side question".into(),
+                history: vec![SessionHistoryMessage::user("main question")],
+                history_model_name: None,
+            })
+        );
+        assert!(app.has_pending_reply());
+        assert_eq!(app.state().session.pending_side_replies.len(), 1);
+    }
+
+    #[test]
     fn compact_command_returns_effect() {
         let mut app = new_app(true);
         app.replace_session_history(vec![SessionHistoryMessage::assistant("previous")]);
@@ -451,6 +560,7 @@ mod tests {
                 speaker: Speaker::User,
                 text: "old".into(),
                 style: MessageStyle::Plain,
+                tag: None,
             }));
         app.state_mut().session.pending_reply =
             Some(PendingReply::new(8, PendingReplyKind::Normal));

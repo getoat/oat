@@ -1,6 +1,6 @@
 use crate::subagents::SubagentUiEvent;
 
-use super::{EditorInput, StreamEvent};
+use super::{EditorInput, SideChannelEvent, StreamEvent};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
@@ -13,8 +13,12 @@ pub enum Action {
     ScrollHistoryPageDown,
     ScrollHistoryToTop,
     ScrollHistoryToBottom,
-    ScrollHistoryUp { lines: usize },
-    ScrollHistoryDown { lines: usize },
+    ScrollHistoryUp {
+        lines: usize,
+    },
+    ScrollHistoryDown {
+        lines: usize,
+    },
     InsertComposerNewline,
     SubmitMessage,
     TogglePickerSelection,
@@ -31,10 +35,26 @@ pub enum Action {
     SuggestPlanChanges,
     Editor(EditorInput),
     Paste(String),
-    StartHistorySelection { column: u16, row: u16 },
-    UpdateHistorySelection { column: u16, row: u16 },
-    FinishHistorySelection { column: u16, row: u16 },
-    StreamEvent { reply_id: u64, event: StreamEvent },
+    StartHistorySelection {
+        column: u16,
+        row: u16,
+    },
+    UpdateHistorySelection {
+        column: u16,
+        row: u16,
+    },
+    FinishHistorySelection {
+        column: u16,
+        row: u16,
+    },
+    StreamEvent {
+        reply_id: u64,
+        event: StreamEvent,
+    },
+    SideChannelEvent {
+        reply_id: u64,
+        event: SideChannelEvent,
+    },
     SubagentEvent(SubagentUiEvent),
     Tick,
 }

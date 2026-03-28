@@ -16,6 +16,7 @@ pub fn shows_startup_banner(session: &SessionState) -> bool {
                 speaker: crate::app::session::Speaker::Agent,
                 style: MessageStyle::Plain,
                 text,
+                ..
             })) if text == &startup_banner_message(&session.model_name, session.initial_mode)
         )
 }

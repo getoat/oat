@@ -9,15 +9,57 @@ use crate::{
 };
 
 pub(crate) fn push_agent_message(state: &mut AppState, text: impl Into<String>) {
-    push_message(state, Speaker::Agent, text, MessageStyle::Plain);
+    push_message(state, Speaker::Agent, text, MessageStyle::Plain, None);
 }
 
 pub(crate) fn push_user_message(state: &mut AppState, text: impl Into<String>) {
-    push_message(state, Speaker::User, text, MessageStyle::Plain);
+    push_message(state, Speaker::User, text, MessageStyle::Plain, None);
+}
+
+pub(crate) fn push_tagged_agent_message(
+    state: &mut AppState,
+    tag: impl Into<String>,
+    text: impl Into<String>,
+) {
+    push_message(
+        state,
+        Speaker::Agent,
+        text,
+        MessageStyle::Plain,
+        Some(tag.into()),
+    );
+}
+
+pub(crate) fn push_tagged_user_message(
+    state: &mut AppState,
+    tag: impl Into<String>,
+    text: impl Into<String>,
+) {
+    push_message(
+        state,
+        Speaker::User,
+        text,
+        MessageStyle::Plain,
+        Some(tag.into()),
+    );
+}
+
+pub(crate) fn push_tagged_error_message(
+    state: &mut AppState,
+    tag: impl Into<String>,
+    text: impl Into<String>,
+) {
+    push_message(
+        state,
+        Speaker::Agent,
+        text,
+        MessageStyle::Error,
+        Some(tag.into()),
+    );
 }
 
 pub(crate) fn push_error_message(state: &mut AppState, text: impl Into<String>) {
-    push_message(state, Speaker::Agent, text, MessageStyle::Error);
+    push_message(state, Speaker::Agent, text, MessageStyle::Error, None);
 }
 
 pub(crate) fn push_agent_commentary(state: &mut AppState, text: impl Into<String>) {
@@ -27,7 +69,7 @@ pub(crate) fn push_agent_commentary(state: &mut AppState, text: impl Into<String
         pending.commentary_messages.push(text.clone());
         pending.has_visible_content = true;
     }
-    push_message(state, Speaker::Agent, text, MessageStyle::Commentary);
+    push_message(state, Speaker::Agent, text, MessageStyle::Commentary, None);
 }
 
 pub(crate) fn push_tool_call(state: &mut AppState, name: String, parameter: String) {
@@ -201,7 +243,7 @@ pub(crate) fn append_pending_stream_message(
             }
         }
 
-        push_message(state, Speaker::Agent, pending_text, style);
+        push_message(state, Speaker::Agent, pending_text, style, None);
         let index = state.session.entries.len() - 1;
         let pending = state
             .session
@@ -250,6 +292,7 @@ fn push_message(
     speaker: Speaker,
     text: impl Into<String>,
     style: MessageStyle,
+    tag: Option<String>,
 ) {
     state
         .session
@@ -258,6 +301,7 @@ fn push_message(
             speaker,
             text: text.into(),
             style,
+            tag,
         }));
     bump_transcript_revision(state);
 }

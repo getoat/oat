@@ -7,7 +7,7 @@ use tokio::{runtime::Runtime, sync::mpsc};
 use crate::{
     Tui,
     agent::AgentContext,
-    app::{self, App, Effect, StreamEvent, query},
+    app::{self, App, Effect, query},
     config::AppConfig,
     features::planning::run_planning_workflow,
     features::planning::sanitize_planning_agents,
@@ -18,17 +18,19 @@ use crate::{
     ui,
 };
 
-use super::{clipboard::osc52_copy_sequence, reply_driver::ReplyDriver};
+use super::side_channel_task_manager::SideChannelTaskManager;
+use super::{RuntimeEvent, clipboard::osc52_copy_sequence, reply_driver::ReplyDriver};
 
 pub(crate) struct EffectExecutor<'a> {
     pub(crate) runtime: &'a Runtime,
     pub(crate) terminal: &'a mut Tui,
     pub(crate) reply_driver: &'a mut ReplyDriver,
+    pub(crate) side_channel_task_manager: &'a mut SideChannelTaskManager,
     pub(crate) llm: &'a mut LlmService,
     pub(crate) config: &'a mut AppConfig,
     pub(crate) app: &'a mut App,
     pub(crate) stats: &'a StatsStore,
-    pub(crate) stream_tx: mpsc::UnboundedSender<(u64, StreamEvent)>,
+    pub(crate) stream_tx: mpsc::UnboundedSender<RuntimeEvent>,
     pub(crate) subagents: &'a SubagentManager,
 }
 
@@ -100,8 +102,10 @@ impl EffectExecutor<'_> {
                             .ok()
                             .flatten()
                             .unwrap_or_default();
-                        let _ = title_stream_tx
-                            .send((reply_id, StreamEvent::SessionTitleGenerated(title)));
+                        let _ = title_stream_tx.send(RuntimeEvent::MainReply {
+                            reply_id,
+                            event: crate::app::StreamEvent::SessionTitleGenerated(title),
+                        });
                     });
                 }
                 let task = self.runtime.spawn(async move {
@@ -116,6 +120,38 @@ impl EffectExecutor<'_> {
                     .await;
                 });
                 self.reply_driver.spawn_task(reply_id, task);
+                Ok(())
+            }
+            Effect::PromptSideChannel {
+                reply_id,
+                prompt,
+                history,
+                history_model_name,
+            } => {
+                self.refresh_codex_auth_if_needed()?;
+                self.sync_llm_access_mode(query::mode(self.app.state()))?;
+                let model_names = vec![
+                    self.config.model.model_name.clone(),
+                    self.config.safety.model_name.clone(),
+                ];
+                self.ensure_codex_auth_for_models(model_names.iter().map(String::as_str))?;
+                let llm = self.llm.clone();
+                let stats_hook = self
+                    .stats
+                    .hook_for_model(query::model_name(self.app.state()).to_string());
+                let stream_tx = self.stream_tx.clone();
+                let task = self.runtime.spawn(async move {
+                    llm.stream_side_channel(
+                        prompt,
+                        reply_id,
+                        history,
+                        history_model_name,
+                        stats_hook,
+                        stream_tx,
+                    )
+                    .await;
+                });
+                self.side_channel_task_manager.spawn_task(reply_id, task);
                 Ok(())
             }
             Effect::CompactHistory => {
@@ -137,13 +173,13 @@ impl EffectExecutor<'_> {
                         .compact_history_for_session(history, history_model_name)
                         .await
                     {
-                        Ok(result) => StreamEvent::CompactionFinished {
+                        Ok(result) => crate::app::StreamEvent::CompactionFinished {
                             history: result.history,
                             model_name: result.model_name,
                         },
-                        Err(error) => StreamEvent::Failed(error.to_string()),
+                        Err(error) => crate::app::StreamEvent::Failed(error.to_string()),
                     };
-                    let _ = stream_tx.send((reply_id, event));
+                    let _ = stream_tx.send(RuntimeEvent::MainReply { reply_id, event });
                 });
                 self.reply_driver.spawn_task(reply_id, task);
                 Ok(())
@@ -162,6 +198,7 @@ impl EffectExecutor<'_> {
             Effect::LoginCodex => self.login_codex(),
             Effect::LogoutCodex => self.logout_codex(),
             Effect::RotateSession => {
+                self.side_channel_task_manager.cancel_all();
                 self.runtime
                     .block_on(self.subagents.cancel_all_running(false));
                 self.stats.rotate_session()?;
@@ -296,12 +333,17 @@ impl EffectExecutor<'_> {
                 let task = self.runtime.spawn(async move {
                     let finalization_tx = stream_tx.clone();
                     let on_finalization_started = Arc::new(move || {
-                        let _ = finalization_tx
-                            .send((reply_id, StreamEvent::PlanningFinalizationStarted));
+                        let _ = finalization_tx.send(RuntimeEvent::MainReply {
+                            reply_id,
+                            event: crate::app::StreamEvent::PlanningFinalizationStarted,
+                        });
                     });
                     let failure_tx = stream_tx.clone();
                     let on_failure = Arc::new(move |message: String| {
-                        let _ = failure_tx.send((reply_id, StreamEvent::Failed(message)));
+                        let _ = failure_tx.send(RuntimeEvent::MainReply {
+                            reply_id,
+                            event: crate::app::StreamEvent::Failed(message),
+                        });
                     });
                     let synth_config = config.clone();
                     let synth_stream_tx = stream_tx.clone();
@@ -330,7 +372,9 @@ impl EffectExecutor<'_> {
                             })?;
                             let stats_hook = stats.hook_for_model(config.model.model_name.clone());
                             let emit = Arc::new(move |reply_id, event| {
-                                stream_tx.send((reply_id, event)).is_ok()
+                                stream_tx
+                                    .send(RuntimeEvent::MainReply { reply_id, event })
+                                    .is_ok()
                             });
                             llm.run_prompt(
                                 reply_id,
