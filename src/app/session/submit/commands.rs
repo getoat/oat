@@ -83,7 +83,7 @@ fn submit_resume_command(state: &mut AppState, arguments: &str) -> Option<Effect
 fn build_btw_request_context(state: &AppState) -> (Vec<SessionHistoryMessage>, Option<String>) {
     if let Some(seed) = query::active_main_request_seed(state) {
         let mut history = seed.history.clone();
-        history.push(SessionHistoryMessage::user(seed.prompt.clone()));
+        history.push(SessionHistoryMessage::user(seed.model_prompt.clone()));
         return (history, seed.history_model_name.clone());
     }
 
@@ -269,8 +269,8 @@ fn submit_effort_command(state: &mut AppState, arguments: &str) -> Option<Effect
 mod tests {
     use super::*;
     use crate::app::{
-        ChatMessage, MessageStyle, PendingReply, PendingReplyKind, SessionHistoryMessage, Speaker,
-        TranscriptEntry,
+        ChatMessage, MainRequestSeed, MessageStyle, PendingReply, PendingReplyKind,
+        SessionHistoryMessage, Speaker, TranscriptEntry,
         session::test_support::{new_app, registry_app},
     };
     use crate::config::{KimiThinkingMode, ReasoningEffort, ReasoningSetting};
@@ -499,6 +499,38 @@ mod tests {
         );
         assert!(app.has_pending_reply());
         assert_eq!(app.state().session.pending_side_replies.len(), 1);
+    }
+
+    #[test]
+    fn btw_command_uses_model_prompt_when_visible_prompt_differs() {
+        let mut app = new_app(true);
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(1, PendingReplyKind::Normal));
+        app.state_mut().session.active_main_request_seed = Some(MainRequestSeed {
+            history: vec![SessionHistoryMessage::assistant("prior")],
+            visible_prompt: "I accept this plan. Begin implementation now.".into(),
+            model_prompt: "You are no longer in Plan Mode. Begin implementation now.".into(),
+            history_model_name: Some("gpt-5-mini".into()),
+        });
+        app.composer_mut().insert_str("/btw side question");
+        app.sync_command_selection();
+
+        let effect = app.apply(crate::app::Action::SubmitMessage);
+
+        assert_eq!(
+            effect,
+            Some(Effect::PromptSideChannel {
+                reply_id: 1,
+                prompt: "side question".into(),
+                history: vec![
+                    SessionHistoryMessage::assistant("prior"),
+                    SessionHistoryMessage::user(
+                        "You are no longer in Plan Mode. Begin implementation now.",
+                    ),
+                ],
+                history_model_name: Some("gpt-5-mini".into()),
+            })
+        );
     }
 
     #[test]

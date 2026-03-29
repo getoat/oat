@@ -930,7 +930,8 @@ mod tests {
             .push_back("queued".into());
         app.state_mut().session.active_main_request_seed = Some(crate::app::MainRequestSeed {
             history: vec![SessionHistoryMessage::user("prior")],
-            prompt: "continue".into(),
+            visible_prompt: "continue".into(),
+            model_prompt: "continue".into(),
             history_model_name: Some("gpt-5-mini".into()),
         });
         app.state_mut().session.active_background_terminal_count = 3;

@@ -122,6 +122,10 @@ pub(crate) fn on_stream_event(
                 .map(|pending| pending.plain_text)
                 .unwrap_or_default();
             if let Some(history) = history {
+                let history = ops::session::canonicalize_main_turn_history(
+                    history,
+                    query::active_main_request_seed(state),
+                );
                 ops::session::replace_session_history(state, history);
                 let model_name = state.session.model_name.clone();
                 ops::session::set_last_history_model_name(state, Some(model_name));
@@ -209,9 +213,9 @@ mod tests {
     use super::*;
     use crate::{
         app::{
-            Action, ChatMessage, Effect, MessageStyle, PendingReply, PendingReplyKind,
-            PendingSideReply, SessionHistoryMessage, SideChannelEvent, SideChannelKind, Speaker,
-            TranscriptEntry,
+            Action, ChatMessage, Effect, MainRequestSeed, MessageStyle, PendingReply,
+            PendingReplyKind, PendingSideReply, SessionHistoryMessage, SideChannelEvent,
+            SideChannelKind, Speaker, TranscriptEntry,
             session::test_support::{new_app, registry_app},
         },
         ask_user::{AskUserAnswer, AskUserQuestion, AskUserRequest},
@@ -820,6 +824,77 @@ mod tests {
                 SessionHistoryMessage::assistant("world")
             ]
         );
+    }
+
+    #[test]
+    fn finished_stream_rewrites_transformed_prompt_to_visible_prompt() {
+        let mut app = new_app(true);
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(2, PendingReplyKind::Normal));
+        app.state_mut().session.active_main_request_seed = Some(MainRequestSeed {
+            history: vec![SessionHistoryMessage::assistant("old")],
+            visible_prompt: "I accept this plan. Begin implementation now.".into(),
+            model_prompt: "You are no longer in Plan Mode. Begin implementation now.".into(),
+            history_model_name: None,
+        });
+
+        app.apply(Action::StreamEvent {
+            reply_id: 2,
+            event: StreamEvent::TurnEnded {
+                reason: TurnEndReason::Completed,
+                history: Some(vec![
+                    SessionHistoryMessage::assistant("old"),
+                    SessionHistoryMessage::user(
+                        "You are no longer in Plan Mode. Begin implementation now.",
+                    ),
+                    SessionHistoryMessage::assistant("implemented"),
+                ]),
+            },
+        });
+
+        assert_eq!(
+            app.session_history(),
+            &[
+                SessionHistoryMessage::assistant("old"),
+                SessionHistoryMessage::user("I accept this plan. Begin implementation now."),
+                SessionHistoryMessage::assistant("implemented"),
+            ]
+        );
+    }
+
+    #[test]
+    fn interrupted_turn_rewrites_transformed_prompt_to_visible_prompt() {
+        let mut app = new_app(true);
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(2, PendingReplyKind::Normal));
+        app.state_mut().session.active_main_request_seed = Some(MainRequestSeed {
+            history: vec![SessionHistoryMessage::assistant("old")],
+            visible_prompt: "Plan the rollout".into(),
+            model_prompt: "# Plan Mode\n\nPlan the rollout".into(),
+            history_model_name: None,
+        });
+
+        app.apply(Action::StreamEvent {
+            reply_id: 2,
+            event: StreamEvent::TurnEnded {
+                reason: TurnEndReason::InterruptedAtStepBoundary,
+                history: Some(vec![
+                    SessionHistoryMessage::assistant("old"),
+                    SessionHistoryMessage::user("# Plan Mode\n\nPlan the rollout"),
+                    SessionHistoryMessage::assistant("tool-informed context"),
+                ]),
+            },
+        });
+
+        assert_eq!(
+            app.session_history(),
+            &[
+                SessionHistoryMessage::assistant("old"),
+                SessionHistoryMessage::user("Plan the rollout"),
+                SessionHistoryMessage::assistant("tool-informed context"),
+            ]
+        );
+        assert!(app.state_mut().session.pending_reply.is_none());
     }
 
     #[test]

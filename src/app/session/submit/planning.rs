@@ -13,12 +13,18 @@ pub(crate) fn submit_plan_acceptance(state: &mut AppState) -> Option<Effect> {
     ops::composer::record_submitted_input(state, &visible_prompt);
     ops::planning::accept_plan_review_for_implementation(state);
     state.session.mode = AccessMode::ReadWrite;
-    ops::transcript::push_user_message(state, visible_prompt);
+    ops::transcript::push_user_message(state, visible_prompt.clone());
     ops::history::resume_history_follow(state);
     ops::composer::clear_composer(state);
     let reply_id = ops::session::next_reply_id(state);
     ops::session::set_pending_reply(state, reply_id, PendingReplyKind::Normal);
-    ops::session::set_active_main_request_seed(state, Vec::new(), prompt.clone(), None);
+    ops::session::set_active_main_request_seed(
+        state,
+        Vec::new(),
+        visible_prompt,
+        prompt.clone(),
+        None,
+    );
 
     Some(Effect::PromptModel {
         reply_id,
@@ -57,6 +63,7 @@ pub(super) fn submit_planning_draft(state: &mut AppState, submitted: &str) -> Op
     ops::session::set_active_main_request_seed(
         state,
         state.session.session_history.to_vec(),
+        submitted.to_string(),
         prompt.clone(),
         state.session.last_history_model_name.clone(),
     );
@@ -85,6 +92,7 @@ pub(super) fn submit_planning_turn(state: &mut AppState, submitted: &str) -> Opt
     ops::session::set_active_main_request_seed(
         state,
         state.session.session_history.to_vec(),
+        submitted.to_string(),
         submitted.to_string(),
         state.session.last_history_model_name.clone(),
     );

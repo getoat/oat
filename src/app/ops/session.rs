@@ -104,18 +104,47 @@ pub(crate) fn replace_session_history(state: &mut AppState, history: Vec<Session
 pub(crate) fn set_active_main_request_seed(
     state: &mut AppState,
     history: Vec<SessionHistoryMessage>,
-    prompt: String,
+    visible_prompt: String,
+    model_prompt: String,
     history_model_name: Option<String>,
 ) {
     state.session.active_main_request_seed = Some(MainRequestSeed {
         history,
-        prompt,
+        visible_prompt,
+        model_prompt,
         history_model_name,
     });
 }
 
 pub(crate) fn clear_active_main_request_seed(state: &mut AppState) {
     state.session.active_main_request_seed = None;
+}
+
+pub(crate) fn canonicalize_main_turn_history(
+    history: Vec<SessionHistoryMessage>,
+    seed: Option<&MainRequestSeed>,
+) -> Vec<SessionHistoryMessage> {
+    let Some(seed) = seed else {
+        return history;
+    };
+    if seed.visible_prompt == seed.model_prompt {
+        return history;
+    }
+    if history.len() <= seed.history.len() || !history.starts_with(&seed.history) {
+        return history;
+    }
+
+    let prompt_index = seed.history.len();
+    if history
+        .get(prompt_index)
+        .is_some_and(|message| message == &SessionHistoryMessage::user(seed.model_prompt.clone()))
+    {
+        let mut canonical = history;
+        canonical[prompt_index] = SessionHistoryMessage::user(seed.visible_prompt.clone());
+        canonical
+    } else {
+        history
+    }
 }
 
 pub(crate) fn begin_side_reply(

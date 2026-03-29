@@ -105,7 +105,8 @@ pub struct PendingReply {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MainRequestSeed {
     pub history: Vec<SessionHistoryMessage>,
-    pub prompt: String,
+    pub visible_prompt: String,
+    pub model_prompt: String,
     pub history_model_name: Option<String>,
 }
 

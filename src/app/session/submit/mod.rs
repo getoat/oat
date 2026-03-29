@@ -97,6 +97,7 @@ fn submit_normal_message_text(
         state,
         state.session.session_history.to_vec(),
         prompt.clone(),
+        prompt.clone(),
         state.session.last_history_model_name.clone(),
     );
 
