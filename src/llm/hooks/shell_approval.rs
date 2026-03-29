@@ -13,8 +13,8 @@ use crate::{
     app::{AccessMode, ApprovalMode, CommandRisk, ShellApprovalDecision},
     completion_request::CompletionRequestSnapshot,
     tools::{
-        RUN_SHELL_SCRIPT_TOOL_NAME, RunShellScriptArgs, display_requested_shell_cwd,
-        display_shell_command,
+        RUN_SHELL_SCRIPT_TOOL_NAME, START_BACKGROUND_TERMINAL_TOOL_NAME, ShellCommandRequest,
+        StartBackgroundTerminalArgs, display_requested_shell_cwd, display_shell_command,
     },
 };
 
@@ -117,26 +117,26 @@ impl ShellApprovalController {
         reply_id: u64,
         access_mode: AccessMode,
         internal_call_id: &str,
-        args: &RunShellScriptArgs,
+        command: &ShellCommandRequest,
         emit: &EventCallback,
         safety: &SafetyClassifier,
         snapshot: Option<CompletionRequestSnapshot>,
         resume: Option<&ResumeOverrideController>,
     ) -> ToolCallHookAction {
-        let classification = safety.classify(access_mode, args).await;
-        let command = display_shell_command(&args.script);
-        let working_directory = display_requested_shell_cwd(args.cwd.as_deref());
+        let classification = safety.classify(access_mode, command).await;
+        let display_command = display_shell_command(&command.script);
+        let working_directory = display_requested_shell_cwd(command.cwd.as_deref());
         if access_mode == AccessMode::ReadOnly && classification.risk != CommandRisk::Low {
             return ToolCallHookAction::skip(format!(
                 "{} risk shell commands require write mode. Switch to write mode before retrying.\nWorking directory: {}\nCommand: {}",
                 classification.risk.label(),
                 working_directory,
-                command
+                display_command
             ));
         }
 
         if let Some(decision) = resume.and_then(|resume| {
-            resume.consume_shell(classification.risk, &command, &working_directory)
+            resume.consume_shell(classification.risk, &display_command, &working_directory)
         }) {
             {
                 let mut state = self.inner.lock().expect("shell approval state lock");
@@ -170,7 +170,7 @@ impl ShellApprovalController {
                 || bucket
                     .patterns
                     .iter()
-                    .any(|pattern| shell_pattern_matches(pattern, &command))
+                    .any(|pattern| shell_pattern_matches(pattern, &display_command))
             {
                 return ToolCallHookAction::Continue;
             }
@@ -182,7 +182,7 @@ impl ShellApprovalController {
                     risk: classification.risk,
                     sender: tx,
                     snapshot,
-                    command: command.clone(),
+                    command: display_command.clone(),
                     working_directory: working_directory.clone(),
                 },
             );
@@ -195,7 +195,7 @@ impl ShellApprovalController {
                 request_id: internal_call_id.to_string(),
                 risk: classification.risk,
                 risk_explanation: classification.risk_explanation.clone(),
-                command: command.clone(),
+                command: display_command.clone(),
                 working_directory: working_directory.clone(),
                 reason: classification.reason.clone(),
             },
@@ -300,17 +300,28 @@ where
         internal_call_id: &str,
         args: &str,
     ) -> ToolCallHookAction {
-        if tool_name != RUN_SHELL_SCRIPT_TOOL_NAME {
-            return ToolCallHookAction::Continue;
-        }
-
-        let args = match serde_json::from_str::<RunShellScriptArgs>(args) {
-            Ok(args) => args,
-            Err(error) => {
-                return ToolCallHookAction::skip(format!(
-                    "RunShellScript request was invalid JSON: {error}"
-                ));
+        let command = match tool_name {
+            RUN_SHELL_SCRIPT_TOOL_NAME => {
+                match serde_json::from_str::<crate::tools::RunShellScriptArgs>(args) {
+                    Ok(args) => args.command,
+                    Err(error) => {
+                        return ToolCallHookAction::skip(format!(
+                            "RunShellScript request was invalid JSON: {error}"
+                        ));
+                    }
+                }
             }
+            START_BACKGROUND_TERMINAL_TOOL_NAME => {
+                match serde_json::from_str::<StartBackgroundTerminalArgs>(args) {
+                    Ok(args) => args.command,
+                    Err(error) => {
+                        return ToolCallHookAction::skip(format!(
+                            "StartBackgroundTerminal request was invalid JSON: {error}"
+                        ));
+                    }
+                }
+            }
+            _ => return ToolCallHookAction::Continue,
         };
 
         self.approvals
@@ -318,7 +329,7 @@ where
                 self.reply_id,
                 self.access_mode,
                 &scoped_request_id(&self.request_id_prefix, internal_call_id),
-                &args,
+                &command,
                 &self.emit,
                 &self.safety,
                 self.capture.as_ref().and_then(CompletionCapture::snapshot),

@@ -491,6 +491,7 @@ async fn read_write_mode_registers_mutation_tools() {
         Some(AskUserController::default()),
         true,
         None,
+        None,
     )
     .expect("service builds");
 
@@ -540,6 +541,7 @@ async fn read_only_mode_omits_mutation_tools() {
         WriteApprovalController::default(),
         Some(AskUserController::default()),
         true,
+        None,
         None,
     )
     .expect("service builds");
@@ -793,6 +795,7 @@ async fn write_mode_preamble_is_the_same_for_both_approval_modes() {
         Some(AskUserController::default()),
         true,
         None,
+        None,
     )
     .expect("manual service builds")
     .preamble;
@@ -802,6 +805,7 @@ async fn write_mode_preamble_is_the_same_for_both_approval_modes() {
         WriteApprovalController::new(ApprovalMode::Disabled),
         Some(AskUserController::default()),
         true,
+        None,
         None,
     )
     .expect("disabled service builds")
@@ -818,6 +822,7 @@ async fn todo_tool_can_be_disabled_independently_of_ask_user() {
         WriteApprovalController::default(),
         Some(AskUserController::default()),
         false,
+        None,
         None,
     )
     .expect("service builds");
@@ -842,6 +847,10 @@ fn safety_preamble_allows_read_only_git_commands_to_be_low() {
     assert!(preamble.contains("Set `explanation` to a concise justification."));
     assert!(preamble.contains("10 words or fewer when possible"));
     assert!(preamble.contains("side effects"));
+    assert!(
+        preamble
+            .contains("Long-running, polling, watch-mode, or infinite commands can still be Low")
+    );
     assert!(preamble.contains("Git commands are not automatically High."));
     assert!(preamble.contains("status, diff, log, show, and ls-remote can be Low"));
 }
@@ -851,6 +860,13 @@ fn minimum_shell_risk_does_not_force_git_status_high() {
     assert_eq!(minimum_shell_risk("git status", "git status"), None);
     assert_eq!(
         minimum_shell_risk("git diff --stat", "git diff --stat"),
+        None
+    );
+    assert_eq!(
+        minimum_shell_risk(
+            "while true; do printf 'tick\\n'; sleep 1; done",
+            "while true; do printf 'tick\\n'; sleep 1; done"
+        ),
         None
     );
     assert_eq!(

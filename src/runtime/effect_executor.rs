@@ -8,7 +8,12 @@ use crate::{
     Tui,
     agent::AgentContext,
     app::{self, App, Effect, query},
+    background_terminals::{
+        BackgroundTerminalInspectRequest, BackgroundTerminalManager,
+        format_terminal_inspect_message, format_terminal_list_message,
+    },
     config::AppConfig,
+    debug_log::log_debug,
     features::planning::run_planning_workflow,
     features::planning::sanitize_planning_agents,
     llm::{LlmService, history_from_rig, history_into_rig},
@@ -32,6 +37,7 @@ pub(crate) struct EffectExecutor<'a> {
     pub(crate) stats: &'a StatsStore,
     pub(crate) stream_tx: mpsc::UnboundedSender<RuntimeEvent>,
     pub(crate) subagents: &'a SubagentManager,
+    pub(crate) terminals: &'a BackgroundTerminalManager,
 }
 
 fn rebuild_main_llm(
@@ -40,6 +46,7 @@ fn rebuild_main_llm(
     llm: &LlmService,
     access_mode: app::AccessMode,
     subagents: &SubagentManager,
+    terminals: &BackgroundTerminalManager,
 ) -> Result<LlmService> {
     let _guard = runtime.enter();
     LlmService::from_config_with_controllers(
@@ -50,6 +57,7 @@ fn rebuild_main_llm(
         llm.ask_user_controller(),
         llm.todo_available(),
         Some(subagents.clone()),
+        Some(terminals.clone()),
     )
 }
 
@@ -59,12 +67,13 @@ fn sync_main_llm_access_mode(
     llm: &mut LlmService,
     access_mode: app::AccessMode,
     subagents: &SubagentManager,
+    terminals: &BackgroundTerminalManager,
 ) -> Result<bool> {
     if llm.access_mode == access_mode {
         return Ok(false);
     }
 
-    *llm = rebuild_main_llm(runtime, config, llm, access_mode, subagents)?;
+    *llm = rebuild_main_llm(runtime, config, llm, access_mode, subagents, terminals)?;
     Ok(true)
 }
 
@@ -78,6 +87,14 @@ impl EffectExecutor<'_> {
                 history_model_name,
                 session_title_prompt,
             } => {
+                log_debug(
+                    "effect_executor",
+                    format!(
+                        "prompt_model reply_id={reply_id} history_len={} prompt_chars={}",
+                        history.len(),
+                        prompt.chars().count()
+                    ),
+                );
                 self.refresh_codex_auth_if_needed()?;
                 self.sync_llm_access_mode(query::mode(self.app.state()))?;
                 let model_names = vec![
@@ -201,6 +218,7 @@ impl EffectExecutor<'_> {
                 self.side_channel_task_manager.cancel_all();
                 self.runtime
                     .block_on(self.subagents.cancel_all_running(false));
+                self.terminals.cancel_all_running();
                 self.stats.rotate_session()?;
                 self.llm.reset_write_approvals();
                 Ok(())
@@ -366,6 +384,7 @@ impl EffectExecutor<'_> {
                                 ask_user,
                                 todo_available,
                                 None,
+                                None,
                             )
                             .map_err(|error| {
                                 format!("Failed to start planning synthesis: {error}")
@@ -475,16 +494,58 @@ impl EffectExecutor<'_> {
                 Ok(())
             }
             Effect::CancelPendingReply => {
+                log_debug("effect_executor", "cancel_pending_reply effect");
                 self.reply_driver.cancel_active_reply(self.llm);
                 self.runtime
                     .block_on(self.subagents.cancel_all_running(true));
+                Ok(())
+            }
+            Effect::ListBackgroundTerminals => {
+                let terminals = self.terminals.list();
+                app::ops::transcript::push_agent_message(
+                    self.app.state_mut(),
+                    format_terminal_list_message(&terminals),
+                );
+                Ok(())
+            }
+            Effect::InspectBackgroundTerminal { id } => {
+                let result = self.runtime.block_on(self.terminals.inspect(
+                    &id,
+                    BackgroundTerminalInspectRequest {
+                        after_sequence: None,
+                        wait_for_change_ms: None,
+                    },
+                ))?;
+                app::ops::transcript::push_agent_message(
+                    self.app.state_mut(),
+                    format_terminal_inspect_message(&result),
+                );
+                Ok(())
+            }
+            Effect::KillBackgroundTerminal { id } => {
+                log_debug(
+                    "effect_executor",
+                    format!("kill_background_terminal id={id}"),
+                );
+                let snapshot = self.terminals.kill(&id)?;
+                app::ops::transcript::push_agent_message(
+                    self.app.state_mut(),
+                    format!("Cancelled background terminal `{}`.", snapshot.id),
+                );
                 Ok(())
             }
         }
     }
 
     fn rebuild_llm(&self, config: &AppConfig, access_mode: app::AccessMode) -> Result<LlmService> {
-        rebuild_main_llm(self.runtime, config, self.llm, access_mode, self.subagents)
+        rebuild_main_llm(
+            self.runtime,
+            config,
+            self.llm,
+            access_mode,
+            self.subagents,
+            self.terminals,
+        )
     }
 
     fn sync_llm_access_mode(&mut self, access_mode: app::AccessMode) -> Result<bool> {
@@ -494,6 +555,7 @@ impl EffectExecutor<'_> {
             self.llm,
             access_mode,
             self.subagents,
+            self.terminals,
         )
     }
 
@@ -637,6 +699,7 @@ mod tests {
     use crate::{
         agent::AgentContext,
         app::{AccessMode, ApprovalMode},
+        background_terminals::BackgroundTerminalManager,
         config::{
             AppConfig, AzureConfig, ModelSelectionConfig, ReasoningEffort, SafetyConfig,
             SubagentConfig, ToolConfig, UiConfig,
@@ -678,6 +741,8 @@ mod tests {
         let config = sample_config();
         let (subagent_tx, _) = mpsc::unbounded_channel();
         let subagents = SubagentManager::new(4, subagent_tx, StatsStore::new());
+        let (terminal_tx, _) = mpsc::unbounded_channel();
+        let terminals = BackgroundTerminalManager::new(terminal_tx);
         let _guard = runtime.enter();
         let mut llm = LlmService::from_config(
             &config,
@@ -686,6 +751,7 @@ mod tests {
             Some(AskUserController::default()),
             true,
             Some(subagents.clone()),
+            Some(terminals.clone()),
         )
         .expect("service builds");
         drop(_guard);
@@ -696,6 +762,7 @@ mod tests {
             &mut llm,
             AccessMode::ReadWrite,
             &subagents,
+            &terminals,
         )
         .expect("runtime mode sync succeeds");
 

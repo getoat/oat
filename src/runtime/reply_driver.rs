@@ -3,6 +3,7 @@ use tokio::{runtime::Runtime, sync::mpsc, task::JoinHandle};
 
 use crate::{
     app::{App, PendingReplyKind, StreamEvent, ops, query},
+    debug_log::log_debug,
     llm::{InteractionResolveResult, LlmService, ResumeRequest},
     stats::StatsStore,
 };
@@ -16,6 +17,14 @@ pub(crate) struct ReplyDriver {
 
 impl ReplyDriver {
     pub(crate) fn clear_completed_task(&mut self, reply_id: u64, event: &StreamEvent) {
+        log_debug(
+            "reply_driver",
+            format!(
+                "clear_completed_task reply_id={reply_id} event={} active_before={:?}",
+                stream_event_label(event),
+                self.active_reply_task.as_ref().map(|(id, _)| *id)
+            ),
+        );
         if matches!(
             event,
             StreamEvent::TurnEnded { .. }
@@ -49,6 +58,13 @@ impl ReplyDriver {
     }
 
     pub(crate) fn cancel_active_reply(&mut self, llm: &LlmService) {
+        log_debug(
+            "reply_driver",
+            format!(
+                "cancel_active_reply active_before={:?}",
+                self.active_reply_task.as_ref().map(|(id, _)| *id)
+            ),
+        );
         if let Some((_, task)) = self.active_reply_task.take() {
             task.abort();
         }
@@ -57,6 +73,7 @@ impl ReplyDriver {
     }
 
     pub(crate) fn spawn_task(&mut self, reply_id: u64, task: JoinHandle<()>) {
+        log_debug("reply_driver", format!("spawn_task reply_id={reply_id}"));
         self.active_reply_task = Some((reply_id, task));
     }
 
@@ -172,5 +189,24 @@ impl ReplyDriver {
     pub(crate) fn require_active_reply_id(app: &App) -> Result<u64> {
         query::active_reply_id(app.state())
             .ok_or_else(|| anyhow!("Compaction requires an active pending reply."))
+    }
+}
+
+fn stream_event_label(event: &StreamEvent) -> &'static str {
+    match event {
+        StreamEvent::TextDelta(_) => "TextDelta",
+        StreamEvent::Commentary(_) => "Commentary",
+        StreamEvent::ReasoningDelta(_) => "ReasoningDelta",
+        StreamEvent::ToolCall { .. } => "ToolCall",
+        StreamEvent::ToolResult { .. } => "ToolResult",
+        StreamEvent::TodoSnapshot(_) => "TodoSnapshot",
+        StreamEvent::AskUserRequested { .. } => "AskUserRequested",
+        StreamEvent::WriteApprovalRequested { .. } => "WriteApprovalRequested",
+        StreamEvent::ShellApprovalRequested { .. } => "ShellApprovalRequested",
+        StreamEvent::PlanningFinalizationStarted => "PlanningFinalizationStarted",
+        StreamEvent::CompactionFinished { .. } => "CompactionFinished",
+        StreamEvent::TurnEnded { .. } => "TurnEnded",
+        StreamEvent::Failed(_) => "Failed",
+        StreamEvent::SessionTitleGenerated(_) => "SessionTitleGenerated",
     }
 }

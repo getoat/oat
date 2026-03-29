@@ -1,8 +1,10 @@
+use crate::app::session::PendingReplyActivity;
 use crate::{
     app::{
         AppState, MainRequestSeed, PendingReply, PendingReplyKind, PendingReplyReplaySeed,
         PendingSideReply, SessionHistoryMessage, SessionState, SideChannelKind, UiState,
     },
+    debug_log::log_debug,
     features::planning::PlanningStage,
     todo::TodoSnapshot,
 };
@@ -44,7 +46,17 @@ pub(crate) fn ensure_pending_reply(state: &mut AppState, kind: PendingReplyKind)
 }
 
 pub(crate) fn set_pending_reply(state: &mut AppState, reply_id: u64, kind: PendingReplyKind) {
+    log_debug(
+        "session",
+        format!("set_pending_reply id={reply_id} kind={kind:?}"),
+    );
     state.session.pending_reply = Some(PendingReply::new(reply_id, kind));
+}
+
+pub(crate) fn set_pending_reply_activity(state: &mut AppState, activity: PendingReplyActivity) {
+    if let Some(pending) = state.session.pending_reply.as_mut() {
+        pending.activity = activity;
+    }
 }
 
 pub(crate) fn begin_session_title_request(state: &mut AppState, reply_id: u64) {
@@ -65,6 +77,15 @@ pub(crate) fn store_session_title(state: &mut AppState, reply_id: u64, title: St
 }
 
 pub(crate) fn clear_pending_reply_only(state: &mut AppState) {
+    let previous = state
+        .session
+        .pending_reply
+        .as_ref()
+        .map(|pending| pending.id);
+    log_debug(
+        "session",
+        format!("clear_pending_reply_only previous={previous:?}"),
+    );
     state.session.pending_reply = None;
 }
 
@@ -166,6 +187,15 @@ pub(crate) fn set_should_quit(state: &mut AppState) {
 }
 
 pub(crate) fn cancel_pending_reply(state: &mut AppState) {
+    let previous = state
+        .session
+        .pending_reply
+        .as_ref()
+        .map(|pending| pending.id);
+    log_debug(
+        "session",
+        format!("cancel_pending_reply previous={previous:?}"),
+    );
     state.session.pending_reply = None;
     state.session.pending_write_approvals.clear();
     state.session.pending_shell_approvals.clear();

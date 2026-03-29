@@ -1,4 +1,4 @@
-use crate::subagents::SubagentUiEvent;
+use crate::{background_terminals::BackgroundTerminalUiEvent, subagents::SubagentUiEvent};
 
 use super::{EditorInput, SideChannelEvent, StreamEvent};
 
@@ -56,5 +56,6 @@ pub enum Action {
         event: SideChannelEvent,
     },
     SubagentEvent(SubagentUiEvent),
+    BackgroundTerminalEvent(BackgroundTerminalUiEvent),
     Tick,
 }

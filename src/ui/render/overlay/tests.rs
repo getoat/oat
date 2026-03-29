@@ -84,7 +84,7 @@ fn render_command_palette_scrolls_to_selected_command_on_small_screens() {
     app.composer_mut().insert_str("/");
     app.sync_command_selection();
 
-    for _ in 0..8 {
+    for _ in 0..12 {
         app.apply(Action::SelectNextCommand);
     }
 

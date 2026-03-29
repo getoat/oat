@@ -33,8 +33,9 @@ pub(crate) use selectors::{
 };
 pub use state::SessionState;
 pub use transcript::{
-    ChatMessage, MainRequestSeed, MessageStyle, PendingReply, PendingReplyKind,
-    PendingReplyReplaySeed, PendingSideReply, ProposedPlanEntry, SideChannelKind,
-    SubagentDisplayState, SubagentStatusEntry, SubagentStatusKind, ToolCall, ToolResultEntry,
-    TranscriptEntry, pending_stream_text_is_visible, startup_banner_message,
+    ActivityDisplayState, BackgroundTerminalStatusEntry, ChatMessage, MainRequestSeed,
+    MessageStyle, PendingReply, PendingReplyActivity, PendingReplyKind, PendingReplyReplaySeed,
+    PendingSideReply, ProposedPlanEntry, SideChannelKind, SubagentStatusEntry, SubagentStatusKind,
+    ToolCall, ToolResultEntry, TranscriptEntry, pending_stream_text_is_visible,
+    startup_banner_message,
 };

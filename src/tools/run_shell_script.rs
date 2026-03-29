@@ -9,7 +9,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::{process::Command, time::timeout};
 
-use super::common::{ToolExecError, resolve_workspace_path};
+use super::{
+    common::ToolExecError,
+    shell_command::{ShellCommandRequest, display_shell_command, resolve_shell_cwd},
+};
 
 pub const RUN_SHELL_SCRIPT_TOOL_NAME: &str = "RunShellScript";
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
@@ -21,12 +24,10 @@ pub struct RunShellScriptTool {
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct RunShellScriptArgs {
-    pub script: String,
-    #[serde(default)]
-    pub cwd: Option<String>,
+    #[serde(flatten)]
+    pub command: ShellCommandRequest,
     #[serde(default)]
     pub timeout_ms: Option<u64>,
-    pub intent: String,
 }
 
 impl RunShellScriptTool {
@@ -79,14 +80,14 @@ pub(crate) async fn run_shell_script(
     root: &Path,
     args: &RunShellScriptArgs,
 ) -> Result<String, ToolExecError> {
-    let cwd = resolve_shell_cwd(root, args.cwd.as_deref())?;
-    let cwd_label = display_shell_cwd(root, &cwd);
-    let display_command = display_shell_command(args.script.as_str());
+    let cwd = resolve_shell_cwd(root, args.command.cwd.as_deref())?;
+    let cwd_label = args.command.cwd_label(root)?;
+    let display_command = display_shell_command(args.command.script.as_str());
     let timeout_ms = args.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS).max(1);
 
     let mut child = Command::new("bash");
     child.arg("-lc");
-    child.arg(args.script.as_str());
+    child.arg(args.command.script.as_str());
     child.current_dir(&cwd);
     child.stdout(Stdio::piped());
     child.stderr(Stdio::piped());
@@ -107,36 +108,6 @@ pub(crate) async fn run_shell_script(
         String::from_utf8_lossy(&output.stdout).as_ref(),
         String::from_utf8_lossy(&output.stderr).as_ref(),
     ))
-}
-
-pub(crate) fn resolve_shell_cwd(
-    root: &Path,
-    raw_cwd: Option<&str>,
-) -> Result<PathBuf, ToolExecError> {
-    raw_cwd
-        .map(|cwd| resolve_workspace_path(root, cwd))
-        .transpose()
-        .map(|cwd| cwd.unwrap_or_else(|| root.to_path_buf()))
-}
-
-pub(crate) fn display_shell_cwd(root: &Path, cwd: &Path) -> String {
-    match cwd.strip_prefix(root) {
-        Ok(path) if path.as_os_str().is_empty() => ".".into(),
-        Ok(path) => path.display().to_string(),
-        Err(_) => cwd.display().to_string(),
-    }
-}
-
-pub fn display_shell_command(script: &str) -> String {
-    script.to_string()
-}
-
-pub fn display_requested_shell_cwd(raw_cwd: Option<&str>) -> String {
-    raw_cwd
-        .map(str::trim)
-        .filter(|cwd| !cwd.is_empty())
-        .unwrap_or(".")
-        .to_string()
 }
 
 fn format_shell_result(
@@ -174,16 +145,19 @@ fn format_shell_result(
 mod tests {
     use super::*;
     use crate::tools::common::test_support::TempTree;
+    use crate::tools::display_requested_shell_cwd;
 
     #[tokio::test]
     async fn run_shell_script_executes_in_workspace_root() {
         let tree = TempTree::new();
         std::fs::write(tree.root.join("note.txt"), "hello\n").expect("fixture");
         let args = RunShellScriptArgs {
-            script: "pwd && cat note.txt".into(),
-            cwd: None,
+            command: ShellCommandRequest {
+                script: "pwd && cat note.txt".into(),
+                cwd: None,
+                intent: "inspect workspace".into(),
+            },
             timeout_ms: Some(5_000),
-            intent: "inspect workspace".into(),
         };
 
         let output = run_shell_script(&tree.root, &args).await.expect("command");
@@ -198,10 +172,12 @@ mod tests {
         std::fs::create_dir_all(tree.root.join("nested")).expect("dir");
         std::fs::write(tree.root.join("nested/file.txt"), "nested\n").expect("fixture");
         let args = RunShellScriptArgs {
-            script: "pwd && cat file.txt".into(),
-            cwd: Some("nested".into()),
+            command: ShellCommandRequest {
+                script: "pwd && cat file.txt".into(),
+                cwd: Some("nested".into()),
+                intent: "inspect nested dir".into(),
+            },
             timeout_ms: Some(5_000),
-            intent: "inspect nested dir".into(),
         };
 
         let output = run_shell_script(&tree.root, &args).await.expect("command");
@@ -226,10 +202,12 @@ mod tests {
     async fn run_shell_script_times_out() {
         let tree = TempTree::new();
         let args = RunShellScriptArgs {
-            script: "sleep 1".into(),
-            cwd: None,
+            command: ShellCommandRequest {
+                script: "sleep 1".into(),
+                cwd: None,
+                intent: "timeout".into(),
+            },
             timeout_ms: Some(10),
-            intent: "timeout".into(),
         };
 
         let error = run_shell_script(&tree.root, &args)

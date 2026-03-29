@@ -1,4 +1,4 @@
-use super::super::{SubagentDisplayState, SubagentStatusKind, TranscriptEntry};
+use super::super::{ActivityDisplayState, SubagentStatusKind, TranscriptEntry};
 use crate::app::{AppState, ops};
 use crate::subagents::{SubagentActivityKind, SubagentUiEvent};
 
@@ -21,7 +21,7 @@ pub(crate) fn on_subagent_event(state: &mut AppState, event: SubagentUiEvent) {
                 id,
                 kind,
                 display_label,
-                SubagentDisplayState::Running,
+                ActivityDisplayState::Running,
                 format!(
                     "running in {} mode",
                     access_mode.label().to_ascii_lowercase()
@@ -53,7 +53,7 @@ pub(crate) fn on_subagent_event(state: &mut AppState, event: SubagentUiEvent) {
                 id,
                 existing.0,
                 existing.1,
-                SubagentDisplayState::Completed,
+                ActivityDisplayState::Completed,
                 "completed".into(),
             );
         }
@@ -78,7 +78,7 @@ pub(crate) fn on_subagent_event(state: &mut AppState, event: SubagentUiEvent) {
                 id.clone(),
                 existing.0,
                 existing.1,
-                SubagentDisplayState::Failed,
+                ActivityDisplayState::Failed,
                 format!("failed: {error}"),
             );
             let suffix = log_path
@@ -107,7 +107,7 @@ pub(crate) fn on_subagent_event(state: &mut AppState, event: SubagentUiEvent) {
                 id,
                 existing.0,
                 existing.1,
-                SubagentDisplayState::Cancelled,
+                ActivityDisplayState::Cancelled,
                 "cancelled".into(),
             );
         }
@@ -148,7 +148,7 @@ pub(crate) fn on_subagent_event(state: &mut AppState, event: SubagentUiEvent) {
 mod tests {
     use crate::{
         app::{
-            Action, MessageStyle, SubagentDisplayState, TranscriptEntry,
+            Action, ActivityDisplayState, MessageStyle, TranscriptEntry,
             session::test_support::new_app,
         },
         subagents::{SubagentActivityKind, SubagentUiEvent},
@@ -215,7 +215,7 @@ mod tests {
         else {
             panic!("expected subagent status entry");
         };
-        assert_eq!(status.state, SubagentDisplayState::Cancelled);
+        assert_eq!(status.state, ActivityDisplayState::Cancelled);
         assert_eq!(status.status_text, "cancelled");
     }
 }

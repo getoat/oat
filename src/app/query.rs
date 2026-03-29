@@ -212,6 +212,10 @@ pub fn session_stats(state: &AppState) -> StatsTotals {
     state.session.session_stats
 }
 
+pub fn active_background_terminal_count(state: &AppState) -> usize {
+    state.session.active_background_terminal_count
+}
+
 pub fn transcript_revision(state: &AppState) -> u64 {
     state.session.transcript_revision
 }
@@ -549,5 +553,13 @@ mod tests {
 
         state.ui.composer.composer = crate::app::ui::new_composer_with_text("plain text");
         assert_eq!(input_context(&state), InputContext::Composer);
+    }
+
+    #[test]
+    fn active_background_terminal_count_reads_session_summary() {
+        let mut state = state();
+        state.session.active_background_terminal_count = 1;
+
+        assert_eq!(active_background_terminal_count(&state), 1);
     }
 }

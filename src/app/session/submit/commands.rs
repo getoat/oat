@@ -13,7 +13,7 @@ pub(super) fn submit_command(
         ops::transcript::push_error_message(
             state,
             format!(
-                "Unknown command `{command_name}`. Try /new, /btw, /stats, /model, /login, /logout, /plan, /quit, or /effort."
+                "Unknown command `{command_name}`. Try /new, /btw, /stats, /model, /effort, /login, /logout, /terminals, /terminal, /kill-terminal, /plan, or /quit."
             ),
         );
         return None;
@@ -36,6 +36,9 @@ pub(super) fn submit_command(
         SlashCommand::Plan => submit_plan_command(state, arguments),
         SlashCommand::Login => submit_login_command(state, arguments),
         SlashCommand::Logout => submit_logout_command(state, arguments),
+        SlashCommand::Terminals => submit_terminals_command(state, arguments),
+        SlashCommand::Terminal => submit_terminal_command(state, arguments),
+        SlashCommand::KillTerminal => submit_kill_terminal_command(state, arguments),
         SlashCommand::Quit => {
             ops::session::set_should_quit(state);
             None
@@ -133,6 +136,38 @@ fn submit_plan_command(state: &mut AppState, arguments: &str) -> Option<Effect> 
         "Describe what you want planned, then press Enter to start an interactive planning session.",
     );
     None
+}
+
+fn submit_terminals_command(state: &mut AppState, arguments: &str) -> Option<Effect> {
+    if !arguments.trim().is_empty() {
+        ops::transcript::push_error_message(state, "Usage: /terminals");
+        return None;
+    }
+
+    ops::composer::clear_composer(state);
+    Some(Effect::ListBackgroundTerminals)
+}
+
+fn submit_terminal_command(state: &mut AppState, arguments: &str) -> Option<Effect> {
+    let id = arguments.trim();
+    if id.is_empty() {
+        ops::transcript::push_error_message(state, "Usage: /terminal <id>");
+        return None;
+    }
+
+    ops::composer::clear_composer(state);
+    Some(Effect::InspectBackgroundTerminal { id: id.into() })
+}
+
+fn submit_kill_terminal_command(state: &mut AppState, arguments: &str) -> Option<Effect> {
+    let id = arguments.trim();
+    if id.is_empty() {
+        ops::transcript::push_error_message(state, "Usage: /kill-terminal <id>");
+        return None;
+    }
+
+    ops::composer::clear_composer(state);
+    Some(Effect::KillBackgroundTerminal { id: id.into() })
 }
 
 fn submit_login_command(state: &mut AppState, arguments: &str) -> Option<Effect> {
@@ -287,6 +322,52 @@ mod tests {
         let effect = app.apply(crate::app::Action::SubmitMessage);
 
         assert_eq!(effect, Some(Effect::ShowStats));
+        assert!(!app.composer_has_content());
+    }
+
+    #[test]
+    fn terminals_command_returns_effect() {
+        let mut app = new_app(true);
+        app.composer_mut().insert_str("/terminals");
+        app.sync_command_selection();
+
+        let effect = app.apply(crate::app::Action::SubmitMessage);
+
+        assert_eq!(effect, Some(Effect::ListBackgroundTerminals));
+        assert!(!app.composer_has_content());
+    }
+
+    #[test]
+    fn terminal_command_requires_an_id() {
+        let mut app = new_app(true);
+        app.composer_mut().insert_str("/terminal   ");
+        app.sync_command_selection();
+        app.apply(crate::app::Action::SelectNextCommand);
+
+        let effect = app.apply(crate::app::Action::SubmitMessage);
+
+        assert!(effect.is_none());
+        let TranscriptEntry::Message(message) = app.entries().last().expect("error entry exists")
+        else {
+            panic!("expected error entry");
+        };
+        assert_eq!(message.text, "Usage: /terminal <id>");
+    }
+
+    #[test]
+    fn kill_terminal_command_returns_effect() {
+        let mut app = new_app(true);
+        app.composer_mut().insert_str("/kill-terminal terminal-3");
+        app.sync_command_selection();
+
+        let effect = app.apply(crate::app::Action::SubmitMessage);
+
+        assert_eq!(
+            effect,
+            Some(Effect::KillBackgroundTerminal {
+                id: "terminal-3".into()
+            })
+        );
         assert!(!app.composer_has_content());
     }
 

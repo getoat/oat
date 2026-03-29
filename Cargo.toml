@@ -12,6 +12,7 @@ crossterm = "0.29"
 futures-util = "0.3.32"
 globset = "0.4.18"
 ignore = "0.4.24"
+portable-pty = "0.8.1"
 ratatui = { version = "0.30.0", default-features = false, features = ["crossterm", "crossterm_0_29"] }
 ratatui-textarea = "0.8.0"
 regex = "1.12.2"

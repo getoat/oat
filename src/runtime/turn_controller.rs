@@ -3,7 +3,9 @@ use tokio::{runtime::Runtime, sync::mpsc};
 use crate::{
     Tui,
     app::{Action, App, Effect, query},
+    background_terminals::{BackgroundTerminalManager, BackgroundTerminalUiEvent},
     config::AppConfig,
+    debug_log::log_debug,
     llm::{LlmService, TurnInterruptRequest},
     stats::StatsStore,
     subagents::{SubagentManager, SubagentUiEvent},
@@ -26,6 +28,7 @@ pub(crate) struct TurnController<'a> {
     stats: &'a StatsStore,
     stream_tx: mpsc::UnboundedSender<RuntimeEvent>,
     subagents: &'a SubagentManager,
+    terminals: &'a BackgroundTerminalManager,
 }
 
 impl<'a> TurnController<'a> {
@@ -41,6 +44,7 @@ impl<'a> TurnController<'a> {
         stats: &'a StatsStore,
         stream_tx: mpsc::UnboundedSender<RuntimeEvent>,
         subagents: &'a SubagentManager,
+        terminals: &'a BackgroundTerminalManager,
     ) -> Self {
         Self {
             runtime,
@@ -53,6 +57,7 @@ impl<'a> TurnController<'a> {
             stats,
             stream_tx,
             subagents,
+            terminals,
         }
     }
 
@@ -68,10 +73,20 @@ impl<'a> TurnController<'a> {
             &state.stats,
             state.stream_tx.clone(),
             &state.subagents,
+            &state.terminals,
         )
     }
 
     pub(crate) fn handle_runtime_event(&mut self, runtime_event: RuntimeEvent) {
+        log_debug(
+            "turn_controller",
+            format!(
+                "handle_runtime_event event={} pending_before={} active_reply_before={:?}",
+                runtime_event_label(&runtime_event),
+                query::has_pending_reply(self.app.state()),
+                query::active_reply_id(self.app.state())
+            ),
+        );
         let effect = match runtime_event {
             RuntimeEvent::MainReply { reply_id, event } => {
                 self.reply_driver.clear_completed_task(reply_id, &event);
@@ -92,10 +107,23 @@ impl<'a> TurnController<'a> {
             }
         };
         self.process_follow_ups(effect);
+        log_debug(
+            "turn_controller",
+            format!(
+                "handle_runtime_event_done pending_after={} active_reply_after={:?}",
+                query::has_pending_reply(self.app.state()),
+                query::active_reply_id(self.app.state())
+            ),
+        );
     }
 
     pub(crate) fn handle_subagent_event(&mut self, event: SubagentUiEvent) {
         let effect = self.app.apply(Action::SubagentEvent(event));
+        self.process_follow_ups(effect);
+    }
+
+    pub(crate) fn handle_background_terminal_event(&mut self, event: BackgroundTerminalUiEvent) {
+        let effect = self.app.apply(Action::BackgroundTerminalEvent(event));
         self.process_follow_ups(effect);
     }
 
@@ -149,8 +177,37 @@ impl<'a> TurnController<'a> {
             stats: self.stats,
             stream_tx: self.stream_tx.clone(),
             subagents: self.subagents,
+            terminals: self.terminals,
         };
         runner.run(effect)
+    }
+}
+
+fn runtime_event_label(event: &RuntimeEvent) -> &'static str {
+    match event {
+        RuntimeEvent::MainReply { event, .. } => match event {
+            crate::app::StreamEvent::TextDelta(_) => "MainReply:TextDelta",
+            crate::app::StreamEvent::Commentary(_) => "MainReply:Commentary",
+            crate::app::StreamEvent::ReasoningDelta(_) => "MainReply:ReasoningDelta",
+            crate::app::StreamEvent::ToolCall { .. } => "MainReply:ToolCall",
+            crate::app::StreamEvent::ToolResult { .. } => "MainReply:ToolResult",
+            crate::app::StreamEvent::TodoSnapshot(_) => "MainReply:TodoSnapshot",
+            crate::app::StreamEvent::AskUserRequested { .. } => "MainReply:AskUserRequested",
+            crate::app::StreamEvent::WriteApprovalRequested { .. } => {
+                "MainReply:WriteApprovalRequested"
+            }
+            crate::app::StreamEvent::ShellApprovalRequested { .. } => {
+                "MainReply:ShellApprovalRequested"
+            }
+            crate::app::StreamEvent::PlanningFinalizationStarted => {
+                "MainReply:PlanningFinalizationStarted"
+            }
+            crate::app::StreamEvent::CompactionFinished { .. } => "MainReply:CompactionFinished",
+            crate::app::StreamEvent::TurnEnded { .. } => "MainReply:TurnEnded",
+            crate::app::StreamEvent::Failed(_) => "MainReply:Failed",
+            crate::app::StreamEvent::SessionTitleGenerated(_) => "MainReply:SessionTitleGenerated",
+        },
+        RuntimeEvent::SideChannel { .. } => "SideChannel",
     }
 }
 

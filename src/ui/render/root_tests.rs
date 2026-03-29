@@ -10,7 +10,8 @@ use std::{
 };
 
 use crate::{
-    app::{Action, Effect},
+    app::{Action, ActivityDisplayState, Effect},
+    background_terminals::BackgroundTerminalUiEvent,
     config::ReasoningEffort,
     stats::StatsTotals,
     tools::{DiffKind, DiffPreviewLine, MutationPreview, mutation_preview},
@@ -197,6 +198,46 @@ fn render_shows_loading_indicator_in_top_status_bar_while_title_is_pending() {
 }
 
 #[test]
+fn render_shows_only_active_background_terminal_count_in_footer() {
+    let backend = TestBackend::new(140, 12);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    let mut app = App::new(true, false, "gpt-5.4-mini", ReasoningEffort::Medium);
+    app.push_agent_message("hello");
+    app.apply(Action::BackgroundTerminalEvent(
+        BackgroundTerminalUiEvent::Spawned {
+            id: "terminal-1".into(),
+            label: "dev server".into(),
+            cwd: ".".into(),
+            pid: Some(42),
+        },
+    ));
+
+    terminal
+        .draw(|frame| render(frame, &mut app))
+        .expect("render succeeds");
+
+    let rendered = buffer_string(terminal.backend());
+    assert!(rendered.contains("1 terminal active"));
+
+    app.apply(Action::BackgroundTerminalEvent(
+        BackgroundTerminalUiEvent::StateChanged {
+            id: "terminal-1".into(),
+            label: "dev server".into(),
+            state: ActivityDisplayState::Cancelled,
+            status_text: "cancelled".into(),
+            detail_text: Some("cwd: .".into()),
+        },
+    ));
+
+    terminal
+        .draw(|frame| render(frame, &mut app))
+        .expect("render succeeds");
+
+    let rendered = buffer_string(terminal.backend());
+    assert!(!rendered.contains("1 terminal active"));
+}
+
+#[test]
 fn render_restores_composer_in_plan_discussion_mode() {
     let backend = TestBackend::new(120, 12);
     let mut terminal = Terminal::new(backend).expect("test terminal");
@@ -222,7 +263,7 @@ fn render_restores_composer_in_plan_discussion_mode() {
 }
 
 #[test]
-fn render_keeps_thinking_visible_for_whitespace_only_pending_text() {
+fn render_shows_responding_for_whitespace_only_pending_text() {
     let backend = TestBackend::new(120, 12);
     let mut terminal = Terminal::new(backend).expect("test terminal");
     let mut app = App::new(true, false, "gpt-5.4-mini", ReasoningEffort::Medium);
@@ -239,11 +280,12 @@ fn render_keeps_thinking_visible_for_whitespace_only_pending_text() {
         .expect("render succeeds");
 
     let rendered = buffer_string(terminal.backend());
-    assert!(rendered.contains("thinking"));
+    assert!(rendered.contains("Responding"));
+    assert!(!rendered.contains("thinking"));
 }
 
 #[test]
-fn render_keeps_thinking_visible_for_plan_wrapper_prefix() {
+fn render_shows_responding_for_plan_wrapper_prefix() {
     let backend = TestBackend::new(120, 12);
     let mut terminal = Terminal::new(backend).expect("test terminal");
     let mut app = App::new(true, false, "gpt-5.4-mini", ReasoningEffort::Medium);
@@ -261,7 +303,8 @@ fn render_keeps_thinking_visible_for_plan_wrapper_prefix() {
         .expect("render succeeds");
 
     let rendered = buffer_string(terminal.backend());
-    assert!(rendered.contains("thinking"));
+    assert!(rendered.contains("Responding"));
+    assert!(!rendered.contains("thinking"));
 }
 
 #[test]
@@ -308,7 +351,48 @@ fn render_shows_chat_busy_indicator_after_tool_call_starts() {
 
     let rendered = buffer_string(terminal.backend());
     assert!(rendered.contains("RunShellScript"));
+    assert!(rendered.contains("Waiting for tool"));
+    assert!(!rendered.contains("thinking"));
+}
+
+#[test]
+fn render_shows_starting_before_stream_activity_begins() {
+    let backend = TestBackend::new(120, 12);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    let mut app = App::new(true, false, "gpt-5.4-mini", ReasoningEffort::Medium);
+    app.composer_mut().insert_str("hello");
+    let effect = app.apply(Action::SubmitMessage);
+    assert!(matches!(effect, Some(Effect::PromptModel { .. })));
+
+    terminal
+        .draw(|frame| render(frame, &mut app))
+        .expect("render succeeds");
+
+    let rendered = buffer_string(terminal.backend());
+    assert!(rendered.contains("Starting"));
+    assert!(!rendered.contains("thinking"));
+}
+
+#[test]
+fn render_shows_thinking_only_after_reasoning_activity() {
+    let backend = TestBackend::new(120, 12);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    let mut app = App::new(false, false, "gpt-5.4-mini", ReasoningEffort::Medium);
+    app.composer_mut().insert_str("hello");
+    let effect = app.apply(Action::SubmitMessage);
+    assert!(matches!(effect, Some(Effect::PromptModel { .. })));
+    app.apply(Action::StreamEvent {
+        reply_id: 1,
+        event: crate::app::StreamEvent::ReasoningDelta("working through it".into()),
+    });
+
+    terminal
+        .draw(|frame| render(frame, &mut app))
+        .expect("render succeeds");
+
+    let rendered = buffer_string(terminal.backend());
     assert!(rendered.contains("thinking"));
+    assert!(!rendered.contains("Waiting"));
 }
 
 #[test]
@@ -334,7 +418,7 @@ fn render_shows_waiting_in_chat_when_write_approval_is_pending() {
         .expect("render succeeds");
 
     let rendered = buffer_string(terminal.backend());
-    assert!(rendered.contains("Waiting"));
+    assert!(rendered.contains("Waiting for approval"));
     assert!(!rendered.contains("thinking"));
 }
 

@@ -1,4 +1,6 @@
-use super::super::{Effect, PendingReplyKind, SideChannelEvent, StreamEvent, TurnEndReason};
+use super::super::{
+    Effect, PendingReplyActivity, PendingReplyKind, SideChannelEvent, StreamEvent, TurnEndReason,
+};
 use crate::app::{AppState, MessageStyle, ops, query};
 use crate::features::planning::{PlanningReply, PlanningStage, parse_planning_reply};
 
@@ -18,14 +20,17 @@ pub(crate) fn on_stream_event(
 
     match event {
         StreamEvent::TextDelta(delta) => {
+            ops::session::set_pending_reply_activity(state, PendingReplyActivity::Responding);
             ops::transcript::append_pending_stream_message(state, &delta, MessageStyle::Plain);
             None
         }
         StreamEvent::Commentary(message) => {
+            ops::session::set_pending_reply_activity(state, PendingReplyActivity::Responding);
             ops::transcript::push_agent_commentary(state, message);
             None
         }
         StreamEvent::ReasoningDelta(delta) => {
+            ops::session::set_pending_reply_activity(state, PendingReplyActivity::Thinking);
             if state.session.show_thinking {
                 ops::transcript::append_pending_stream_message(
                     state,
@@ -36,14 +41,17 @@ pub(crate) fn on_stream_event(
             None
         }
         StreamEvent::ToolCall { name, arguments } => {
+            ops::session::set_pending_reply_activity(state, PendingReplyActivity::WaitingForTool);
             ops::transcript::push_tool_call(state, name, arguments);
             None
         }
         StreamEvent::ToolResult { name, output } => {
+            ops::session::set_pending_reply_activity(state, PendingReplyActivity::Responding);
             ops::transcript::push_tool_result(state, name, output);
             None
         }
         StreamEvent::TodoSnapshot(snapshot) => {
+            ops::session::set_pending_reply_activity(state, PendingReplyActivity::Responding);
             ops::session::set_current_todo(state, snapshot.has_list.then_some(snapshot.clone()));
             ops::transcript::push_todo_snapshot(state, snapshot);
             None
@@ -52,6 +60,7 @@ pub(crate) fn on_stream_event(
             request_id,
             request,
         } => {
+            ops::session::set_pending_reply_activity(state, PendingReplyActivity::WaitingForInput);
             ops::ask_user::begin_ask_user(state, request_id, request);
             None
         }
@@ -60,6 +69,10 @@ pub(crate) fn on_stream_event(
             tool_name,
             arguments,
         } => {
+            ops::session::set_pending_reply_activity(
+                state,
+                PendingReplyActivity::WaitingForApproval,
+            );
             ops::approvals::begin_write_approval(state, request_id, tool_name, arguments);
             None
         }
@@ -71,6 +84,10 @@ pub(crate) fn on_stream_event(
             working_directory,
             reason,
         } => {
+            ops::session::set_pending_reply_activity(
+                state,
+                PendingReplyActivity::WaitingForApproval,
+            );
             ops::approvals::begin_shell_approval(
                 state,
                 request_id,
@@ -83,6 +100,7 @@ pub(crate) fn on_stream_event(
             None
         }
         StreamEvent::PlanningFinalizationStarted => {
+            ops::session::set_pending_reply_activity(state, PendingReplyActivity::Responding);
             ops::planning::begin_planning_finalization(state);
             None
         }

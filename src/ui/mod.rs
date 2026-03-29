@@ -1,3 +1,4 @@
+mod background_terminal_activity;
 mod history;
 mod markdown;
 mod render;

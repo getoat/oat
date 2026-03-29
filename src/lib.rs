@@ -1,11 +1,13 @@
 mod agent;
 mod app;
 mod ask_user;
+mod background_terminals;
 mod codex;
 mod command_history;
 mod completion_request;
 mod composer;
 mod config;
+mod debug_log;
 mod features;
 mod input;
 mod llm;

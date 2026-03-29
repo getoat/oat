@@ -8,12 +8,13 @@ use ratatui::{
 
 use crate::app::session::ProposedPlanEntry;
 use crate::app::{
-    App, ChatMessage, MessageStyle, SubagentStatusEntry, ToolCall, ToolResultEntry,
-    TranscriptEntry, query,
+    App, BackgroundTerminalStatusEntry, ChatMessage, MessageStyle, SubagentStatusEntry, ToolCall,
+    ToolResultEntry, TranscriptEntry, query,
 };
 use crate::todo::TodoSnapshot;
 
 use super::{
+    background_terminal_activity::push_background_terminal_status_lines,
     markdown::{push_message_lines, push_pending_lines, rendered_line_text},
     subagent_activity::push_subagent_status_lines,
     todo_activity::push_todo_snapshot_lines,
@@ -41,13 +42,17 @@ enum VisibleEntry<'a> {
     ToolResult(&'a ToolResultEntry),
     TodoSnapshot(&'a TodoSnapshot),
     SubagentStatus(&'a SubagentStatusEntry),
+    BackgroundTerminalStatus(&'a BackgroundTerminalStatusEntry),
 }
 
 impl VisibleEntry<'_> {
     fn is_tool_activity(self) -> bool {
         matches!(
             self,
-            Self::ToolCall(_) | Self::ToolResult(_) | Self::SubagentStatus(_)
+            Self::ToolCall(_)
+                | Self::ToolResult(_)
+                | Self::SubagentStatus(_)
+                | Self::BackgroundTerminalStatus(_)
         )
     }
 }
@@ -335,6 +340,9 @@ fn visible_entries(app: &App) -> Vec<VisibleEntry<'_>> {
                 .then_some(VisibleEntry::ToolResult(tool_result)),
             TranscriptEntry::TodoSnapshot(snapshot) => Some(VisibleEntry::TodoSnapshot(snapshot)),
             TranscriptEntry::SubagentStatus(status) => Some(VisibleEntry::SubagentStatus(status)),
+            TranscriptEntry::BackgroundTerminalStatus(status) => {
+                Some(VisibleEntry::BackgroundTerminalStatus(status))
+            }
         })
         .collect()
 }
@@ -375,6 +383,9 @@ fn push_visible_entry_lines(
             push_todo_snapshot_lines(lines, snapshot, width, accent)
         }
         VisibleEntry::SubagentStatus(status) => push_subagent_status_lines(lines, status, width),
+        VisibleEntry::BackgroundTerminalStatus(status) => {
+            push_background_terminal_status_lines(lines, status, width)
+        }
     }
 }
 
@@ -411,6 +422,9 @@ fn push_tool_activity_run_lines(
             }
             VisibleEntry::SubagentStatus(status) => {
                 push_subagent_status_lines(lines, status, width)
+            }
+            VisibleEntry::BackgroundTerminalStatus(status) => {
+                push_background_terminal_status_lines(lines, status, width)
             }
             VisibleEntry::ProposedPlan(_) => {}
             VisibleEntry::Message(_) => {}

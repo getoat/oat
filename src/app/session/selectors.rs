@@ -36,16 +36,18 @@ pub fn should_show_history_busy_indicator(session: &SessionState) -> bool {
 }
 
 pub fn history_pending_status_label(session: &SessionState) -> &'static str {
-    if !session.pending_write_approvals.is_empty() || !session.pending_shell_approvals.is_empty() {
-        "Waiting"
-    } else if session
+    if session
         .pending_reply
         .as_ref()
         .is_some_and(|pending| pending.kind == PendingReplyKind::Compacting)
     {
         "Compacting context..."
     } else {
-        "thinking"
+        session
+            .pending_reply
+            .as_ref()
+            .map(|pending| pending.activity.status_label())
+            .unwrap_or("Waiting")
     }
 }
 

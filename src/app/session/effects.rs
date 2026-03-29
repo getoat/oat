@@ -62,5 +62,12 @@ pub enum Effect {
     CopyToClipboard {
         text: String,
     },
+    ListBackgroundTerminals,
+    InspectBackgroundTerminal {
+        id: String,
+    },
+    KillBackgroundTerminal {
+        id: String,
+    },
     CancelPendingReply,
 }

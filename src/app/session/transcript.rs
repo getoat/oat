@@ -49,7 +49,7 @@ pub enum SubagentStatusKind {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SubagentDisplayState {
+pub enum ActivityDisplayState {
     Running,
     Completed,
     Failed,
@@ -61,9 +61,18 @@ pub struct SubagentStatusEntry {
     pub id: String,
     pub kind: SubagentStatusKind,
     pub display_label: String,
-    pub state: SubagentDisplayState,
+    pub state: ActivityDisplayState,
     pub status_text: String,
     pub latest_tool_name: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BackgroundTerminalStatusEntry {
+    pub id: String,
+    pub display_label: String,
+    pub state: ActivityDisplayState,
+    pub status_text: String,
+    pub detail_text: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -74,12 +83,14 @@ pub enum TranscriptEntry {
     ToolResult(ToolResultEntry),
     TodoSnapshot(TodoSnapshot),
     SubagentStatus(SubagentStatusEntry),
+    BackgroundTerminalStatus(BackgroundTerminalStatusEntry),
 }
 
 #[derive(Debug)]
 pub struct PendingReply {
     pub id: u64,
     pub kind: PendingReplyKind,
+    pub activity: PendingReplyActivity,
     pub reasoning_entry_index: Option<usize>,
     pub text_entry_index: Option<usize>,
     pub staged_reasoning_text: String,
@@ -130,11 +141,35 @@ pub enum PendingReplyKind {
     Compacting,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PendingReplyActivity {
+    Starting,
+    Responding,
+    Thinking,
+    WaitingForTool,
+    WaitingForApproval,
+    WaitingForInput,
+}
+
+impl PendingReplyActivity {
+    pub fn status_label(self) -> &'static str {
+        match self {
+            Self::Starting => "Starting",
+            Self::Responding => "Responding",
+            Self::Thinking => "thinking",
+            Self::WaitingForTool => "Waiting for tool",
+            Self::WaitingForApproval => "Waiting for approval",
+            Self::WaitingForInput => "Waiting for input",
+        }
+    }
+}
+
 impl PendingReply {
     pub fn new(id: u64, kind: PendingReplyKind) -> Self {
         Self {
             id,
             kind,
+            activity: PendingReplyActivity::Starting,
             reasoning_entry_index: None,
             text_entry_index: None,
             staged_reasoning_text: String::new(),

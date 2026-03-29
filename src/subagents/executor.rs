@@ -70,6 +70,7 @@ impl SubagentManager {
             None,
             false,
             Some(self.clone()),
+            None,
         )
         .map_err(|error| SubagentExecutionFailure {
             raw_error: error.to_string(),

@@ -7,6 +7,7 @@ use crate::{
     StartupOptions,
     agent::AgentContext,
     app::{App, ops, query},
+    background_terminals::{BackgroundTerminalManager, BackgroundTerminalUiEvent},
     command_history::CommandHistoryStore,
     config::AppConfig,
     llm::{AskUserController, LlmService, WriteApprovalController},
@@ -24,11 +25,13 @@ pub(crate) struct TuiBootstrap {
     pub(crate) app: App,
     pub(crate) stats: StatsStore,
     pub(crate) subagents: SubagentManager,
+    pub(crate) terminals: BackgroundTerminalManager,
     pub(crate) command_history: CommandHistoryStore,
     pub(crate) llm: LlmService,
     pub(crate) stream_tx: mpsc::UnboundedSender<RuntimeEvent>,
     pub(crate) stream_rx: mpsc::UnboundedReceiver<RuntimeEvent>,
     pub(crate) subagent_rx: mpsc::UnboundedReceiver<SubagentUiEvent>,
+    pub(crate) terminal_rx: mpsc::UnboundedReceiver<BackgroundTerminalUiEvent>,
     pub(crate) reply_driver: ReplyDriver,
     pub(crate) side_channel_task_manager: SideChannelTaskManager,
     pub(crate) tick_rate: Duration,
@@ -52,6 +55,8 @@ pub(crate) fn bootstrap_tui(config: AppConfig, startup: StartupOptions) -> Resul
     let (subagent_tx, subagent_rx) = mpsc::unbounded_channel();
     let subagents =
         SubagentManager::new(config.subagents.max_concurrent, subagent_tx, stats.clone());
+    let (terminal_tx, terminal_rx) = mpsc::unbounded_channel();
+    let terminals = BackgroundTerminalManager::new(terminal_tx);
     let command_history = CommandHistoryStore::new(config.ui.command_history_limit);
     match command_history.load() {
         Ok(entries) => ops::session::restore_command_history(
@@ -75,6 +80,7 @@ pub(crate) fn bootstrap_tui(config: AppConfig, startup: StartupOptions) -> Resul
             Some(AskUserController::default()),
             true,
             Some(subagents.clone()),
+            Some(terminals.clone()),
         )?
     };
     let (stream_tx, stream_rx) = mpsc::unbounded_channel();
@@ -85,11 +91,13 @@ pub(crate) fn bootstrap_tui(config: AppConfig, startup: StartupOptions) -> Resul
         app,
         stats,
         subagents,
+        terminals,
         command_history,
         llm,
         stream_tx,
         stream_rx,
         subagent_rx,
+        terminal_rx,
         reply_driver: ReplyDriver::default(),
         side_channel_task_manager: SideChannelTaskManager::default(),
         tick_rate: Duration::from_millis(125),
@@ -119,6 +127,7 @@ pub(crate) fn bootstrap_headless(
             WriteApprovalController::new(startup.approval_mode),
             None,
             false,
+            None,
             None,
         )?
     };

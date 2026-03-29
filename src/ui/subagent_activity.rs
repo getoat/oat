@@ -3,7 +3,7 @@ use ratatui::{
     text::{Line, Span},
 };
 
-use crate::app::{SubagentDisplayState, SubagentStatusEntry, SubagentStatusKind};
+use crate::app::{ActivityDisplayState, SubagentStatusEntry, SubagentStatusKind};
 
 use super::wrap::wrap_text;
 
@@ -52,12 +52,12 @@ pub(super) fn push_subagent_status_lines(
     }
 }
 
-fn status_color(state: SubagentDisplayState) -> Color {
+fn status_color(state: ActivityDisplayState) -> Color {
     match state {
-        SubagentDisplayState::Running => Color::Cyan,
-        SubagentDisplayState::Completed => Color::Green,
-        SubagentDisplayState::Failed => Color::Red,
-        SubagentDisplayState::Cancelled => Color::Yellow,
+        ActivityDisplayState::Running => Color::Cyan,
+        ActivityDisplayState::Completed => Color::Green,
+        ActivityDisplayState::Failed => Color::Red,
+        ActivityDisplayState::Cancelled => Color::Yellow,
     }
 }
 
@@ -97,7 +97,7 @@ mod tests {
                 id: "subagent-1".into(),
                 kind: SubagentStatusKind::Subagent,
                 display_label: "subagent-1".into(),
-                state: SubagentDisplayState::Running,
+                state: ActivityDisplayState::Running,
                 status_text: "running in read-only mode".into(),
                 latest_tool_name: Some("VeryLongToolNameThatShouldBeTruncated".into()),
             },
@@ -124,7 +124,7 @@ mod tests {
                 id: "subagent-2".into(),
                 kind: SubagentStatusKind::Planning,
                 display_label: "Planning with gpt-5.4".into(),
-                state: SubagentDisplayState::Running,
+                state: ActivityDisplayState::Running,
                 status_text: "running in read-only mode".into(),
                 latest_tool_name: None,
             },

@@ -48,6 +48,28 @@ pub enum TurnInterruptRequest {
     AtStepBoundary,
 }
 
+#[derive(Clone, Default)]
+pub(crate) struct TurnInterruptController {
+    inner: Arc<Mutex<Option<TurnInterruptRequest>>>,
+}
+
+impl TurnInterruptController {
+    pub(crate) fn request(&self, request: TurnInterruptRequest) {
+        *self.inner.lock().expect("turn interrupt request lock") = Some(request);
+    }
+
+    pub(crate) fn clear(&self) {
+        *self.inner.lock().expect("turn interrupt request lock") = None;
+    }
+
+    pub(crate) fn take(&self) -> Option<TurnInterruptRequest> {
+        self.inner
+            .lock()
+            .expect("turn interrupt request lock")
+            .take()
+    }
+}
+
 pub type EventCallback = Arc<dyn Fn(u64, StreamEvent) -> bool + Send + Sync>;
 
 pub struct PromptRunResult {

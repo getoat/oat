@@ -4,8 +4,8 @@ use crate::{
     app::{CommandRisk, ShellApprovalDecision, WriteApprovalDecision},
     ask_user::{AskUserRequest, AskUserResponse},
     tools::{
-        RUN_SHELL_SCRIPT_TOOL_NAME, RunShellScriptArgs, display_requested_shell_cwd,
-        display_shell_command,
+        RUN_SHELL_SCRIPT_TOOL_NAME, START_BACKGROUND_TERMINAL_TOOL_NAME, ShellCommandRequest,
+        StartBackgroundTerminalArgs, display_requested_shell_cwd, display_shell_command,
     },
 };
 
@@ -151,10 +151,20 @@ pub(crate) fn resume_override_matches_tool_call(
             working_directory,
             ..
         } => {
-            if name != RUN_SHELL_SCRIPT_TOOL_NAME {
-                return false;
-            }
-            let Ok(args) = serde_json::from_str::<RunShellScriptArgs>(arguments) else {
+            let args = match name {
+                RUN_SHELL_SCRIPT_TOOL_NAME => {
+                    serde_json::from_str::<crate::tools::RunShellScriptArgs>(arguments)
+                        .ok()
+                        .map(|args| args.command)
+                }
+                START_BACKGROUND_TERMINAL_TOOL_NAME => {
+                    serde_json::from_str::<StartBackgroundTerminalArgs>(arguments)
+                        .ok()
+                        .map(|args| args.command)
+                }
+                _ => None,
+            };
+            let Some(args): Option<ShellCommandRequest> = args else {
                 return false;
             };
             display_shell_command(&args.script) == *command

@@ -1,4 +1,7 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    time::Duration,
+};
 
 use anyhow::Result;
 use futures_util::StreamExt;
@@ -13,6 +16,7 @@ use rig::{
 
 use crate::{
     app::{PendingReplyReplaySeed, TurnEndReason},
+    debug_log::log_debug,
     stats::StatsHook,
     todo::parse_snapshot,
     tools::{AskUserTool, CommentaryTool, TodoTool},
@@ -28,6 +32,8 @@ use super::{
     },
     resume::{ReplayProbe, ResumeOverrideController, reconcile_stream_text},
 };
+
+const POST_TOOL_RESULT_PROGRESS_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Default)]
 pub(crate) struct PartialToolCall {
@@ -130,8 +136,16 @@ where
     let mut commentary_replay_messages = replay_seed
         .map(|seed| seed.commentary_messages.into())
         .filter(|messages: &VecDeque<String>| !messages.is_empty());
+    let mut awaiting_post_tool_progress = false;
 
-    while let Some(chunk) = stream.next().await {
+    while let Some(chunk) = next_stream_item_with_timeout(
+        &mut stream,
+        awaiting_post_tool_progress,
+        POST_TOOL_RESULT_PROGRESS_TIMEOUT,
+    )
+    .await?
+    {
+        awaiting_post_tool_progress = false;
         let event = match chunk {
             Ok(MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(text))) => {
                 let delta = reconcile_stream_text(&text.text, &mut plain_replay_probe);
@@ -196,6 +210,10 @@ where
                 reasoning_replay_probe =
                     (!reasoning_output.is_empty()).then(|| ReplayProbe::new(&reasoning_output));
                 let name = tool_call.function.name.clone();
+                log_debug(
+                    "llm_stream",
+                    format!("tool_call reply_id={reply_id} name={name}"),
+                );
                 let fallback_arguments = format_tool_arguments(&tool_call.function.arguments);
                 tool_calls.insert(internal_call_id.clone(), name.clone());
                 if name == AskUserTool::NAME {
@@ -251,6 +269,7 @@ where
                 tool_result,
                 internal_call_id,
             })) => {
+                awaiting_post_tool_progress = true;
                 plain_replay_probe = (!output.is_empty()).then(|| ReplayProbe::new(&output));
                 reasoning_replay_probe =
                     (!reasoning_output.is_empty()).then(|| ReplayProbe::new(&reasoning_output));
@@ -258,6 +277,10 @@ where
                     .get(&internal_call_id)
                     .cloned()
                     .unwrap_or_else(|| tool_result.id.clone());
+                log_debug(
+                    "llm_stream",
+                    format!("tool_result reply_id={reply_id} name={name}"),
+                );
                 if name == AskUserTool::NAME {
                     None
                 } else if name == TodoTool::NAME {
@@ -278,6 +301,7 @@ where
                 }
             }
             Ok(MultiTurnStreamItem::FinalResponse(response)) => {
+                log_debug("llm_stream", format!("final_response reply_id={reply_id}"));
                 let history = response.history().map(ToOwned::to_owned);
                 let history = history.map(history_from_rig).transpose()?;
                 let event = StreamEvent::TurnEnded {
@@ -291,6 +315,10 @@ where
             }
             Ok(_) => None,
             Err(error) => {
+                log_debug(
+                    "llm_stream",
+                    format!("stream_error reply_id={reply_id} error={error}"),
+                );
                 if let Some(boundary) = step_boundary.take()
                     && is_step_boundary_error(&error)
                 {
@@ -329,12 +357,70 @@ pub(crate) fn reconcile_completed_reasoning_text(
     reconcile_stream_text(incoming, replay_probe)
 }
 
+async fn next_stream_item_with_timeout<S, T>(
+    stream: &mut S,
+    awaiting_post_tool_progress: bool,
+    timeout: Duration,
+) -> Result<Option<T>>
+where
+    S: futures_util::Stream<Item = T> + Unpin,
+{
+    if awaiting_post_tool_progress {
+        match tokio::time::timeout(timeout, stream.next()).await {
+            Ok(item) => Ok(item),
+            Err(_) => {
+                log_debug("llm_stream", "post_tool_progress_timeout");
+                Err(anyhow::anyhow!(
+                    "Request stalled after tool execution without further model output."
+                ))
+            }
+        }
+    } else {
+        Ok(stream.next().await)
+    }
+}
+
 fn is_step_boundary_error(error: &StreamingError) -> bool {
     matches!(
         error,
         StreamingError::Prompt(prompt_error)
             if matches!(prompt_error.as_ref(), PromptError::PromptCancelled { reason, .. } if reason == STEP_BOUNDARY_REASON)
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use futures_util::stream;
+
+    use super::next_stream_item_with_timeout;
+
+    #[tokio::test]
+    async fn post_tool_timeout_returns_next_item_when_progress_resumes() {
+        let mut stream = stream::iter([1]);
+
+        let item =
+            next_stream_item_with_timeout(&mut stream, true, std::time::Duration::from_millis(10))
+                .await
+                .expect("stream item");
+
+        assert_eq!(item, Some(1));
+    }
+
+    #[tokio::test]
+    async fn post_tool_timeout_fails_when_no_follow_up_arrives() {
+        let mut stream = stream::pending::<i32>();
+
+        let error =
+            next_stream_item_with_timeout(&mut stream, true, std::time::Duration::from_millis(10))
+                .await
+                .expect_err("timeout error");
+
+        assert!(
+            error
+                .to_string()
+                .contains("Request stalled after tool execution")
+        );
+    }
 }
 
 pub(crate) fn parse_commentary_message(args: &str) -> Result<String> {

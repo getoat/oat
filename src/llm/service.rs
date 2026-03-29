@@ -1,7 +1,7 @@
 use std::{
     env,
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicU64, Ordering},
     },
 };
@@ -17,8 +17,10 @@ use crate::{
         SideChannelEvent, TurnEndReason, WriteApprovalDecision,
     },
     ask_user::AskUserResponse,
+    background_terminals::BackgroundTerminalManager,
     completion_request::CompletionRequestSnapshot,
     config::{AppConfig, ReasoningSetting},
+    debug_log::log_debug,
     model_registry,
     runtime::RuntimeEvent,
     stats::StatsHook,
@@ -160,7 +162,7 @@ pub struct LlmService {
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) preamble: String,
     interaction_scope: String,
-    turn_interrupt_request: Arc<Mutex<Option<super::TurnInterruptRequest>>>,
+    turn_interrupt_request: super::TurnInterruptController,
 }
 
 impl LlmService {
@@ -171,6 +173,7 @@ impl LlmService {
         ask_user: Option<AskUserController>,
         todo_available: bool,
         subagents: Option<SubagentManager>,
+        terminals: Option<BackgroundTerminalManager>,
     ) -> Result<Self> {
         let shell_approvals = ShellApprovalController::new(approvals.mode());
         Self::from_config_with_controllers(
@@ -181,6 +184,7 @@ impl LlmService {
             ask_user,
             todo_available,
             subagents,
+            terminals,
         )
     }
 
@@ -192,6 +196,7 @@ impl LlmService {
         ask_user: Option<AskUserController>,
         todo_available: bool,
         subagents: Option<SubagentManager>,
+        terminals: Option<BackgroundTerminalManager>,
     ) -> Result<Self> {
         let workspace_root = env::current_dir().context("failed to determine workspace root")?;
         let model_name = context
@@ -209,6 +214,7 @@ impl LlmService {
             ask_user_available: ask_user.is_some(),
             todo_available,
             subagents,
+            terminals,
         };
         let tool_names = tool_names_for_context(&tool_context);
         let (client, agent) = build_client_and_agent(
@@ -236,7 +242,7 @@ impl LlmService {
             tool_names,
             preamble,
             interaction_scope: next_interaction_scope_id(),
-            turn_interrupt_request: Arc::new(Mutex::new(None)),
+            turn_interrupt_request: super::TurnInterruptController::default(),
         })
     }
 
@@ -315,24 +321,15 @@ impl LlmService {
     }
 
     pub fn request_turn_interrupt(&self, request: super::TurnInterruptRequest) {
-        *self
-            .turn_interrupt_request
-            .lock()
-            .expect("turn interrupt request lock") = Some(request);
+        self.turn_interrupt_request.request(request);
     }
 
     pub fn clear_turn_interrupt_request(&self) {
-        *self
-            .turn_interrupt_request
-            .lock()
-            .expect("turn interrupt request lock") = None;
+        self.turn_interrupt_request.clear();
     }
 
     fn take_turn_interrupt_request(&self) -> Option<super::TurnInterruptRequest> {
-        self.turn_interrupt_request
-            .lock()
-            .expect("turn interrupt request lock")
-            .take()
+        self.turn_interrupt_request.take()
     }
 
     pub async fn stream_prompt(
@@ -345,12 +342,16 @@ impl LlmService {
         events: UnboundedSender<RuntimeEvent>,
     ) {
         self.clear_turn_interrupt_request();
+        log_debug(
+            "llm_service",
+            format!("stream_prompt_start reply_id={reply_id}"),
+        );
         let emit: EventCallback = Arc::new(move |reply_id, event| {
             events
                 .send(RuntimeEvent::MainReply { reply_id, event })
                 .is_ok()
         });
-        let _ = self
+        if let Err(error) = self
             .run_prompt(
                 reply_id,
                 prompt,
@@ -358,9 +359,21 @@ impl LlmService {
                 history_model_name,
                 stats_hook,
                 None,
-                emit,
+                emit.clone(),
             )
-            .await;
+            .await
+        {
+            log_debug(
+                "llm_service",
+                format!("stream_prompt_error reply_id={reply_id} error={error}"),
+            );
+            emit_failed_reply_event(&emit, reply_id, error);
+        } else {
+            log_debug(
+                "llm_service",
+                format!("stream_prompt_done reply_id={reply_id}"),
+            );
+        }
     }
 
     pub async fn stream_side_channel(
@@ -420,23 +433,39 @@ impl LlmService {
         replay_seed: Option<PendingReplyReplaySeed>,
     ) {
         self.clear_turn_interrupt_request();
+        log_debug(
+            "llm_service",
+            format!("stream_resumed_prompt_start reply_id={reply_id}"),
+        );
         let emit: EventCallback = Arc::new(move |reply_id, event| {
             events
                 .send(RuntimeEvent::MainReply { reply_id, event })
                 .is_ok()
         });
-        let _ = self
+        if let Err(error) = self
             .run_prompt_from_state(
                 reply_id,
                 snapshot.prompt,
                 snapshot.history,
                 stats_hook,
                 None,
-                emit,
+                emit.clone(),
                 Some(ResumeOverrideController::new(override_action)),
                 replay_seed,
             )
-            .await;
+            .await
+        {
+            log_debug(
+                "llm_service",
+                format!("stream_resumed_prompt_error reply_id={reply_id} error={error}"),
+            );
+            emit_failed_reply_event(&emit, reply_id, error);
+        } else {
+            log_debug(
+                "llm_service",
+                format!("stream_resumed_prompt_done reply_id={reply_id}"),
+            );
+        }
     }
 
     pub async fn run_prompt(
@@ -767,9 +796,16 @@ fn sanitize_session_title(raw: &str) -> Option<String> {
     }
 }
 
+fn emit_failed_reply_event(emit: &EventCallback, reply_id: u64, error: anyhow::Error) {
+    let _ = emit(reply_id, StreamEvent::Failed(error.to_string()));
+}
+
 #[cfg(test)]
 mod session_title_tests {
-    use super::sanitize_session_title;
+    use std::sync::{Arc, Mutex};
+
+    use super::{emit_failed_reply_event, sanitize_session_title};
+    use crate::app::StreamEvent;
 
     #[test]
     fn sanitize_session_title_trims_quotes_and_whitespace() {
@@ -784,6 +820,28 @@ mod session_title_tests {
         assert_eq!(
             sanitize_session_title("One two three four five six seven"),
             Some("One two three four five six".into())
+        );
+    }
+
+    #[test]
+    fn emit_failed_reply_event_forwards_failure_to_event_sink() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = events.clone();
+        let emit: super::EventCallback = Arc::new(move |reply_id, event| {
+            captured
+                .lock()
+                .expect("events lock")
+                .push((reply_id, event));
+            true
+        });
+
+        emit_failed_reply_event(&emit, 7, anyhow::anyhow!("stream blew up"));
+
+        let events = events.lock().expect("events lock");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].0, 7);
+        assert!(
+            matches!(&events[0].1, StreamEvent::Failed(message) if message == "stream blew up")
         );
     }
 }

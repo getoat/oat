@@ -9,13 +9,13 @@ mod state;
 pub(crate) use query::InputContext;
 pub(crate) use session::compatible_reasoning_setting;
 pub use session::{
-    AccessMode, Action, ApprovalMode, ChatMessage, CommandRisk, EditorInput, EditorKey, Effect,
-    MainRequestSeed, MessageStyle, PendingAskUser, PendingReply, PendingReplyKind,
-    PendingReplyReplaySeed, PendingShellApproval, PendingSideReply, PendingWriteApproval,
-    SessionHistoryMessage, SessionState, ShellApprovalDecision, SideChannelEvent, SideChannelKind,
-    SlashCommand, Speaker, StreamEvent, SubagentDisplayState, SubagentStatusEntry,
-    SubagentStatusKind, ToolCall, ToolResultEntry, TranscriptEntry, TurnEndReason,
-    WriteApprovalDecision,
+    AccessMode, Action, ActivityDisplayState, ApprovalMode, BackgroundTerminalStatusEntry,
+    ChatMessage, CommandRisk, EditorInput, EditorKey, Effect, MainRequestSeed, MessageStyle,
+    PendingAskUser, PendingReply, PendingReplyKind, PendingReplyReplaySeed, PendingShellApproval,
+    PendingSideReply, PendingWriteApproval, SessionHistoryMessage, SessionState,
+    ShellApprovalDecision, SideChannelEvent, SideChannelKind, SlashCommand, Speaker, StreamEvent,
+    SubagentStatusEntry, SubagentStatusKind, ToolCall, ToolResultEntry, TranscriptEntry,
+    TurnEndReason, WriteApprovalDecision,
 };
 pub use shell::App;
 pub use state::AppState;

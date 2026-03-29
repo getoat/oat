@@ -6,6 +6,7 @@ use rig::tool::ToolDyn;
 use crate::{
     agent::{AgentContext, AgentRole},
     app::AccessMode,
+    background_terminals::BackgroundTerminalManager,
     config::AppConfig,
     llm::{ShellApprovalController, WriteApprovalController},
     subagents::SubagentManager,
@@ -14,8 +15,11 @@ use crate::{
 
 use super::{
     ApplyPatchesTool, AskUserTool, CommentaryTool, DeletePathTool, GrepTool,
-    INSPECT_SUBAGENT_TOOL_NAME, InspectSubagentTool, ListTool, ReadFileTool, ReadFilesTool,
-    RunShellScriptTool, SPAWN_SUBAGENT_TOOL_NAME, SpawnSubagentTool, TodoTool,
+    INSPECT_BACKGROUND_TERMINAL_TOOL_NAME, INSPECT_SUBAGENT_TOOL_NAME,
+    InspectBackgroundTerminalTool, InspectSubagentTool, KILL_BACKGROUND_TERMINAL_TOOL_NAME,
+    KillBackgroundTerminalTool, LIST_BACKGROUND_TERMINALS_TOOL_NAME, ListBackgroundTerminalsTool,
+    ListTool, ReadFileTool, ReadFilesTool, RunShellScriptTool, SPAWN_SUBAGENT_TOOL_NAME,
+    START_BACKGROUND_TERMINAL_TOOL_NAME, SpawnSubagentTool, StartBackgroundTerminalTool, TodoTool,
     WAIT_SUBAGENT_TOOL_NAME, WaitSubagentTool, WriteFileTool, output_limit::OutputLimitedTool,
 };
 
@@ -29,6 +33,7 @@ pub struct ToolContext {
     pub ask_user_available: bool,
     pub todo_available: bool,
     pub subagents: Option<SubagentManager>,
+    pub terminals: Option<BackgroundTerminalManager>,
 }
 
 impl ToolContext {
@@ -57,9 +62,10 @@ enum ToolRoleScope {
     Any,
     MainOnly,
     MainWithManager,
+    MainWithTerminalManager,
 }
 
-const TOOL_DESCRIPTORS: [ToolDescriptor; 14] = [
+const TOOL_DESCRIPTORS: [ToolDescriptor; 18] = [
     ToolDescriptor::read_only(AskUserTool::NAME, ToolRoleScope::MainOnly, |_context| {
         Box::new(AskUserTool)
     }),
@@ -86,6 +92,51 @@ const TOOL_DESCRIPTORS: [ToolDescriptor; 14] = [
     ToolDescriptor::read_only(RunShellScriptTool::NAME, ToolRoleScope::Any, |context| {
         Box::new(RunShellScriptTool::new(context.root))
     }),
+    ToolDescriptor::read_only(
+        START_BACKGROUND_TERMINAL_TOOL_NAME,
+        ToolRoleScope::MainWithTerminalManager,
+        |context| {
+            Box::new(StartBackgroundTerminalTool::new(
+                context.root,
+                context
+                    .terminals
+                    .expect("background terminal tools require a manager"),
+            ))
+        },
+    ),
+    ToolDescriptor::read_only(
+        LIST_BACKGROUND_TERMINALS_TOOL_NAME,
+        ToolRoleScope::MainWithTerminalManager,
+        |context| {
+            Box::new(ListBackgroundTerminalsTool::new(
+                context
+                    .terminals
+                    .expect("background terminal tools require a manager"),
+            ))
+        },
+    ),
+    ToolDescriptor::read_only(
+        INSPECT_BACKGROUND_TERMINAL_TOOL_NAME,
+        ToolRoleScope::MainWithTerminalManager,
+        |context| {
+            Box::new(InspectBackgroundTerminalTool::new(
+                context
+                    .terminals
+                    .expect("background terminal tools require a manager"),
+            ))
+        },
+    ),
+    ToolDescriptor::read_only(
+        KILL_BACKGROUND_TERMINAL_TOOL_NAME,
+        ToolRoleScope::MainWithTerminalManager,
+        |context| {
+            Box::new(KillBackgroundTerminalTool::new(
+                context
+                    .terminals
+                    .expect("background terminal tools require a manager"),
+            ))
+        },
+    ),
     ToolDescriptor::mutation(ApplyPatchesTool::NAME, ToolRoleScope::Any, |context| {
         Box::new(ApplyPatchesTool::new(context.root))
     }),
@@ -176,6 +227,9 @@ impl ToolDescriptor {
             ToolRoleScope::MainWithManager => {
                 context.agent.role == AgentRole::Main && context.subagents.is_some()
             }
+            ToolRoleScope::MainWithTerminalManager => {
+                context.agent.role == AgentRole::Main && context.terminals.is_some()
+            }
         };
 
         access_enabled && role_enabled
@@ -219,6 +273,7 @@ fn is_shell_tool(tool_name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::background_terminals::BackgroundTerminalManager;
 
     #[test]
     fn read_only_mode_exposes_only_read_tools() {
@@ -231,6 +286,7 @@ mod tests {
             ask_user_available: true,
             todo_available: true,
             subagents: Some(test_subagent_manager()),
+            terminals: Some(test_terminal_manager()),
         });
 
         assert_eq!(
@@ -244,6 +300,10 @@ mod tests {
                 "ReadFiles",
                 "Grep",
                 "RunShellScript",
+                "StartBackgroundTerminal",
+                "ListBackgroundTerminals",
+                "InspectBackgroundTerminal",
+                "KillBackgroundTerminal",
                 "SpawnSubagent",
                 "WaitSubagent",
                 "InspectSubagent"
@@ -262,12 +322,14 @@ mod tests {
             ask_user_available: true,
             todo_available: true,
             subagents: Some(test_subagent_manager()),
+            terminals: Some(test_terminal_manager()),
         });
 
         assert!(tool_names.contains(&"AskUser".to_string()));
         assert!(tool_names.contains(&"Commentary".to_string()));
         assert!(tool_names.contains(&"Todo".to_string()));
         assert!(tool_names.contains(&"RunShellScript".to_string()));
+        assert!(tool_names.contains(&"StartBackgroundTerminal".to_string()));
         assert!(tool_names.contains(&"ApplyPatches".to_string()));
         assert!(tool_names.contains(&"WriteFile".to_string()));
         assert!(tool_names.contains(&"DeletePath".to_string()));
@@ -285,6 +347,7 @@ mod tests {
             ask_user_available: true,
             todo_available: true,
             subagents: Some(test_subagent_manager()),
+            terminals: Some(test_terminal_manager()),
         }) {
             assert!(
                 !is_mutation_tool(&tool_name),
@@ -309,6 +372,7 @@ mod tests {
             ask_user_available: true,
             todo_available: true,
             subagents: Some(test_subagent_manager()),
+            terminals: Some(test_terminal_manager()),
         });
 
         assert!(!tool_names.contains(&"AskUser".to_string()));
@@ -328,6 +392,7 @@ mod tests {
             ask_user_available: false,
             todo_available: false,
             subagents: None,
+            terminals: None,
         });
 
         assert_eq!(
@@ -371,5 +436,10 @@ mod tests {
     fn test_subagent_manager() -> SubagentManager {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         SubagentManager::new(4, tx, crate::stats::StatsStore::new())
+    }
+
+    fn test_terminal_manager() -> BackgroundTerminalManager {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        BackgroundTerminalManager::new(tx)
     }
 }

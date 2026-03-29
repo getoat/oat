@@ -242,6 +242,16 @@ pub(super) fn render_mode(
         format!("{context_percent}%"),
         session_stats.estimated_cost_usd(),
     )));
+    let active_terminal_count = query::active_background_terminal_count(app.state());
+    if active_terminal_count > 0 {
+        let label = if active_terminal_count == 1 {
+            "1 terminal active".to_string()
+        } else {
+            format!("{active_terminal_count} terminals active")
+        };
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(label, Style::default().fg(Color::Cyan)));
+    }
 
     if let Some(pending) = query::pending_write_approval(app.state()) {
         spans.push(Span::raw("  "));

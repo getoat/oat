@@ -1,8 +1,9 @@
 use crate::app::session::pending_stream_text_is_visible;
 use crate::{
     app::{
-        AppState, ChatMessage, MessageStyle, Speaker, SubagentDisplayState, SubagentStatusEntry,
-        SubagentStatusKind, ToolCall, ToolResultEntry, TranscriptEntry,
+        ActivityDisplayState, AppState, BackgroundTerminalStatusEntry, ChatMessage, MessageStyle,
+        Speaker, SubagentStatusEntry, SubagentStatusKind, ToolCall, ToolResultEntry,
+        TranscriptEntry,
     },
     todo::TodoSnapshot,
     tools::mutation_preview,
@@ -122,7 +123,7 @@ pub(crate) fn upsert_subagent_status(
     id: String,
     kind: SubagentStatusKind,
     display_label: String,
-    display_state: SubagentDisplayState,
+    display_state: ActivityDisplayState,
     status_text: String,
 ) {
     if let Some(TranscriptEntry::SubagentStatus(entry)) =
@@ -170,11 +171,64 @@ pub(crate) fn set_subagent_latest_tool(state: &mut AppState, id: String, latest_
             display_label: id.clone(),
             id,
             kind: SubagentStatusKind::Subagent,
-            state: SubagentDisplayState::Running,
+            state: ActivityDisplayState::Running,
             status_text: "running".into(),
             latest_tool_name: Some(latest_tool_name),
         }));
     bump_transcript_revision(state);
+}
+
+pub(crate) fn upsert_background_terminal_status(
+    state: &mut AppState,
+    id: String,
+    display_label: String,
+    display_state: ActivityDisplayState,
+    status_text: String,
+    detail_text: Option<String>,
+) {
+    if let Some(TranscriptEntry::BackgroundTerminalStatus(entry)) =
+        state.session.entries.iter_mut().find(
+            |entry| matches!(entry, TranscriptEntry::BackgroundTerminalStatus(status) if status.id == id),
+        )
+        {
+        entry.display_label = display_label;
+        entry.state = display_state;
+        entry.status_text = status_text;
+        entry.detail_text = detail_text;
+        refresh_active_background_terminal_count(state);
+        bump_transcript_revision(state);
+        return;
+    }
+
+    state
+        .session
+        .entries
+        .push(TranscriptEntry::BackgroundTerminalStatus(
+            BackgroundTerminalStatusEntry {
+                id,
+                display_label,
+                state: display_state,
+                status_text,
+                detail_text,
+            },
+        ));
+    refresh_active_background_terminal_count(state);
+    bump_transcript_revision(state);
+}
+
+fn refresh_active_background_terminal_count(state: &mut AppState) {
+    state.session.active_background_terminal_count = state
+        .session
+        .entries
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry,
+                TranscriptEntry::BackgroundTerminalStatus(status)
+                    if status.state == ActivityDisplayState::Running
+            )
+        })
+        .count();
 }
 
 pub(crate) fn append_pending_stream_message(

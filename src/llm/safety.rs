@@ -6,7 +6,7 @@ use serde::Deserialize;
 use crate::{
     app::{AccessMode, CommandRisk},
     config::AppConfig,
-    tools::{RunShellScriptArgs, display_requested_shell_cwd, display_shell_command},
+    tools::{ShellCommandRequest, display_requested_shell_cwd, display_shell_command},
 };
 
 use super::agent_builder::reasoning_params;
@@ -89,7 +89,7 @@ impl SafetyClassifier {
     pub(crate) async fn classify(
         &self,
         access_mode: AccessMode,
-        args: &RunShellScriptArgs,
+        args: &ShellCommandRequest,
     ) -> SafetyClassification {
         let command = display_shell_command(&args.script);
         let heuristic = minimum_shell_risk(&command, &args.script);
@@ -139,6 +139,7 @@ pub(crate) fn safety_classifier_preamble() -> &'static str {
         "Medium: changes are possible but local, non-destructive, and reversible.\n",
         "High: destructive, irreversible, repository-changing, system-changing, network-changing, package-installing, or otherwise risky commands.\n",
         "Classify based on side effects, not whether the command touches a remote or the network.\n",
+        "Long-running, polling, watch-mode, or infinite commands can still be Low when they remain read-only and do not modify files, processes, permissions, packages, or system state.\n",
         "Git commands are not automatically High. Read-only git inspection commands such as status, diff, log, show, and ls-remote can be Low, including when they inspect remote refs or metadata. Git commands that modify repository state, update refs, transfer objects into the repo, or may discard work are usually High.\n",
         "If unsure, return High."
     )
@@ -148,7 +149,7 @@ fn safety_classifier_prompt(
     access_mode: AccessMode,
     command: &str,
     working_directory: &str,
-    args: &RunShellScriptArgs,
+    args: &ShellCommandRequest,
     heuristic: Option<CommandRisk>,
 ) -> String {
     format!(
