@@ -1,13 +1,14 @@
 use crate::{
     features::planning::pending_plain_text_is_visible, todo::TodoSnapshot, tools::MutationPreview,
 };
+use serde::{Deserialize, Serialize};
 
 use super::{
     SessionHistoryMessage,
     models::{AccessMode, Speaker},
 };
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ChatMessage {
     pub speaker: Speaker,
     pub text: String,
@@ -15,7 +16,7 @@ pub struct ChatMessage {
     pub tag: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub enum MessageStyle {
     Plain,
     Commentary,
@@ -23,32 +24,32 @@ pub enum MessageStyle {
     Error,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ToolCall {
     pub name: String,
     pub parameter: String,
     pub preview: Option<MutationPreview>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ToolResultEntry {
     pub name: String,
     pub output: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ProposedPlanEntry {
     pub markdown: String,
     pub raw_block: String,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub enum SubagentStatusKind {
     Subagent,
     Planning,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub enum ActivityDisplayState {
     Running,
     Completed,
@@ -56,7 +57,7 @@ pub enum ActivityDisplayState {
     Cancelled,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct SubagentStatusEntry {
     pub id: String,
     pub kind: SubagentStatusKind,
@@ -66,7 +67,7 @@ pub struct SubagentStatusEntry {
     pub latest_tool_name: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct BackgroundTerminalStatusEntry {
     pub id: String,
     pub display_label: String,
@@ -75,7 +76,7 @@ pub struct BackgroundTerminalStatusEntry {
     pub detail_text: Option<String>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub enum TranscriptEntry {
     Message(ChatMessage),
     ProposedPlan(ProposedPlanEntry),

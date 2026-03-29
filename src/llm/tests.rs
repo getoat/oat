@@ -554,16 +554,6 @@ async fn read_only_mode_omits_mutation_tools() {
 }
 
 #[test]
-fn write_approval_controller_reset_is_safe_without_pending_requests() {
-    let approvals = WriteApprovalController::default();
-    assert_eq!(
-        approvals.resolve("missing", WriteApprovalDecision::AllowAllSession),
-        InteractionResolveResult::Missing
-    );
-    approvals.reset_session();
-}
-
-#[test]
 fn write_approval_controller_returns_resume_request_when_waiter_is_gone() {
     let approvals = WriteApprovalController::default();
     let snapshot = CompletionRequestSnapshot::capture(&RigMessage::user("continue"), &[]);
@@ -832,10 +822,8 @@ async fn todo_tool_can_be_disabled_independently_of_ask_user() {
 }
 
 #[test]
-fn write_approval_controller_can_start_disabled_and_reset_to_default() {
+fn write_approval_controller_can_start_disabled() {
     let approvals = WriteApprovalController::new(ApprovalMode::Disabled);
-    assert_eq!(approvals.mode(), ApprovalMode::Disabled);
-    approvals.reset_session();
     assert_eq!(approvals.mode(), ApprovalMode::Disabled);
 }
 

@@ -13,6 +13,7 @@ mod input;
 mod llm;
 mod model_registry;
 mod runtime;
+mod session_store;
 mod stats;
 mod subagents;
 mod todo;

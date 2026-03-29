@@ -16,8 +16,11 @@ use crate::{
     debug_log::log_debug,
     features::planning::run_planning_workflow,
     features::planning::sanitize_planning_agents,
-    llm::{LlmService, history_from_rig, history_into_rig},
+    llm::{
+        AskUserController, LlmService, WriteApprovalController, history_from_rig, history_into_rig,
+    },
     model_registry::{self, ModelProvider},
+    session_store::SessionStore,
     stats::StatsStore,
     subagents::SubagentManager,
     ui,
@@ -35,6 +38,7 @@ pub(crate) struct EffectExecutor<'a> {
     pub(crate) config: &'a mut AppConfig,
     pub(crate) app: &'a mut App,
     pub(crate) stats: &'a StatsStore,
+    pub(crate) session_store: &'a mut SessionStore,
     pub(crate) stream_tx: mpsc::UnboundedSender<RuntimeEvent>,
     pub(crate) subagents: &'a SubagentManager,
     pub(crate) terminals: &'a BackgroundTerminalManager,
@@ -56,6 +60,26 @@ fn rebuild_main_llm(
         llm.shell_approvals(),
         llm.ask_user_controller(),
         llm.todo_available(),
+        Some(subagents.clone()),
+        Some(terminals.clone()),
+    )
+}
+
+fn build_fresh_main_llm(
+    runtime: &Runtime,
+    config: &AppConfig,
+    access_mode: app::AccessMode,
+    approval_mode: app::ApprovalMode,
+    subagents: &SubagentManager,
+    terminals: &BackgroundTerminalManager,
+) -> Result<LlmService> {
+    let _guard = runtime.enter();
+    LlmService::from_config(
+        config,
+        AgentContext::main(access_mode),
+        WriteApprovalController::new(approval_mode),
+        Some(AskUserController::default()),
+        true,
         Some(subagents.clone()),
         Some(terminals.clone()),
     )
@@ -208,6 +232,28 @@ impl EffectExecutor<'_> {
                 );
                 Ok(())
             }
+            Effect::OpenSessionPicker => {
+                let entries = self
+                    .session_store
+                    .list_sessions_for_workspace(&self.app.state().session.workspace_root)?
+                    .into_iter()
+                    .map(|entry| app::SessionPickerEntry {
+                        session_id: entry.session_id,
+                        title: entry.title,
+                        detail: entry.detail,
+                        resumable: entry.resumable,
+                    })
+                    .collect::<Vec<_>>();
+                if entries.is_empty() {
+                    app::ops::transcript::push_agent_message(
+                        self.app.state_mut(),
+                        "No saved sessions were found for this workspace.",
+                    );
+                } else {
+                    app::ops::picker::open_session_picker(self.app.state_mut(), entries);
+                }
+                Ok(())
+            }
             Effect::OpenModelPicker => {
                 app::ops::picker::open_model_picker(self.app.state_mut());
                 Ok(())
@@ -220,7 +266,17 @@ impl EffectExecutor<'_> {
                     .block_on(self.subagents.cancel_all_running(false));
                 self.terminals.cancel_all_running();
                 self.stats.rotate_session()?;
-                self.llm.reset_write_approvals();
+                let rebuilt = build_fresh_main_llm(
+                    self.runtime,
+                    self.config,
+                    query::mode(self.app.state()),
+                    query::approval_mode(self.app.state()),
+                    self.subagents,
+                    self.terminals,
+                )?;
+                *self.llm = rebuilt;
+                self.session_store
+                    .rotate_to_new_tui_session(self.app.state(), &self.llm.preamble)?;
                 Ok(())
             }
             Effect::SetModelSelection { model_name } => {
@@ -493,6 +549,7 @@ impl EffectExecutor<'_> {
                 );
                 Ok(())
             }
+            Effect::ResumeSession { session_id } => self.resume_session(&session_id),
             Effect::CancelPendingReply => {
                 log_debug("effect_executor", "cancel_pending_reply effect");
                 self.reply_driver.cancel_active_reply(self.llm);
@@ -580,6 +637,77 @@ impl EffectExecutor<'_> {
         let rebuilt = self.rebuild_llm(&updated_config, query::mode(self.app.state()))?;
         *self.config = updated_config;
         *self.llm = rebuilt;
+        Ok(())
+    }
+
+    fn restore_runtime_config_from_snapshot(
+        &mut self,
+        snapshot: &crate::session_store::PersistedSessionSnapshot,
+    ) -> Result<(AppConfig, LlmService)> {
+        let mut updated_config = self.config.clone();
+        updated_config.model.model_name = snapshot.runtime.model_name.clone();
+        updated_config.model.reasoning = snapshot.runtime.reasoning;
+        updated_config.safety.model_name = snapshot.runtime.safety_model_name.clone();
+        updated_config.safety.reasoning = snapshot.runtime.safety_reasoning;
+        updated_config.planning.agents = sanitize_planning_agents(
+            &snapshot.runtime.model_name,
+            &snapshot.runtime.planning_agents,
+        );
+        let rebuilt = build_fresh_main_llm(
+            self.runtime,
+            &updated_config,
+            snapshot.runtime.access_mode,
+            snapshot.runtime.approval_mode,
+            self.subagents,
+            self.terminals,
+        )?;
+        Ok((updated_config, rebuilt))
+    }
+
+    fn resume_session(&mut self, session_id: &str) -> Result<()> {
+        let mut snapshot = self.session_store.load_session(session_id)?;
+        if model_registry::find_model(&snapshot.runtime.model_name).is_none()
+            || model_registry::find_model(&snapshot.runtime.safety_model_name).is_none()
+        {
+            app::ops::transcript::push_error_message(
+                self.app.state_mut(),
+                format!(
+                    "Session `{session_id}` cannot be resumed because one or more saved model selections are unavailable."
+                ),
+            );
+            return Ok(());
+        }
+        snapshot.runtime.planning_agents = sanitize_planning_agents(
+            &snapshot.runtime.model_name,
+            &snapshot.runtime.planning_agents,
+        );
+
+        let (updated_config, rebuilt_llm) = self.restore_runtime_config_from_snapshot(&snapshot)?;
+        let initial_mode = self.app.state().session.initial_mode;
+        let initial_approval_mode = self.app.state().session.initial_approval_mode;
+        let restored_state = snapshot
+            .clone()
+            .into_app_state(initial_mode, initial_approval_mode);
+        let session_label = snapshot
+            .runtime
+            .title
+            .clone()
+            .unwrap_or_else(|| snapshot.session_id.clone());
+
+        self.reply_driver.cancel_active_reply(self.llm);
+        self.side_channel_task_manager.cancel_all();
+        self.runtime
+            .block_on(self.subagents.cancel_all_running(true));
+        self.terminals.cancel_all_running();
+
+        *self.config = updated_config;
+        *self.llm = rebuilt_llm;
+        self.app.replace_state(restored_state);
+        self.session_store.attach_resumed_session(snapshot);
+        app::ops::transcript::push_agent_message(
+            self.app.state_mut(),
+            format!("Resumed session `{session_label}`. Interrupted work was not restarted."),
+        );
         Ok(())
     }
 

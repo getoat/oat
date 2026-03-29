@@ -21,5 +21,6 @@ pub use shell::App;
 pub use state::AppState;
 pub use ui::{
     ModelPickerEntry, ModelPickerTab, PickerSelection, ReasoningPickerTarget, SelectionPicker,
-    ShellApprovalEditMode, UiState, display_entries_for_tab, selectable_models_for_tab,
+    SessionPickerEntry, ShellApprovalEditMode, UiState, display_entries_for_tab,
+    selectable_models_for_tab,
 };

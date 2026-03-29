@@ -31,6 +31,7 @@ pub(crate) fn run_with_options(
                 controller.handle_runtime_event(event);
             }
             persist_command_history_if_needed(&mut state.app, &state.command_history);
+            persist_session_if_needed(&mut state);
         }
         for _ in 0..MAX_PENDING_EVENTS_PER_LOOP {
             let Some(event) = state.subagent_rx.try_recv().ok() else {
@@ -41,6 +42,7 @@ pub(crate) fn run_with_options(
                 controller.handle_subagent_event(event);
             }
             persist_command_history_if_needed(&mut state.app, &state.command_history);
+            persist_session_if_needed(&mut state);
         }
         for _ in 0..MAX_PENDING_EVENTS_PER_LOOP {
             let Some(event) = state.terminal_rx.try_recv().ok() else {
@@ -51,6 +53,7 @@ pub(crate) fn run_with_options(
                 controller.handle_background_terminal_event(event);
             }
             persist_command_history_if_needed(&mut state.app, &state.command_history);
+            persist_session_if_needed(&mut state);
         }
 
         state.app.set_session_stats(state.stats.current_totals());
@@ -78,8 +81,10 @@ pub(crate) fn run_with_options(
                 controller.handle_action(action);
             }
             persist_command_history_if_needed(&mut state.app, &state.command_history);
+            persist_session_if_needed(&mut state);
         } else {
             persist_command_history_if_needed(&mut state.app, &state.command_history);
+            persist_session_if_needed(&mut state);
         }
 
         if state.last_tick.elapsed() >= state.tick_rate {
@@ -88,12 +93,26 @@ pub(crate) fn run_with_options(
                 controller.handle_action(Action::Tick);
             }
             persist_command_history_if_needed(&mut state.app, &state.command_history);
+            persist_session_if_needed(&mut state);
             state.last_tick = std::time::Instant::now();
         }
     }
 
     state.side_channel_task_manager.cancel_all();
     state.terminals.cancel_all_running();
+    state.session_store.finalize_current_session()?;
     state.stats.finalize_current_session()?;
     Ok(())
+}
+
+fn persist_session_if_needed(state: &mut super::bootstrap::TuiBootstrap) {
+    if let Err(error) = state
+        .session_store
+        .sync_tui(state.app.state(), &state.llm.preamble)
+    {
+        crate::app::ops::transcript::push_error_message(
+            state.app.state_mut(),
+            format!("Failed to persist session state: {error}"),
+        );
+    }
 }

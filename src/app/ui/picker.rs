@@ -28,12 +28,24 @@ pub enum ReasoningPickerTarget {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionPickerEntry {
+    pub session_id: String,
+    pub title: String,
+    pub detail: String,
+    pub resumable: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SelectionPicker {
     Model {
         active_tab: ModelPickerTab,
         normal_selected_model: String,
         planning_selected_model: String,
         safety_selected_model: String,
+    },
+    Session {
+        entries: Vec<SessionPickerEntry>,
+        selected_index: usize,
     },
     Reasoning {
         target: ReasoningPickerTarget,
@@ -123,6 +135,7 @@ mod tests {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PickerSelection {
     Model(String),
+    Session(String),
     Reasoning(ReasoningSetting),
     PlanningAgent(PlanningAgentConfig),
     SafetySelection {

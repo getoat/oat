@@ -1,7 +1,7 @@
 use crate::{
     app::{
         AppState, ModelPickerTab, PickerSelection, ReasoningPickerTarget, SelectionPicker,
-        selectable_models_for_tab,
+        SessionPickerEntry, selectable_models_for_tab,
     },
     features::planning::{PlanningAgentConfig, default_planning_reasoning},
     model_registry,
@@ -33,6 +33,13 @@ pub(crate) fn open_model_picker(state: &mut AppState) {
         normal_selected_model: state.session.model_name.clone(),
         planning_selected_model: initial_planning_selected_model(state),
         safety_selected_model: state.session.safety_model_name.clone(),
+    });
+}
+
+pub(crate) fn open_session_picker(state: &mut AppState, entries: Vec<SessionPickerEntry>) {
+    state.ui.picker = Some(SelectionPicker::Session {
+        entries,
+        selected_index: 0,
     });
 }
 
@@ -97,6 +104,13 @@ pub(crate) fn apply_picker_selection(state: &mut AppState) -> Option<PickerSelec
                 None
             }
         },
+        SelectionPicker::Session {
+            entries,
+            selected_index,
+        } => entries
+            .get(selected_index)
+            .filter(|entry| entry.resumable)
+            .map(|entry| PickerSelection::Session(entry.session_id.clone())),
         SelectionPicker::Reasoning {
             target,
             model_name,
@@ -257,6 +271,16 @@ fn move_picker_selection(state: &mut AppState, direction: isize) {
             ..
         } => {
             let len = options.len();
+            if len > 0 {
+                *selected_index =
+                    (*selected_index as isize + direction).rem_euclid(len as isize) as usize;
+            }
+        }
+        SelectionPicker::Session {
+            entries,
+            selected_index,
+        } => {
+            let len = entries.len();
             if len > 0 {
                 *selected_index =
                     (*selected_index as isize + direction).rem_euclid(len as isize) as usize;

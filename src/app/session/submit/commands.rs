@@ -13,7 +13,7 @@ pub(super) fn submit_command(
         ops::transcript::push_error_message(
             state,
             format!(
-                "Unknown command `{command_name}`. Try /new, /btw, /stats, /model, /effort, /login, /logout, /terminals, /terminal, /kill-terminal, /plan, or /quit."
+                "Unknown command `{command_name}`. Try /new, /resume, /btw, /stats, /model, /effort, /login, /logout, /terminals, /terminal, /kill-terminal, /plan, or /quit."
             ),
         );
         return None;
@@ -29,6 +29,7 @@ pub(super) fn submit_command(
             ops::session::reset_session(state);
             Some(Effect::RotateSession)
         }
+        SlashCommand::Resume => submit_resume_command(state, arguments),
         SlashCommand::Btw => submit_btw_command(state, arguments),
         SlashCommand::Compact => submit_compact_command(state, arguments),
         SlashCommand::Stats => submit_stats_command(state, arguments),
@@ -67,6 +68,16 @@ fn submit_btw_command(state: &mut AppState, arguments: &str) -> Option<Effect> {
         history,
         history_model_name,
     })
+}
+
+fn submit_resume_command(state: &mut AppState, arguments: &str) -> Option<Effect> {
+    if !arguments.trim().is_empty() {
+        ops::transcript::push_error_message(state, "Usage: /resume");
+        return None;
+    }
+
+    ops::composer::clear_composer(state);
+    Some(Effect::OpenSessionPicker)
 }
 
 fn build_btw_request_context(state: &AppState) -> (Vec<SessionHistoryMessage>, Option<String>) {
@@ -322,6 +333,30 @@ mod tests {
         let effect = app.apply(crate::app::Action::SubmitMessage);
 
         assert_eq!(effect, Some(Effect::ShowStats));
+        assert!(!app.composer_has_content());
+    }
+
+    #[test]
+    fn resume_command_returns_effect() {
+        let mut app = new_app(true);
+        app.composer_mut().insert_str("/resume");
+        app.sync_command_selection();
+
+        let effect = app.apply(crate::app::Action::SubmitMessage);
+
+        assert_eq!(effect, Some(Effect::OpenSessionPicker));
+        assert!(!app.composer_has_content());
+    }
+
+    #[test]
+    fn sessions_alias_returns_resume_effect() {
+        let mut app = new_app(true);
+        app.composer_mut().insert_str("/sessions");
+        app.sync_command_selection();
+
+        let effect = app.apply(crate::app::Action::SubmitMessage);
+
+        assert_eq!(effect, Some(Effect::OpenSessionPicker));
         assert!(!app.composer_has_content());
     }
 

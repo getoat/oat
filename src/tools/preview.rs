@@ -3,6 +3,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use serde::{Deserialize, Serialize};
+
 use super::{
     ApplyPatchesArgs, DeletePathArgs, TextPatch, WriteFileArgs,
     apply_patches::APPLY_PATCH_TOOL_NAME, delete_path::DELETE_PATH_TOOL_NAME,
@@ -11,13 +13,13 @@ use super::{
 
 const GENERIC_WRITE_APPROVAL_SUMMARY: &str = "No reason provided for this write request";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub enum DiffKind {
     Added,
     Removed,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct DiffPreviewLine {
     pub old_line_number: Option<usize>,
     pub new_line_number: Option<usize>,
@@ -26,7 +28,7 @@ pub struct DiffPreviewLine {
     pub kind: DiffKind,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct MutationPreview {
     pub target: String,
     pub summary: Option<String>,

@@ -14,6 +14,7 @@ use super::CommandRisk;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SlashCommand {
     NewSession,
+    Resume,
     Btw,
     Compact,
     Stats,
@@ -32,6 +33,7 @@ impl SlashCommand {
     pub fn canonical_name(self) -> &'static str {
         match self {
             Self::NewSession => "/new",
+            Self::Resume => "/resume",
             Self::Btw => "/btw",
             Self::Compact => "/compact",
             Self::Stats => "/stats",
@@ -50,6 +52,7 @@ impl SlashCommand {
     pub fn aliases(self) -> &'static [&'static str] {
         match self {
             Self::NewSession => &["/clear"],
+            Self::Resume => &["/sessions"],
             Self::Btw => &[],
             Self::Compact => &[],
             Self::Stats => &["/status"],
@@ -68,6 +71,7 @@ impl SlashCommand {
     pub fn description(self) -> &'static str {
         match self {
             Self::NewSession => "Start a new session",
+            Self::Resume => "Resume a previous session",
             Self::Btw => "Ask a side question without affecting history",
             Self::Compact => "Compact the internal model history",
             Self::Stats => "Show session and historical usage stats",
@@ -106,8 +110,9 @@ impl SlashCommand {
     }
 }
 
-const COMMANDS: [SlashCommand; 13] = [
+const COMMANDS: [SlashCommand; 14] = [
     SlashCommand::NewSession,
+    SlashCommand::Resume,
     SlashCommand::Btw,
     SlashCommand::Compact,
     SlashCommand::Stats,
@@ -122,7 +127,7 @@ const COMMANDS: [SlashCommand; 13] = [
     SlashCommand::Quit,
 ];
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub enum AccessMode {
     ReadOnly,
     ReadWrite,
@@ -144,13 +149,13 @@ impl AccessMode {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub enum ApprovalMode {
     Manual,
     Disabled,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub enum Speaker {
     User,
     Agent,

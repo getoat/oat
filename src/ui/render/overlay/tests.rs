@@ -1,7 +1,9 @@
 use ratatui::{Terminal, backend::TestBackend};
 
 use crate::{
-    app::{Action, App, ModelPickerTab, selectable_models_for_tab},
+    app::{
+        Action, App, ModelPickerTab, SelectionPicker, SessionPickerEntry, selectable_models_for_tab,
+    },
     config::{ReasoningEffort, ReasoningSetting},
     ui::render::{render, test_support::buffer_string},
 };
@@ -152,4 +154,33 @@ fn render_model_picker_safety_tab_keeps_selected_item_visible_on_small_screens()
     assert!(rendered.contains("xiaomi/mimo-v2-flash"));
     assert!(rendered.contains("OpenRouter"));
     assert!(rendered.contains("Enter sets reasoning"));
+}
+
+#[test]
+fn render_session_picker_marks_non_resumable_entries() {
+    let mut app = App::new(true, false, "gpt-5.4", ReasoningEffort::Medium);
+    app.state_mut().ui.picker = Some(SelectionPicker::Session {
+        entries: vec![
+            SessionPickerEntry {
+                session_id: "session-1".into(),
+                title: "Resumable".into(),
+                detail: "Last active Mar 29, 2026 12:00 UTC | gpt-5.4".into(),
+                resumable: true,
+            },
+            SessionPickerEntry {
+                session_id: "session-2".into(),
+                title: "Unavailable".into(),
+                detail:
+                    "Last active Mar 29, 2026 11:00 UTC | missing-model | saved model unavailable"
+                        .into(),
+                resumable: false,
+            },
+        ],
+        selected_index: 1,
+    });
+
+    let rendered = draw_app(&mut app, 160, 12);
+    assert!(rendered.contains("Sessions"));
+    assert!(rendered.contains("Unavailable"));
+    assert!(rendered.contains("not resumable"));
 }

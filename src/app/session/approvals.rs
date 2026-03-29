@@ -1,4 +1,6 @@
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq, Hash)]
 pub enum CommandRisk {
     Low,
     Medium,
@@ -23,7 +25,7 @@ impl CommandRisk {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub enum WriteApprovalDecision {
     AllowOnce,
     AllowAllSession,
@@ -73,7 +75,7 @@ impl PendingShellApproval {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub enum ShellApprovalDecision {
     AllowOnce,
     AllowPattern(String),

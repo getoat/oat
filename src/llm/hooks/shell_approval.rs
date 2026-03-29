@@ -32,7 +32,6 @@ pub struct ShellApprovalController {
 }
 
 struct ShellApprovalState {
-    default_mode: ApprovalMode,
     low: ShellRiskApprovalBucket,
     medium: ShellRiskApprovalBucket,
     high: ShellRiskApprovalBucket,
@@ -85,7 +84,6 @@ impl ShellApprovalController {
     pub fn new(mode: ApprovalMode) -> Self {
         Self {
             inner: Arc::new(Mutex::new(ShellApprovalState {
-                default_mode: mode,
                 low: ShellRiskApprovalBucket {
                     mode,
                     patterns: Vec::new(),
@@ -261,25 +259,6 @@ impl ShellApprovalController {
             })
         } else {
             InteractionResolveResult::Missing
-        }
-    }
-
-    pub(crate) fn reset_session(&self) {
-        let mut state = self.inner.lock().expect("shell approval state lock");
-        state.low = ShellRiskApprovalBucket {
-            mode: state.default_mode,
-            patterns: Vec::new(),
-        };
-        state.medium = ShellRiskApprovalBucket {
-            mode: state.default_mode,
-            patterns: Vec::new(),
-        };
-        state.high = ShellRiskApprovalBucket {
-            mode: state.default_mode,
-            patterns: Vec::new(),
-        };
-        for (_, entry) in state.pending.drain() {
-            let _ = entry.sender.send(ShellApprovalDecision::Deny(None));
         }
     }
 

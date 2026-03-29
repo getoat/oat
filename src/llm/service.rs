@@ -307,11 +307,6 @@ impl LlmService {
             .is_some_and(|controller| controller.can_resolve(request_id))
     }
 
-    pub fn reset_write_approvals(&self) {
-        self.approvals.reset_session();
-        self.shell_approvals.reset_session();
-    }
-
     pub fn cancel_pending_interactions(&self) {
         self.approvals.cancel_pending();
         self.shell_approvals.cancel_pending();

@@ -1,9 +1,11 @@
-#[derive(Clone, Debug, Eq, PartialEq)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub struct PlanningBrief {
     pub markdown: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub struct ProposedPlan {
     pub markdown: String,
     pub raw_block: String,
@@ -16,7 +18,7 @@ pub enum PlanningReply {
     ProposedPlan(ProposedPlan),
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub enum PlanningStage {
     Idle,
     Drafting,
@@ -26,12 +28,12 @@ pub enum PlanningStage {
     Review,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub enum PlanReviewState {
     Selection,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub struct PlanningFeatureState {
     pub stage: PlanningStage,
     pub review: Option<PlanReviewState>,

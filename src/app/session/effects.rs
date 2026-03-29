@@ -21,6 +21,7 @@ pub enum Effect {
     },
     CompactHistory,
     ShowStats,
+    OpenSessionPicker,
     OpenModelPicker,
     LoginCodex,
     LogoutCodex,
@@ -61,6 +62,9 @@ pub enum Effect {
     },
     CopyToClipboard {
         text: String,
+    },
+    ResumeSession {
+        session_id: String,
     },
     ListBackgroundTerminals,
     InspectBackgroundTerminal {

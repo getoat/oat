@@ -16,6 +16,6 @@ pub use composer::{
 pub use history::{HistoryRenderCache, HistoryViewState};
 pub use picker::{
     ModelPickerEntry, ModelPickerTab, PickerSelection, ReasoningPickerTarget, SelectionPicker,
-    display_entries_for_tab, selectable_models_for_tab,
+    SessionPickerEntry, display_entries_for_tab, selectable_models_for_tab,
 };
 pub use state::UiState;

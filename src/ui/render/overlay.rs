@@ -183,6 +183,28 @@ fn render_selection_picker(
             };
             (title, lines)
         }
+        SelectionPicker::Session {
+            entries,
+            selected_index,
+        } => {
+            let visible_range =
+                centered_visible_range(entries.len(), visible_rows, *selected_index);
+            let lines: Vec<Line<'static>> = entries
+                .iter()
+                .enumerate()
+                .skip(visible_range.start)
+                .take(visible_range.len())
+                .map(|(index, entry)| {
+                    let detail = if entry.resumable {
+                        entry.detail.clone()
+                    } else {
+                        format!("{}  not resumable", entry.detail)
+                    };
+                    selection_picker_line(index == *selected_index, &entry.title, detail, accent)
+                })
+                .collect();
+            (" Sessions ", lines)
+        }
     };
 
     let picker = Paragraph::new(lines)

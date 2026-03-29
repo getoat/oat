@@ -26,7 +26,6 @@ pub struct WriteApprovalController {
 }
 
 pub(crate) struct WriteApprovalState {
-    default_mode: ApprovalMode,
     mode: ApprovalMode,
     pub(crate) pending: HashMap<String, PendingWriteApprovalEntry>,
 }
@@ -58,7 +57,6 @@ impl WriteApprovalController {
     pub fn new(mode: ApprovalMode) -> Self {
         Self {
             inner: Arc::new(Mutex::new(WriteApprovalState {
-                default_mode: mode,
                 mode,
                 pending: HashMap::new(),
             })),
@@ -179,14 +177,6 @@ impl WriteApprovalController {
             })
         } else {
             InteractionResolveResult::Missing
-        }
-    }
-
-    pub(crate) fn reset_session(&self) {
-        let mut state = self.inner.lock().expect("approval state lock");
-        state.mode = state.default_mode;
-        for (_, pending) in state.pending.drain() {
-            let _ = pending.sender.send(WriteApprovalDecision::Deny);
         }
     }
 

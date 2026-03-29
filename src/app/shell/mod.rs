@@ -62,6 +62,10 @@ impl App {
         &mut self.state
     }
 
+    pub(crate) fn replace_state(&mut self, state: AppState) {
+        self.state = state;
+    }
+
     pub(crate) fn set_reasoning(&mut self, reasoning: ReasoningSetting) {
         self.state.session.reasoning = reasoning;
     }

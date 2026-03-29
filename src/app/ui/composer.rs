@@ -85,6 +85,10 @@ pub fn picker_height(picker: &SelectionPicker, screen_height: u16) -> u16 {
             let content_height = options.len().max(1) as u16;
             (content_height + 2).min(max_height)
         }
+        SelectionPicker::Session { entries, .. } => {
+            let content_height = entries.len().max(1) as u16;
+            (content_height + 2).min(max_height)
+        }
     }
 }
 

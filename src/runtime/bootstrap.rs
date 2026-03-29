@@ -11,6 +11,7 @@ use crate::{
     command_history::CommandHistoryStore,
     config::AppConfig,
     llm::{AskUserController, LlmService, WriteApprovalController},
+    session_store::SessionStore,
     stats::StatsStore,
     subagents::{SubagentManager, SubagentUiEvent},
 };
@@ -24,6 +25,7 @@ pub(crate) struct TuiBootstrap {
     pub(crate) config: AppConfig,
     pub(crate) app: App,
     pub(crate) stats: StatsStore,
+    pub(crate) session_store: SessionStore,
     pub(crate) subagents: SubagentManager,
     pub(crate) terminals: BackgroundTerminalManager,
     pub(crate) command_history: CommandHistoryStore,
@@ -84,12 +86,14 @@ pub(crate) fn bootstrap_tui(config: AppConfig, startup: StartupOptions) -> Resul
         )?
     };
     let (stream_tx, stream_rx) = mpsc::unbounded_channel();
+    let session_store = SessionStore::new_tui(app.state(), &llm.preamble);
 
     Ok(TuiBootstrap {
         runtime,
         config,
         app,
         stats,
+        session_store,
         subagents,
         terminals,
         command_history,
