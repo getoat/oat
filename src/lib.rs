@@ -11,6 +11,7 @@ mod debug_log;
 mod features;
 mod input;
 mod llm;
+mod memory;
 mod model_registry;
 mod runtime;
 mod session_store;

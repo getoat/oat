@@ -72,12 +72,14 @@ fn render_selection_picker(
             normal_selected_model,
             planning_selected_model,
             safety_selected_model,
+            memory_selected_model,
         } => {
             let mut lines = vec![model_picker_tab_line(*active_tab, accent)];
             let selected_model = match active_tab {
                 ModelPickerTab::NormalAgent => normal_selected_model.as_str(),
                 ModelPickerTab::PlanningAgents => planning_selected_model.as_str(),
                 ModelPickerTab::SafetyModel => safety_selected_model.as_str(),
+                ModelPickerTab::MemoryModel => memory_selected_model.as_str(),
             };
             let entries = display_entries_for_tab(*active_tab, query::model_name(app.state()));
             let model_name_width = entries
@@ -130,6 +132,16 @@ fn render_selection_picker(
                                     format!("{base_detail}  Enter sets reasoning")
                                 }
                             }
+                            ModelPickerTab::MemoryModel => {
+                                if query::memory_model_name(app.state()) == model.name {
+                                    format!(
+                                        "{base_detail}  selected  reasoning: {}",
+                                        query::memory_reasoning(app.state()).as_str()
+                                    )
+                                } else {
+                                    format!("{base_detail}  Enter sets reasoning")
+                                }
+                            }
                         };
                         lines.push(selection_picker_line_with_label_width(
                             model.name == selected_model,
@@ -171,6 +183,9 @@ fn render_selection_picker(
                             crate::app::ReasoningPickerTarget::SafetyModel => {
                                 format!("for safety classification with {display_name}")
                             }
+                            crate::app::ReasoningPickerTarget::MemoryModel => {
+                                format!("for memory extraction with {display_name}")
+                            }
                         },
                         accent,
                     )
@@ -180,6 +195,7 @@ fn render_selection_picker(
                 crate::app::ReasoningPickerTarget::NormalAgent => " Reasoning ",
                 crate::app::ReasoningPickerTarget::PlanningAgent => " Planning Reasoning ",
                 crate::app::ReasoningPickerTarget::SafetyModel => " Safety Reasoning ",
+                crate::app::ReasoningPickerTarget::MemoryModel => " Memory Reasoning ",
             };
             (title, lines)
         }

@@ -20,6 +20,7 @@ pub struct AppConfig {
     pub ui: UiConfig,
     pub subagents: SubagentConfig,
     pub planning: PlanningConfig,
+    pub memory: MemoryConfig,
     pub tools: ToolConfig,
 }
 
@@ -259,6 +260,71 @@ impl Default for SubagentConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct MemoryConfig {
+    #[serde(default = "default_memory_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_memory_auto_inject")]
+    pub auto_inject: bool,
+    #[serde(default = "default_memory_auto_inject_token_budget")]
+    pub auto_inject_token_budget: usize,
+    #[serde(default = "default_memory_max_auto_results")]
+    pub max_auto_results: usize,
+    #[serde(default = "default_memory_max_candidate_search_results")]
+    pub max_candidate_search_results: usize,
+    #[serde(default)]
+    pub extraction: MemoryExtractionConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct MemoryExtractionConfig {
+    #[serde(default = "default_memory_extraction_enabled")]
+    pub enabled: bool,
+    pub model_name: String,
+    pub reasoning: ReasoningSetting,
+    #[serde(default = "default_memory_max_evidence_tokens")]
+    pub max_evidence_tokens: usize,
+    #[serde(default = "default_memory_max_related_memories")]
+    pub max_related_memories: usize,
+    #[serde(default = "default_memory_max_candidates_per_turn")]
+    pub max_candidates_per_turn: usize,
+    #[serde(default = "default_memory_min_candidate_confidence")]
+    pub min_candidate_confidence: u8,
+    #[serde(default = "default_memory_min_active_confidence")]
+    pub min_active_confidence: u8,
+    #[serde(default = "default_memory_run_in_background")]
+    pub run_in_background: bool,
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_memory_enabled(),
+            auto_inject: default_memory_auto_inject(),
+            auto_inject_token_budget: default_memory_auto_inject_token_budget(),
+            max_auto_results: default_memory_max_auto_results(),
+            max_candidate_search_results: default_memory_max_candidate_search_results(),
+            extraction: MemoryExtractionConfig::default(),
+        }
+    }
+}
+
+impl Default for MemoryExtractionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_memory_extraction_enabled(),
+            model_name: "gpt-5.4-mini".into(),
+            reasoning: ReasoningEffort::Medium.into(),
+            max_evidence_tokens: default_memory_max_evidence_tokens(),
+            max_related_memories: default_memory_max_related_memories(),
+            max_candidates_per_turn: default_memory_max_candidates_per_turn(),
+            min_candidate_confidence: default_memory_min_candidate_confidence(),
+            min_active_confidence: default_memory_min_active_confidence(),
+            run_in_background: default_memory_run_in_background(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct ToolConfig {
     #[serde(default)]
     pub search_include_patterns: Vec<String>,
@@ -439,6 +505,54 @@ pub(super) fn default_command_history_limit() -> usize {
 
 pub(super) fn default_max_concurrent_subagents() -> usize {
     4
+}
+
+pub(super) fn default_memory_enabled() -> bool {
+    true
+}
+
+pub(super) fn default_memory_auto_inject() -> bool {
+    true
+}
+
+pub(super) fn default_memory_auto_inject_token_budget() -> usize {
+    3_000
+}
+
+pub(super) fn default_memory_max_auto_results() -> usize {
+    12
+}
+
+pub(super) fn default_memory_max_candidate_search_results() -> usize {
+    50
+}
+
+pub(super) fn default_memory_extraction_enabled() -> bool {
+    true
+}
+
+pub(super) fn default_memory_max_evidence_tokens() -> usize {
+    12_000
+}
+
+pub(super) fn default_memory_max_related_memories() -> usize {
+    24
+}
+
+pub(super) fn default_memory_max_candidates_per_turn() -> usize {
+    10
+}
+
+pub(super) fn default_memory_min_candidate_confidence() -> u8 {
+    45
+}
+
+pub(super) fn default_memory_min_active_confidence() -> u8 {
+    78
+}
+
+pub(super) fn default_memory_run_in_background() -> bool {
+    true
 }
 
 pub(super) fn default_api_version() -> String {

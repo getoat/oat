@@ -107,12 +107,14 @@ pub(crate) fn set_active_main_request_seed(
     visible_prompt: String,
     model_prompt: String,
     history_model_name: Option<String>,
+    transcript_len_before: usize,
 ) {
     state.session.active_main_request_seed = Some(MainRequestSeed {
         history,
         visible_prompt,
         model_prompt,
         history_model_name,
+        transcript_len_before,
     });
 }
 
@@ -188,6 +190,8 @@ pub(crate) fn reset_session(state: &mut AppState) {
     let workspace_root = state.session.workspace_root.clone();
     let safety_model_name = state.session.safety_model_name.clone();
     let safety_reasoning = state.session.safety_reasoning;
+    let memory_model_name = state.session.memory_model_name.clone();
+    let memory_reasoning = state.session.memory_reasoning;
     let session_stats = state.session.session_stats;
     let next_reply_id = state.session.next_reply_id;
     let mut command_history = std::mem::take(&mut state.ui.command_history);
@@ -205,6 +209,8 @@ pub(crate) fn reset_session(state: &mut AppState) {
     state.session.workspace_root = workspace_root;
     state.session.safety_model_name = safety_model_name;
     state.session.safety_reasoning = safety_reasoning;
+    state.session.memory_model_name = memory_model_name;
+    state.session.memory_reasoning = memory_reasoning;
     state.session.session_stats = session_stats;
     state.session.next_reply_id = next_reply_id;
     state.ui = UiState::default();

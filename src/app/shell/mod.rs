@@ -74,6 +74,10 @@ impl App {
         self.state.session.safety_reasoning = reasoning;
     }
 
+    pub(crate) fn set_memory_reasoning(&mut self, reasoning: ReasoningSetting) {
+        self.state.session.memory_reasoning = reasoning;
+    }
+
     pub(crate) fn set_session_stats(&mut self, session_stats: crate::stats::StatsTotals) {
         self.state.session.session_stats = session_stats;
     }
@@ -84,6 +88,10 @@ impl App {
 
     pub(crate) fn set_safety_model_name(&mut self, model_name: impl Into<String>) {
         self.state.session.safety_model_name = model_name.into();
+    }
+
+    pub(crate) fn set_memory_model_name(&mut self, model_name: impl Into<String>) {
+        self.state.session.memory_model_name = model_name.into();
     }
 
     pub(crate) fn set_planning_agents(

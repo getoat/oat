@@ -16,6 +16,13 @@ pub(super) fn submit_picker_selection(state: &mut AppState) -> Option<Effect> {
             model_name,
             reasoning,
         }),
+        PickerSelection::MemorySelection {
+            model_name,
+            reasoning,
+        } => Some(Effect::SetMemorySelection {
+            model_name,
+            reasoning,
+        }),
     }
 }
 

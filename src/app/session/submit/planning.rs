@@ -24,6 +24,7 @@ pub(crate) fn submit_plan_acceptance(state: &mut AppState) -> Option<Effect> {
         visible_prompt,
         prompt.clone(),
         None,
+        state.session.entries.len(),
     );
 
     Some(Effect::PromptModel {
@@ -66,6 +67,7 @@ pub(super) fn submit_planning_draft(state: &mut AppState, submitted: &str) -> Op
         submitted.to_string(),
         prompt.clone(),
         state.session.last_history_model_name.clone(),
+        state.session.entries.len(),
     );
 
     Some(Effect::PromptModel {
@@ -95,6 +97,7 @@ pub(super) fn submit_planning_turn(state: &mut AppState, submitted: &str) -> Opt
         submitted.to_string(),
         submitted.to_string(),
         state.session.last_history_model_name.clone(),
+        state.session.entries.len(),
     );
 
     Some(Effect::PromptModel {

@@ -13,7 +13,7 @@ pub(super) fn submit_command(
         ops::transcript::push_error_message(
             state,
             format!(
-                "Unknown command `{command_name}`. Try /new, /resume, /btw, /stats, /model, /effort, /login, /logout, /terminals, /terminal, /kill-terminal, /plan, or /quit."
+                "Unknown command `{command_name}`. Try /new, /resume, /btw, /compact, /memory, /stats, /model, /effort, /login, /logout, /terminals, /terminal, /kill-terminal, /plan, or /quit."
             ),
         );
         return None;
@@ -32,6 +32,7 @@ pub(super) fn submit_command(
         SlashCommand::Resume => submit_resume_command(state, arguments),
         SlashCommand::Btw => submit_btw_command(state, arguments),
         SlashCommand::Compact => submit_compact_command(state, arguments),
+        SlashCommand::Memory => submit_memory_command(state, arguments),
         SlashCommand::Stats => submit_stats_command(state, arguments),
         SlashCommand::Model => submit_model_command(state, arguments),
         SlashCommand::Plan => submit_plan_command(state, arguments),
@@ -101,6 +102,95 @@ fn submit_stats_command(state: &mut AppState, arguments: &str) -> Option<Effect>
 
     ops::composer::clear_composer(state);
     Some(Effect::ShowStats)
+}
+
+fn submit_memory_command(state: &mut AppState, arguments: &str) -> Option<Effect> {
+    let trimmed = arguments.trim();
+    if trimmed.is_empty() {
+        ops::transcript::push_error_message(
+            state,
+            "Usage: /memory <search <query> | show <id> | candidates | promote <id> | archive <id> | replace <id> <text> | clear | reindex>",
+        );
+        return None;
+    }
+
+    let mut parts = trimmed.splitn(3, char::is_whitespace);
+    let subcommand = parts.next().unwrap_or_default();
+    let first_arg = parts.next().unwrap_or_default().trim();
+    let second_arg = parts.next().unwrap_or_default().trim();
+    ops::composer::clear_composer(state);
+
+    match subcommand {
+        "search" => {
+            if first_arg.is_empty() {
+                ops::transcript::push_error_message(state, "Usage: /memory search <query>");
+                None
+            } else {
+                Some(Effect::SearchMemories {
+                    query: trimmed["search".len()..].trim().to_string(),
+                    include_candidates: false,
+                })
+            }
+        }
+        "show" => {
+            if first_arg.is_empty() {
+                ops::transcript::push_error_message(state, "Usage: /memory show <id>");
+                None
+            } else {
+                Some(Effect::ShowMemory {
+                    id: first_arg.to_string(),
+                })
+            }
+        }
+        "candidates" => Some(Effect::ListMemoryCandidates),
+        "promote" => {
+            if first_arg.is_empty() {
+                ops::transcript::push_error_message(state, "Usage: /memory promote <id>");
+                None
+            } else {
+                Some(Effect::PromoteMemory {
+                    id: first_arg.to_string(),
+                })
+            }
+        }
+        "archive" => {
+            if first_arg.is_empty() {
+                ops::transcript::push_error_message(state, "Usage: /memory archive <id>");
+                None
+            } else {
+                Some(Effect::ArchiveMemory {
+                    id: first_arg.to_string(),
+                })
+            }
+        }
+        "replace" => {
+            if first_arg.is_empty() || second_arg.is_empty() {
+                ops::transcript::push_error_message(state, "Usage: /memory replace <id> <text>");
+                None
+            } else {
+                Some(Effect::ReplaceMemory {
+                    id: first_arg.to_string(),
+                    text: second_arg.to_string(),
+                })
+            }
+        }
+        "clear" => {
+            if !first_arg.is_empty() {
+                ops::transcript::push_error_message(state, "Usage: /memory clear");
+                None
+            } else {
+                Some(Effect::ClearMemories)
+            }
+        }
+        "reindex" => Some(Effect::RebuildMemoryIndexes),
+        _ => {
+            ops::transcript::push_error_message(
+                state,
+                "Usage: /memory <search <query> | show <id> | candidates | promote <id> | archive <id> | replace <id> <text> | clear | reindex>",
+            );
+            None
+        }
+    }
 }
 
 fn submit_compact_command(state: &mut AppState, arguments: &str) -> Option<Effect> {
@@ -337,6 +427,34 @@ mod tests {
     }
 
     #[test]
+    fn memory_clear_command_returns_effect() {
+        let mut app = new_app(true);
+        app.composer_mut().insert_str("/memory clear");
+        app.sync_command_selection();
+
+        let effect = app.apply(crate::app::Action::SubmitMessage);
+
+        assert_eq!(effect, Some(Effect::ClearMemories));
+        assert!(!app.composer_has_content());
+    }
+
+    #[test]
+    fn memory_clear_command_rejects_extra_arguments() {
+        let mut app = new_app(true);
+        app.composer_mut().insert_str("/memory clear now");
+        app.sync_command_selection();
+
+        let effect = app.apply(crate::app::Action::SubmitMessage);
+
+        assert!(effect.is_none());
+        let TranscriptEntry::Message(message) = app.entries().last().expect("error entry exists")
+        else {
+            panic!("expected error entry");
+        };
+        assert_eq!(message.text, "Usage: /memory clear");
+    }
+
+    #[test]
     fn resume_command_returns_effect() {
         let mut app = new_app(true);
         app.composer_mut().insert_str("/resume");
@@ -511,6 +629,7 @@ mod tests {
             visible_prompt: "I accept this plan. Begin implementation now.".into(),
             model_prompt: "You are no longer in Plan Mode. Begin implementation now.".into(),
             history_model_name: Some("gpt-5-mini".into()),
+            transcript_len_before: 0,
         });
         app.composer_mut().insert_str("/btw side question");
         app.sync_command_selection();

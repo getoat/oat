@@ -84,6 +84,37 @@ agents = []
 # model_name = "codex/gpt-5.3-codex"
 # reasoning = "high"
 
+[memory]
+enabled = true
+auto_inject = true
+auto_inject_token_budget = 3000
+max_auto_results = 12
+max_candidate_search_results = 50
+
+[memory.extraction]
+enabled = true
+
+# Dedicated model used for post-turn memory extraction and consolidation.
+# If omitted in an existing config, oat falls back to the main [model] selection.
+model_name = "gpt-5.4-mini"
+reasoning = "medium"
+
+# Controls how much completed-turn evidence is packed into the extraction prompt.
+max_evidence_tokens = 12000
+
+# Maximum number of existing memories retrieved as consolidation context.
+max_related_memories = 24
+
+# Upper bound on extracted memory candidates per completed turn.
+max_candidates_per_turn = 10
+
+# Confidence thresholds expressed as percentages.
+min_candidate_confidence = 45
+min_active_confidence = 78
+
+# Run extraction asynchronously after a completed main-agent turn.
+run_in_background = true
+
 [safety]
 # Optional dedicated model used to classify shell commands as low, medium, or
 # high risk before they can run. If omitted in an existing config, oat will

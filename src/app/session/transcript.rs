@@ -108,6 +108,7 @@ pub struct MainRequestSeed {
     pub visible_prompt: String,
     pub model_prompt: String,
     pub history_model_name: Option<String>,
+    pub transcript_len_before: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

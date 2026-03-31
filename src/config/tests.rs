@@ -41,6 +41,7 @@ fn sample_config() -> AppConfig {
         ui: UiConfig::default(),
         subagents: SubagentConfig::default(),
         planning: PlanningConfig::default(),
+        memory: MemoryConfig::default(),
         tools: ToolConfig::default(),
     }
 }
@@ -64,6 +65,24 @@ fn parses_expected_config_shape() {
 
             [subagents]
             max_concurrent = 6
+
+            [memory]
+            enabled = true
+            auto_inject = false
+            auto_inject_token_budget = 1234
+            max_auto_results = 9
+            max_candidate_search_results = 77
+
+            [memory.extraction]
+            enabled = true
+            model_name = "gpt-5.4"
+            reasoning = "high"
+            max_evidence_tokens = 9000
+            max_related_memories = 33
+            max_candidates_per_turn = 7
+            min_candidate_confidence = 40
+            min_active_confidence = 82
+            run_in_background = false
 
             [tools]
             search_include_patterns = [".research/**"]
@@ -90,6 +109,23 @@ fn parses_expected_config_shape() {
     assert!(config.ui.show_tool_output);
     assert_eq!(config.ui.command_history_limit, 42);
     assert_eq!(config.subagents.max_concurrent, 6);
+    assert!(config.memory.enabled);
+    assert!(!config.memory.auto_inject);
+    assert_eq!(config.memory.auto_inject_token_budget, 1234);
+    assert_eq!(config.memory.max_auto_results, 9);
+    assert_eq!(config.memory.max_candidate_search_results, 77);
+    assert!(config.memory.extraction.enabled);
+    assert_eq!(config.memory.extraction.model_name, "gpt-5.4");
+    assert_eq!(
+        config.memory.extraction.reasoning,
+        ReasoningSetting::Gpt(ReasoningEffort::High)
+    );
+    assert_eq!(config.memory.extraction.max_evidence_tokens, 9000);
+    assert_eq!(config.memory.extraction.max_related_memories, 33);
+    assert_eq!(config.memory.extraction.max_candidates_per_turn, 7);
+    assert_eq!(config.memory.extraction.min_candidate_confidence, 40);
+    assert_eq!(config.memory.extraction.min_active_confidence, 82);
+    assert!(!config.memory.extraction.run_in_background);
     assert_eq!(config.tools.search_include_patterns, vec![".research/**"]);
     assert_eq!(config.tools.max_output_tokens, 2048);
 }
@@ -111,6 +147,23 @@ fn ui_config_defaults_tool_output_to_hidden() {
     assert!(!config.ui.show_tool_output);
     assert_eq!(config.ui.command_history_limit, 20);
     assert_eq!(config.subagents.max_concurrent, 4);
+    assert!(config.memory.enabled);
+    assert!(config.memory.auto_inject);
+    assert_eq!(config.memory.auto_inject_token_budget, 3000);
+    assert_eq!(config.memory.max_auto_results, 12);
+    assert_eq!(config.memory.max_candidate_search_results, 50);
+    assert!(config.memory.extraction.enabled);
+    assert_eq!(config.memory.extraction.model_name, "gpt-5.4-mini");
+    assert_eq!(
+        config.memory.extraction.reasoning,
+        ReasoningSetting::Gpt(ReasoningEffort::Medium)
+    );
+    assert_eq!(config.memory.extraction.max_evidence_tokens, 12000);
+    assert_eq!(config.memory.extraction.max_related_memories, 24);
+    assert_eq!(config.memory.extraction.max_candidates_per_turn, 10);
+    assert_eq!(config.memory.extraction.min_candidate_confidence, 45);
+    assert_eq!(config.memory.extraction.min_active_confidence, 78);
+    assert!(config.memory.extraction.run_in_background);
     assert!(config.tools.search_include_patterns.is_empty());
     assert_eq!(config.model.model_name, "gpt-5.4-mini");
     assert_eq!(config.safety.model_name, "gpt-5.4-mini");
@@ -276,6 +329,7 @@ fn validation_requires_chutes_credentials_for_selected_chutes_model() {
             model_name: "zai-org/GLM-5-TEE".into(),
             reasoning: ReasoningSetting::Default,
         },
+        memory: MemoryConfig::default(),
         ui: UiConfig::default(),
         subagents: SubagentConfig::default(),
         planning: PlanningConfig::default(),
@@ -301,6 +355,7 @@ fn validation_requires_openrouter_credentials_for_selected_openrouter_model() {
             model_name: "minimax/minimax-m2.7".into(),
             reasoning: ReasoningEffort::Medium.into(),
         },
+        memory: MemoryConfig::default(),
         ui: UiConfig::default(),
         subagents: SubagentConfig::default(),
         planning: PlanningConfig::default(),
@@ -656,6 +711,41 @@ fn set_safety_selection_updates_config_file() {
 }
 
 #[test]
+fn set_memory_selection_updates_config_file() {
+    let path = unique_temp_path("memory-selection");
+
+    fs::write(
+        &path,
+        r#"
+            [azure]
+            resource_name = "demo-resource"
+            api_key = "secret"
+
+            [model]
+            model_name = "gpt-5.4-mini"
+            reasoning = "medium"
+            "#,
+    )
+    .expect("write temp config");
+
+    let updated =
+        AppConfig::set_memory_selection_at_path(&path, "gpt-5.4", ReasoningEffort::High.into())
+            .expect("update config");
+
+    assert_eq!(updated.memory.extraction.model_name, "gpt-5.4");
+    assert_eq!(
+        updated.memory.extraction.reasoning,
+        ReasoningSetting::Gpt(ReasoningEffort::High)
+    );
+    let raw = fs::read_to_string(&path).expect("read updated config");
+    assert!(raw.contains("[memory.extraction]"));
+    assert!(raw.contains("model_name = \"gpt-5.4\""));
+    assert!(raw.contains("reasoning = \"high\""));
+
+    fs::remove_file(path).expect("remove temp config");
+}
+
+#[test]
 fn default_config_update_path_prefers_existing_cwd_config() {
     let home_path = unique_temp_path("home-effort");
     let cwd_path = unique_temp_path("cwd-effort");
@@ -691,6 +781,14 @@ fn validation_rejects_zero_subagent_concurrency() {
 fn validation_rejects_zero_tool_output_token_limit() {
     let mut config = sample_config();
     config.tools.max_output_tokens = 0;
+    assert!(config.validate().is_err());
+}
+
+#[test]
+fn validation_rejects_invalid_memory_extraction_thresholds() {
+    let mut config = sample_config();
+    config.memory.extraction.min_candidate_confidence = 90;
+    config.memory.extraction.min_active_confidence = 80;
     assert!(config.validate().is_err());
 }
 

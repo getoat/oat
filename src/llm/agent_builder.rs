@@ -1,7 +1,7 @@
 use anyhow::Result;
 use futures_util::StreamExt;
 use rig::{
-    agent::MultiTurnStreamItem,
+    agent::{MultiTurnStreamItem, PromptHook},
     client::CompletionClient,
     completion::CompletionModel,
     completion::Message as RigMessage,
@@ -161,15 +161,21 @@ where
     }
 }
 
-pub(crate) async fn run_plain_prompt<M>(
+pub(crate) async fn run_plain_prompt_with_hook<M, H>(
     agent: &rig::agent::Agent<M>,
     prompt: String,
     history: Vec<RigMessage>,
+    hook: H,
 ) -> Result<String>
 where
     M: CompletionModel + 'static,
+    H: PromptHook<M> + 'static,
 {
-    let mut stream = agent.stream_chat(prompt, history).multi_turn(0).await;
+    let mut stream = agent
+        .stream_chat(prompt, history)
+        .with_hook(hook)
+        .multi_turn(0)
+        .await;
     let mut output = String::new();
 
     while let Some(chunk) = stream.next().await {

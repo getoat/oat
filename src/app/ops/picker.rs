@@ -33,6 +33,7 @@ pub(crate) fn open_model_picker(state: &mut AppState) {
         normal_selected_model: state.session.model_name.clone(),
         planning_selected_model: initial_planning_selected_model(state),
         safety_selected_model: state.session.safety_model_name.clone(),
+        memory_selected_model: state.session.memory_model_name.clone(),
     });
 }
 
@@ -78,6 +79,7 @@ pub(crate) fn apply_picker_selection(state: &mut AppState) -> Option<PickerSelec
             normal_selected_model,
             planning_selected_model,
             safety_selected_model,
+            memory_selected_model,
         } => match active_tab {
             ModelPickerTab::NormalAgent => (!normal_selected_model.is_empty())
                 .then_some(PickerSelection::Model(normal_selected_model)),
@@ -100,6 +102,17 @@ pub(crate) fn apply_picker_selection(state: &mut AppState) -> Option<PickerSelec
                     state,
                     ReasoningPickerTarget::SafetyModel,
                     safety_selected_model,
+                );
+                None
+            }
+            ModelPickerTab::MemoryModel => {
+                if memory_selected_model.is_empty() {
+                    return None;
+                }
+                open_reasoning_picker_for(
+                    state,
+                    ReasoningPickerTarget::MemoryModel,
+                    memory_selected_model,
                 );
                 None
             }
@@ -142,6 +155,14 @@ pub(crate) fn apply_picker_selection(state: &mut AppState) -> Option<PickerSelec
                     state.session.safety_model_name = model_name.clone();
                     state.session.safety_reasoning = reasoning_effort;
                     PickerSelection::SafetySelection {
+                        model_name,
+                        reasoning: reasoning_effort,
+                    }
+                }
+                ReasoningPickerTarget::MemoryModel => {
+                    state.session.memory_model_name = model_name.clone();
+                    state.session.memory_reasoning = reasoning_effort;
+                    PickerSelection::MemorySelection {
                         model_name,
                         reasoning: reasoning_effort,
                     }
@@ -202,6 +223,18 @@ pub(crate) fn open_reasoning_picker_for(
                     .position(|level| *level == default_planning_reasoning(&model_name))
                     .unwrap_or(0)
             }),
+        ReasoningPickerTarget::MemoryModel => options
+            .iter()
+            .position(|level| {
+                model_name == state.session.memory_model_name
+                    && *level == state.session.memory_reasoning
+            })
+            .unwrap_or_else(|| {
+                options
+                    .iter()
+                    .position(|level| *level == default_planning_reasoning(&model_name))
+                    .unwrap_or(0)
+            }),
     };
     state.ui.picker = Some(SelectionPicker::Reasoning {
         target,
@@ -247,6 +280,7 @@ fn move_picker_selection(state: &mut AppState, direction: isize) {
             normal_selected_model,
             planning_selected_model,
             safety_selected_model,
+            memory_selected_model,
         } => {
             let selectable = selectable_models_for_tab(*active_tab, &state.session.model_name);
             if selectable.is_empty() {
@@ -256,6 +290,7 @@ fn move_picker_selection(state: &mut AppState, direction: isize) {
                 ModelPickerTab::NormalAgent => normal_selected_model,
                 ModelPickerTab::PlanningAgents => planning_selected_model,
                 ModelPickerTab::SafetyModel => safety_selected_model,
+                ModelPickerTab::MemoryModel => memory_selected_model,
             };
             let current_index = selectable
                 .iter()

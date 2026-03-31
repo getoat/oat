@@ -836,6 +836,7 @@ mod tests {
             visible_prompt: "I accept this plan. Begin implementation now.".into(),
             model_prompt: "You are no longer in Plan Mode. Begin implementation now.".into(),
             history_model_name: None,
+            transcript_len_before: 0,
         });
 
         app.apply(Action::StreamEvent {
@@ -872,6 +873,7 @@ mod tests {
             visible_prompt: "Plan the rollout".into(),
             model_prompt: "# Plan Mode\n\nPlan the rollout".into(),
             history_model_name: None,
+            transcript_len_before: 0,
         });
 
         app.apply(Action::StreamEvent {

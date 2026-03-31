@@ -17,6 +17,7 @@ pub enum SlashCommand {
     Resume,
     Btw,
     Compact,
+    Memory,
     Stats,
     Model,
     Effort,
@@ -36,6 +37,7 @@ impl SlashCommand {
             Self::Resume => "/resume",
             Self::Btw => "/btw",
             Self::Compact => "/compact",
+            Self::Memory => "/memory",
             Self::Stats => "/stats",
             Self::Model => "/model",
             Self::Effort => "/effort",
@@ -55,6 +57,7 @@ impl SlashCommand {
             Self::Resume => &["/sessions"],
             Self::Btw => &[],
             Self::Compact => &[],
+            Self::Memory => &[],
             Self::Stats => &["/status"],
             Self::Model => &["/models"],
             Self::Effort => &["/reasoning", "/thinking"],
@@ -74,6 +77,7 @@ impl SlashCommand {
             Self::Resume => "Resume a previous session",
             Self::Btw => "Ask a side question without affecting history",
             Self::Compact => "Compact the internal model history",
+            Self::Memory => "Search and manage long-term memories",
             Self::Stats => "Show session and historical usage stats",
             Self::Model => "Select the model and reasoning setting",
             Self::Effort => "Set reasoning for the current model",
@@ -110,11 +114,12 @@ impl SlashCommand {
     }
 }
 
-const COMMANDS: [SlashCommand; 14] = [
+const COMMANDS: [SlashCommand; 15] = [
     SlashCommand::NewSession,
     SlashCommand::Resume,
     SlashCommand::Btw,
     SlashCommand::Compact,
+    SlashCommand::Memory,
     SlashCommand::Stats,
     SlashCommand::Model,
     SlashCommand::Effort,

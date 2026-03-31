@@ -13,6 +13,8 @@ pub(super) fn write_config_updates_at_path(
     planning_agents: Option<&[PlanningAgentConfig]>,
     safety_model_name: Option<&str>,
     safety_reasoning: Option<ReasoningSetting>,
+    memory_model_name: Option<&str>,
+    memory_reasoning: Option<ReasoningSetting>,
 ) -> Result<()> {
     let raw = fs::read_to_string(path).unwrap_or_default();
     let mut value: toml::Value = if raw.trim().is_empty() {
@@ -87,6 +89,31 @@ pub(super) fn write_config_updates_at_path(
                 toml::Value::String(reasoning.as_str().to_string()),
             );
             safety.remove("reasoning_effort");
+        }
+    }
+    if memory_model_name.is_some() || memory_reasoning.is_some() {
+        let memory = root
+            .entry("memory")
+            .or_insert_with(|| toml::Value::Table(Default::default()))
+            .as_table_mut()
+            .context("config memory value must be a TOML table")?;
+        let extraction = memory
+            .entry("extraction")
+            .or_insert_with(|| toml::Value::Table(Default::default()))
+            .as_table_mut()
+            .context("config memory.extraction value must be a TOML table")?;
+        if let Some(model_name) = memory_model_name {
+            extraction.insert(
+                "model_name".into(),
+                toml::Value::String(model_name.to_string()),
+            );
+        }
+        if let Some(reasoning) = memory_reasoning {
+            extraction.insert(
+                "reasoning".into(),
+                toml::Value::String(reasoning.as_str().to_string()),
+            );
+            extraction.remove("reasoning_effort");
         }
     }
 

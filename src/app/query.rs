@@ -55,6 +55,14 @@ pub fn safety_reasoning(state: &AppState) -> ReasoningSetting {
     state.session.safety_reasoning
 }
 
+pub fn memory_model_name(state: &AppState) -> &str {
+    &state.session.memory_model_name
+}
+
+pub fn memory_reasoning(state: &AppState) -> ReasoningSetting {
+    state.session.memory_reasoning
+}
+
 pub fn pending_write_approval(state: &AppState) -> Option<&PendingWriteApproval> {
     state.session.pending_write_approvals.front()
 }
@@ -545,6 +553,7 @@ mod tests {
             normal_selected_model: "gpt-5.4-mini".into(),
             planning_selected_model: "gpt-5.4".into(),
             safety_selected_model: "gpt-5.4-mini".into(),
+            memory_selected_model: "gpt-5.4-mini".into(),
         });
         assert_eq!(input_context(&state), InputContext::Picker);
 

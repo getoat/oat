@@ -245,6 +245,13 @@ pub struct StatsHook {
 }
 
 impl StatsHook {
+    pub fn with_model(&self, model_name: impl Into<String>) -> Self {
+        Self {
+            state: Arc::clone(&self.state),
+            model_name: Some(model_name.into()),
+        }
+    }
+
     fn record_request(&self) {
         let _ = update_and_persist(&self.state, |current| {
             current.request_count += 1;

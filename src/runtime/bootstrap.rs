@@ -11,6 +11,7 @@ use crate::{
     command_history::CommandHistoryStore,
     config::AppConfig,
     llm::{AskUserController, LlmService, WriteApprovalController},
+    memory::MemoryService,
     session_store::SessionStore,
     stats::StatsStore,
     subagents::{SubagentManager, SubagentUiEvent},
@@ -26,6 +27,7 @@ pub(crate) struct TuiBootstrap {
     pub(crate) app: App,
     pub(crate) stats: StatsStore,
     pub(crate) session_store: SessionStore,
+    pub(crate) memory: MemoryService,
     pub(crate) subagents: SubagentManager,
     pub(crate) terminals: BackgroundTerminalManager,
     pub(crate) command_history: CommandHistoryStore,
@@ -53,6 +55,8 @@ pub(crate) fn bootstrap_tui(config: AppConfig, startup: StartupOptions) -> Resul
     );
     app.set_safety_model_name(config.safety.model_name.clone());
     app.set_safety_reasoning(config.safety.reasoning);
+    app.set_memory_model_name(config.memory.extraction.model_name.clone());
+    app.set_memory_reasoning(config.memory.extraction.reasoning);
     let stats = StatsStore::new();
     let (subagent_tx, subagent_rx) = mpsc::unbounded_channel();
     let subagents =
@@ -73,6 +77,10 @@ pub(crate) fn bootstrap_tui(config: AppConfig, startup: StartupOptions) -> Resul
             );
         }
     }
+    let memory = MemoryService::new(
+        config.memory.clone(),
+        app.state().session.workspace_root.clone(),
+    )?;
     let llm = {
         let _guard = runtime.enter();
         LlmService::from_config(
@@ -81,6 +89,7 @@ pub(crate) fn bootstrap_tui(config: AppConfig, startup: StartupOptions) -> Resul
             WriteApprovalController::new(startup.approval_mode),
             Some(AskUserController::default()),
             true,
+            Some(memory.clone()),
             Some(subagents.clone()),
             Some(terminals.clone()),
         )?
@@ -94,6 +103,7 @@ pub(crate) fn bootstrap_tui(config: AppConfig, startup: StartupOptions) -> Resul
         app,
         stats,
         session_store,
+        memory,
         subagents,
         terminals,
         command_history,
@@ -123,6 +133,7 @@ pub(crate) fn bootstrap_headless(
 ) -> Result<HeadlessBootstrap> {
     let runtime = Runtime::new()?;
     let stats = StatsStore::new();
+    let memory = MemoryService::new(config.memory.clone(), std::env::current_dir()?)?;
     let llm = {
         let _guard = runtime.enter();
         LlmService::from_config(
@@ -131,6 +142,7 @@ pub(crate) fn bootstrap_headless(
             WriteApprovalController::new(startup.approval_mode),
             None,
             false,
+            Some(memory.clone()),
             None,
             None,
         )?

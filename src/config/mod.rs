@@ -21,8 +21,8 @@ use paths::{default_config_update_path, default_home_config_path};
 #[cfg(test)]
 use types::default_api_version;
 pub(crate) use types::{
-    AppConfig, CodexAuthMode, CodexConfig, KimiThinkingMode, RawReasoningSetting, ReasoningEffort,
-    ReasoningSetting,
+    AppConfig, CodexAuthMode, CodexConfig, KimiThinkingMode, MemoryConfig, MemoryExtractionConfig,
+    RawReasoningSetting, ReasoningEffort, ReasoningSetting,
 };
 #[cfg(test)]
 pub(crate) use types::{
@@ -108,13 +108,22 @@ impl AppConfig {
         let home_path = default_home_config_path(HOME_CONFIG_RELATIVE_PATH);
         let cwd_path = PathBuf::from(DEFAULT_CONFIG_PATH);
         let target_path = default_config_update_path(home_path.as_deref(), Some(&cwd_path))?;
-        write_config_updates_at_path(&target_path, None, Some(reasoning), None, None, None)?;
+        write_config_updates_at_path(
+            &target_path,
+            None,
+            Some(reasoning),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )?;
         Self::load_from_default_path()
     }
 
     #[cfg(test)]
     pub fn set_reasoning_at_path(path: &Path, reasoning: ReasoningSetting) -> Result<Self> {
-        write_config_updates_at_path(path, None, Some(reasoning), None, None, None)?;
+        write_config_updates_at_path(path, None, Some(reasoning), None, None, None, None, None)?;
         Self::load_from_path(path)
     }
 
@@ -133,6 +142,8 @@ impl AppConfig {
             Some(planning_agents),
             None,
             None,
+            None,
+            None,
         )?;
         Self::load_from_default_path()
     }
@@ -143,7 +154,16 @@ impl AppConfig {
         model_name: &str,
         reasoning: ReasoningSetting,
     ) -> Result<Self> {
-        write_config_updates_at_path(path, Some(model_name), Some(reasoning), None, None, None)?;
+        write_config_updates_at_path(
+            path,
+            Some(model_name),
+            Some(reasoning),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )?;
         Self::load_from_path(path)
     }
 
@@ -151,7 +171,16 @@ impl AppConfig {
         let home_path = default_home_config_path(HOME_CONFIG_RELATIVE_PATH);
         let cwd_path = PathBuf::from(DEFAULT_CONFIG_PATH);
         let target_path = default_config_update_path(home_path.as_deref(), Some(&cwd_path))?;
-        write_config_updates_at_path(&target_path, None, None, Some(planning_agents), None, None)?;
+        write_config_updates_at_path(
+            &target_path,
+            None,
+            None,
+            Some(planning_agents),
+            None,
+            None,
+            None,
+            None,
+        )?;
         Self::load_from_default_path()
     }
 
@@ -160,7 +189,16 @@ impl AppConfig {
         path: &Path,
         planning_agents: &[PlanningAgentConfig],
     ) -> Result<Self> {
-        write_config_updates_at_path(path, None, None, Some(planning_agents), None, None)?;
+        write_config_updates_at_path(
+            path,
+            None,
+            None,
+            Some(planning_agents),
+            None,
+            None,
+            None,
+            None,
+        )?;
         Self::load_from_path(path)
     }
 
@@ -178,6 +216,8 @@ impl AppConfig {
             None,
             Some(model_name),
             Some(reasoning),
+            None,
+            None,
         )?;
         Self::load_from_default_path()
     }
@@ -188,7 +228,55 @@ impl AppConfig {
         model_name: &str,
         reasoning: ReasoningSetting,
     ) -> Result<Self> {
-        write_config_updates_at_path(path, None, None, None, Some(model_name), Some(reasoning))?;
+        write_config_updates_at_path(
+            path,
+            None,
+            None,
+            None,
+            Some(model_name),
+            Some(reasoning),
+            None,
+            None,
+        )?;
+        Self::load_from_path(path)
+    }
+
+    pub fn set_default_memory_selection(
+        model_name: &str,
+        reasoning: ReasoningSetting,
+    ) -> Result<Self> {
+        let home_path = default_home_config_path(HOME_CONFIG_RELATIVE_PATH);
+        let cwd_path = PathBuf::from(DEFAULT_CONFIG_PATH);
+        let target_path = default_config_update_path(home_path.as_deref(), Some(&cwd_path))?;
+        write_config_updates_at_path(
+            &target_path,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(model_name),
+            Some(reasoning),
+        )?;
+        Self::load_from_default_path()
+    }
+
+    #[cfg(test)]
+    pub fn set_memory_selection_at_path(
+        path: &Path,
+        model_name: &str,
+        reasoning: ReasoningSetting,
+    ) -> Result<Self> {
+        write_config_updates_at_path(
+            path,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(model_name),
+            Some(reasoning),
+        )?;
         Self::load_from_path(path)
     }
 

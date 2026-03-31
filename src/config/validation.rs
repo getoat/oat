@@ -18,6 +18,9 @@ pub(super) fn validate(config: &AppConfig) -> Result<()> {
     if config.safety.model_name.trim().is_empty() {
         bail!("safety.model_name must not be empty");
     }
+    if config.memory.extraction.model_name.trim().is_empty() {
+        bail!("memory.extraction.model_name must not be empty");
+    }
 
     validate_model_reasoning(
         "model.model_name",
@@ -33,9 +36,48 @@ pub(super) fn validate(config: &AppConfig) -> Result<()> {
         config.safety.reasoning,
         config,
     )?;
+    validate_model_reasoning(
+        "memory.extraction.model_name",
+        "memory.extraction.reasoning",
+        &config.memory.extraction.model_name,
+        config.memory.extraction.reasoning,
+        config,
+    )?;
 
     if config.subagents.max_concurrent == 0 {
         bail!("subagents.max_concurrent must be at least 1");
+    }
+
+    if config.memory.auto_inject_token_budget == 0 {
+        bail!("memory.auto_inject_token_budget must be at least 1");
+    }
+    if config.memory.max_auto_results == 0 {
+        bail!("memory.max_auto_results must be at least 1");
+    }
+    if config.memory.max_candidate_search_results == 0 {
+        bail!("memory.max_candidate_search_results must be at least 1");
+    }
+    if config.memory.extraction.max_evidence_tokens == 0 {
+        bail!("memory.extraction.max_evidence_tokens must be at least 1");
+    }
+    if config.memory.extraction.max_related_memories == 0 {
+        bail!("memory.extraction.max_related_memories must be at least 1");
+    }
+    if config.memory.extraction.max_candidates_per_turn == 0 {
+        bail!("memory.extraction.max_candidates_per_turn must be at least 1");
+    }
+    if config.memory.extraction.min_candidate_confidence > 100 {
+        bail!("memory.extraction.min_candidate_confidence must be between 0 and 100");
+    }
+    if config.memory.extraction.min_active_confidence > 100 {
+        bail!("memory.extraction.min_active_confidence must be between 0 and 100");
+    }
+    if config.memory.extraction.min_active_confidence
+        < config.memory.extraction.min_candidate_confidence
+    {
+        bail!(
+            "memory.extraction.min_active_confidence must be greater than or equal to memory.extraction.min_candidate_confidence"
+        );
     }
 
     validate_planning_agents(&config.model.model_name, &config.planning.agents, config)?;

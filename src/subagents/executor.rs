@@ -69,6 +69,7 @@ impl SubagentManager {
             request.shell_approvals.clone(),
             None,
             false,
+            None,
             Some(self.clone()),
             None,
         )

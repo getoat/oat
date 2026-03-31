@@ -42,6 +42,8 @@ pub struct SessionState {
     pub reasoning: ReasoningSetting,
     pub safety_model_name: String,
     pub safety_reasoning: ReasoningSetting,
+    pub memory_model_name: String,
+    pub memory_reasoning: ReasoningSetting,
     pub planning_agents: Vec<PlanningAgentConfig>,
     pub session_stats: StatsTotals,
     pub active_background_terminal_count: usize,
@@ -84,6 +86,8 @@ impl SessionState {
     ) -> Self {
         let model_name = model_name.into();
         let reasoning = reasoning.into();
+        let safety_model_name = model_name.clone();
+        let memory_model_name = model_name.clone();
         Self {
             workspace_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             initial_mode,
@@ -109,11 +113,13 @@ impl SessionState {
             tick_count: 0,
             show_thinking,
             show_tool_output,
-            safety_model_name: model_name.clone(),
+            safety_model_name,
             model_name,
             last_history_model_name: None,
             reasoning,
             safety_reasoning: reasoning,
+            memory_model_name,
+            memory_reasoning: reasoning,
             planning_agents,
             session_stats: StatsTotals::default(),
             active_background_terminal_count: 0,

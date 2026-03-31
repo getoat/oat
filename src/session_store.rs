@@ -48,6 +48,8 @@ pub struct PersistedSessionRuntimeState {
     pub reasoning: ReasoningSetting,
     pub safety_model_name: String,
     pub safety_reasoning: ReasoningSetting,
+    pub memory_model_name: String,
+    pub memory_reasoning: ReasoningSetting,
     pub planning_agents: Vec<PlanningAgentConfig>,
     pub access_mode: AccessMode,
     pub approval_mode: ApprovalMode,
@@ -101,6 +103,8 @@ impl PersistedSessionSnapshot {
                 reasoning: state.session.reasoning,
                 safety_model_name: state.session.safety_model_name.clone(),
                 safety_reasoning: state.session.safety_reasoning,
+                memory_model_name: state.session.memory_model_name.clone(),
+                memory_reasoning: state.session.memory_reasoning,
                 planning_agents: state.session.planning_agents.clone(),
                 access_mode: state.session.mode,
                 approval_mode: state.session.approval_mode,
@@ -144,6 +148,8 @@ impl PersistedSessionSnapshot {
         session.model_name = self.runtime.model_name;
         session.safety_model_name = self.runtime.safety_model_name;
         session.safety_reasoning = self.runtime.safety_reasoning;
+        session.memory_model_name = self.runtime.memory_model_name;
+        session.memory_reasoning = self.runtime.memory_reasoning;
         session.planning_agents = self.runtime.planning_agents;
         session.planning = self.runtime.planning;
         session.current_todo = self.runtime.current_todo;
@@ -373,7 +379,8 @@ impl SessionStore {
                 continue;
             }
             let resumable = model_registry::find_model(&snapshot.runtime.model_name).is_some()
-                && model_registry::find_model(&snapshot.runtime.safety_model_name).is_some();
+                && model_registry::find_model(&snapshot.runtime.safety_model_name).is_some()
+                && model_registry::find_model(&snapshot.runtime.memory_model_name).is_some();
             let reason_suffix = if resumable {
                 String::new()
             } else {
@@ -430,6 +437,10 @@ impl SessionStore {
     pub fn attach_resumed_session(&mut self, snapshot: PersistedSessionSnapshot) {
         self.disabled = false;
         self.live = LiveSessionState::from_snapshot(snapshot);
+    }
+
+    pub fn current_session_id(&self) -> &str {
+        &self.live.session_id
     }
 
     fn activate_live_session(&mut self) -> Result<()> {
@@ -933,6 +944,7 @@ mod tests {
             visible_prompt: "continue".into(),
             model_prompt: "continue".into(),
             history_model_name: Some("gpt-5-mini".into()),
+            transcript_len_before: 0,
         });
         app.state_mut().session.active_background_terminal_count = 3;
         let pending_shell = crate::app::PendingShellApproval::new(

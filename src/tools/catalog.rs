@@ -9,18 +9,20 @@ use crate::{
     background_terminals::BackgroundTerminalManager,
     config::AppConfig,
     llm::{ShellApprovalController, WriteApprovalController},
+    memory::MemoryService,
     subagents::SubagentManager,
     tool_policy::{SearchPathPolicy, ToolOutputPolicy},
 };
 
 use super::{
-    ApplyPatchesTool, AskUserTool, CommentaryTool, DeletePathTool, GrepTool,
-    INSPECT_BACKGROUND_TERMINAL_TOOL_NAME, INSPECT_SUBAGENT_TOOL_NAME,
+    ApplyPatchesTool, AskUserTool, CommentaryTool, DeletePathTool, GET_MEMORY_TOOL_NAME,
+    GetMemoryTool, GrepTool, INSPECT_BACKGROUND_TERMINAL_TOOL_NAME, INSPECT_SUBAGENT_TOOL_NAME,
     InspectBackgroundTerminalTool, InspectSubagentTool, KILL_BACKGROUND_TERMINAL_TOOL_NAME,
     KillBackgroundTerminalTool, LIST_BACKGROUND_TERMINALS_TOOL_NAME, ListBackgroundTerminalsTool,
-    ListTool, ReadFileTool, ReadFilesTool, RunShellScriptTool, SPAWN_SUBAGENT_TOOL_NAME,
-    START_BACKGROUND_TERMINAL_TOOL_NAME, SpawnSubagentTool, StartBackgroundTerminalTool, TodoTool,
-    WAIT_SUBAGENT_TOOL_NAME, WaitSubagentTool, WriteFileTool, output_limit::OutputLimitedTool,
+    ListTool, ReadFileTool, ReadFilesTool, RunShellScriptTool, SEARCH_MEMORIES_TOOL_NAME,
+    SPAWN_SUBAGENT_TOOL_NAME, START_BACKGROUND_TERMINAL_TOOL_NAME, SearchMemoriesTool,
+    SpawnSubagentTool, StartBackgroundTerminalTool, TodoTool, WAIT_SUBAGENT_TOOL_NAME,
+    WaitSubagentTool, WriteFileTool, output_limit::OutputLimitedTool,
 };
 
 #[derive(Clone)]
@@ -30,6 +32,7 @@ pub struct ToolContext {
     pub config: AppConfig,
     pub write_approvals: WriteApprovalController,
     pub shell_approvals: ShellApprovalController,
+    pub memory: Option<MemoryService>,
     pub ask_user_available: bool,
     pub todo_available: bool,
     pub subagents: Option<SubagentManager>,
@@ -65,7 +68,7 @@ enum ToolRoleScope {
     MainWithTerminalManager,
 }
 
-const TOOL_DESCRIPTORS: [ToolDescriptor; 18] = [
+const TOOL_DESCRIPTORS: [ToolDescriptor; 20] = [
     ToolDescriptor::read_only(AskUserTool::NAME, ToolRoleScope::MainOnly, |_context| {
         Box::new(AskUserTool)
     }),
@@ -91,6 +94,24 @@ const TOOL_DESCRIPTORS: [ToolDescriptor; 18] = [
     }),
     ToolDescriptor::read_only(RunShellScriptTool::NAME, ToolRoleScope::Any, |context| {
         Box::new(RunShellScriptTool::new(context.root))
+    }),
+    ToolDescriptor::read_only(
+        SEARCH_MEMORIES_TOOL_NAME,
+        ToolRoleScope::MainOnly,
+        |context| {
+            Box::new(SearchMemoriesTool::new(
+                context
+                    .memory
+                    .expect("memory tools require a memory service"),
+            ))
+        },
+    ),
+    ToolDescriptor::read_only(GET_MEMORY_TOOL_NAME, ToolRoleScope::MainOnly, |context| {
+        Box::new(GetMemoryTool::new(
+            context
+                .memory
+                .expect("memory tools require a memory service"),
+        ))
     }),
     ToolDescriptor::read_only(
         START_BACKGROUND_TERMINAL_TOOL_NAME,
@@ -219,6 +240,11 @@ impl ToolDescriptor {
         if self.name == TodoTool::NAME && !context.todo_available {
             return false;
         }
+        if (self.name == SEARCH_MEMORIES_TOOL_NAME || self.name == GET_MEMORY_TOOL_NAME)
+            && context.memory.is_none()
+        {
+            return false;
+        }
         let access_enabled = self.access_mode == ToolAccess::ReadOnly
             || context.agent.access_mode == AccessMode::ReadWrite;
         let role_enabled = match self.role_scope {
@@ -283,6 +309,7 @@ mod tests {
             config: sample_config(),
             write_approvals: WriteApprovalController::default(),
             shell_approvals: ShellApprovalController::default(),
+            memory: None,
             ask_user_available: true,
             todo_available: true,
             subagents: Some(test_subagent_manager()),
@@ -319,6 +346,7 @@ mod tests {
             config: sample_config(),
             write_approvals: WriteApprovalController::default(),
             shell_approvals: ShellApprovalController::default(),
+            memory: None,
             ask_user_available: true,
             todo_available: true,
             subagents: Some(test_subagent_manager()),
@@ -344,6 +372,7 @@ mod tests {
             config: sample_config(),
             write_approvals: WriteApprovalController::default(),
             shell_approvals: ShellApprovalController::default(),
+            memory: None,
             ask_user_available: true,
             todo_available: true,
             subagents: Some(test_subagent_manager()),
@@ -369,6 +398,7 @@ mod tests {
             config: sample_config(),
             write_approvals: WriteApprovalController::default(),
             shell_approvals: ShellApprovalController::default(),
+            memory: None,
             ask_user_available: true,
             todo_available: true,
             subagents: Some(test_subagent_manager()),
@@ -389,6 +419,7 @@ mod tests {
             config: sample_config(),
             write_approvals: WriteApprovalController::default(),
             shell_approvals: ShellApprovalController::default(),
+            memory: None,
             ask_user_available: false,
             todo_available: false,
             subagents: None,
@@ -426,6 +457,7 @@ mod tests {
                 model_name: "gpt-5.4-mini".into(),
                 reasoning: crate::config::ReasoningEffort::Medium.into(),
             },
+            memory: crate::config::MemoryConfig::default(),
             ui: crate::config::UiConfig::default(),
             subagents: crate::config::SubagentConfig { max_concurrent: 4 },
             planning: crate::features::planning::PlanningConfig::default(),

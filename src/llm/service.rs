@@ -21,6 +21,7 @@ use crate::{
     completion_request::CompletionRequestSnapshot,
     config::{AppConfig, ReasoningSetting},
     debug_log::log_debug,
+    memory::MemoryService,
     model_registry,
     runtime::RuntimeEvent,
     stats::StatsHook,
@@ -33,7 +34,7 @@ use super::{
     InteractionResolveResult, PromptRunResult, ResumeOverride, StreamEvent,
     agent_builder::{
         build_agent, http_headers_for_model, mode_preamble, openai_base_url_for_model,
-        run_plain_prompt,
+        run_plain_prompt_with_hook,
     },
     compaction::{
         COMPACTION_NOTICE, COMPACTION_PROMPT, compaction_model_for_pre_turn,
@@ -172,6 +173,7 @@ impl LlmService {
         approvals: WriteApprovalController,
         ask_user: Option<AskUserController>,
         todo_available: bool,
+        memory: Option<MemoryService>,
         subagents: Option<SubagentManager>,
         terminals: Option<BackgroundTerminalManager>,
     ) -> Result<Self> {
@@ -183,6 +185,7 @@ impl LlmService {
             shell_approvals,
             ask_user,
             todo_available,
+            memory,
             subagents,
             terminals,
         )
@@ -195,6 +198,7 @@ impl LlmService {
         shell_approvals: ShellApprovalController,
         ask_user: Option<AskUserController>,
         todo_available: bool,
+        memory: Option<MemoryService>,
         subagents: Option<SubagentManager>,
         terminals: Option<BackgroundTerminalManager>,
     ) -> Result<Self> {
@@ -211,6 +215,7 @@ impl LlmService {
             config: config.clone(),
             write_approvals: approvals.clone(),
             shell_approvals: shell_approvals.clone(),
+            memory,
             ask_user_available: ask_user.is_some(),
             todo_available,
             subagents,
@@ -390,7 +395,11 @@ impl LlmService {
         let _ = events.send(RuntimeEvent::SideChannel { reply_id, event });
     }
 
-    pub async fn generate_session_title(&self, user_request: String) -> Result<Option<String>> {
+    pub async fn generate_session_title(
+        &self,
+        user_request: String,
+        stats_hook: StatsHook,
+    ) -> Result<Option<String>> {
         let prompt = format!("{SESSION_TITLE_PROMPT_PREFIX}{}", user_request.trim());
         let raw = match &self.client {
             ClientVariant::Completions(client) => {
@@ -401,7 +410,13 @@ impl LlmService {
                     self.reasoning,
                     None,
                 );
-                run_plain_prompt(&agent, prompt, Vec::new()).await?
+                run_plain_prompt_with_hook(
+                    &agent,
+                    prompt,
+                    Vec::new(),
+                    stats_hook.with_model(self.model_name.clone()),
+                )
+                .await?
             }
             ClientVariant::Responses(client) => {
                 let agent = build_agent(
@@ -411,7 +426,13 @@ impl LlmService {
                     self.reasoning,
                     None,
                 );
-                run_plain_prompt(&agent, prompt, Vec::new()).await?
+                run_plain_prompt_with_hook(
+                    &agent,
+                    prompt,
+                    Vec::new(),
+                    stats_hook.with_model(self.model_name.clone()),
+                )
+                .await?
             }
         };
 
@@ -479,6 +500,7 @@ impl LlmService {
                 prompt,
                 history,
                 history_model_name,
+                stats_hook.clone(),
                 emit.clone(),
                 self.role == crate::agent::AgentRole::Main,
             )
@@ -505,6 +527,7 @@ impl LlmService {
                 prompt,
                 history,
                 history_model_name,
+                stats_hook.clone(),
                 emit.clone(),
                 false,
             )
@@ -553,6 +576,7 @@ impl LlmService {
         prompt: String,
         history: Vec<SessionHistoryMessage>,
         history_model_name: Option<String>,
+        stats_hook: StatsHook,
         emit: EventCallback,
         emit_compaction_notice: bool,
     ) -> Result<(RigMessage, Vec<RigMessage>)> {
@@ -570,6 +594,7 @@ impl LlmService {
                     history.clone(),
                     &compaction_model_name,
                     reply_id,
+                    stats_hook.with_model(compaction_model_name.clone()),
                     emit,
                     emit_compaction_notice,
                 )
@@ -668,6 +693,7 @@ impl LlmService {
                                 history.clone(),
                                 &self.model_name,
                                 reply_id,
+                                stats_hook.with_model(self.model_name.clone()),
                                 emit.clone(),
                                 self.role == crate::agent::AgentRole::Main,
                             )
@@ -683,12 +709,14 @@ impl LlmService {
         &self,
         history: Vec<SessionHistoryMessage>,
         history_model_name: Option<String>,
+        stats_hook: StatsHook,
     ) -> Result<HistoryCompactionResult> {
         let model_name = history_model_name.unwrap_or_else(|| self.model_name.clone());
         self.compact_history(
             history_into_rig(history)?,
             &model_name,
             0,
+            stats_hook.with_model(model_name.clone()),
             Arc::new(|_, _| true),
             false,
         )
@@ -700,6 +728,7 @@ impl LlmService {
         history: Vec<RigMessage>,
         model_name: &str,
         reply_id: u64,
+        stats_hook: StatsHook,
         emit: EventCallback,
         emit_notice: bool,
     ) -> Result<HistoryCompactionResult> {
@@ -725,20 +754,22 @@ impl LlmService {
                 ClientVariant::Completions(client) => {
                     let compact_agent =
                         build_agent(client, model_name, &self.preamble, self.reasoning, None);
-                    run_plain_prompt(
+                    run_plain_prompt_with_hook(
                         &compact_agent,
                         COMPACTION_PROMPT.to_string(),
                         candidate_history.clone(),
+                        stats_hook.clone(),
                     )
                     .await
                 }
                 ClientVariant::Responses(client) => {
                     let compact_agent =
                         build_agent(client, model_name, &self.preamble, self.reasoning, None);
-                    run_plain_prompt(
+                    run_plain_prompt_with_hook(
                         &compact_agent,
                         COMPACTION_PROMPT.to_string(),
                         candidate_history.clone(),
+                        stats_hook.clone(),
                     )
                     .await
                 }
@@ -763,6 +794,25 @@ impl LlmService {
                 model_name: model_name.to_string(),
             });
         }
+    }
+}
+
+pub(crate) async fn run_internal_plain_prompt(
+    config: &AppConfig,
+    model_name: &str,
+    preamble: &str,
+    reasoning: ReasoningSetting,
+    prompt: String,
+    stats_hook: StatsHook,
+) -> Result<String> {
+    if is_codex_model(model_name) {
+        let client = build_responses_client(config, model_name)?;
+        let agent = build_agent(&client, model_name, preamble, reasoning, None);
+        run_plain_prompt_with_hook(&agent, prompt, Vec::new(), stats_hook).await
+    } else {
+        let client = build_completions_client(config, model_name)?;
+        let agent = build_agent(&client, model_name, preamble, reasoning, None);
+        run_plain_prompt_with_hook(&agent, prompt, Vec::new(), stats_hook).await
     }
 }
 

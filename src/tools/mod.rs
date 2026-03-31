@@ -7,6 +7,7 @@ mod common;
 mod delete_path;
 mod grep;
 mod list;
+mod memory;
 mod output_limit;
 mod preview;
 mod read_file;
@@ -32,6 +33,9 @@ pub(crate) use commentary::{CommentaryArgs, CommentaryTool};
 pub(crate) use delete_path::{DeletePathArgs, DeletePathTool};
 pub(crate) use grep::GrepTool;
 pub(crate) use list::ListTool;
+pub(crate) use memory::{
+    GET_MEMORY_TOOL_NAME, GetMemoryTool, SEARCH_MEMORIES_TOOL_NAME, SearchMemoriesTool,
+};
 #[cfg(test)]
 pub(crate) use preview::DiffPreviewLine;
 pub(crate) use preview::{

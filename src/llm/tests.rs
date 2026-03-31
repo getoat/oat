@@ -36,9 +36,9 @@ use crate::{
     },
     completion_request::CompletionRequestSnapshot,
     config::{
-        AppConfig, AzureConfig, CodexAuthMode, CodexConfig, KimiThinkingMode, ModelSelectionConfig,
-        OpenRouterConfig, ReasoningEffort, ReasoningSetting, SafetyConfig, SubagentConfig,
-        ToolConfig, UiConfig,
+        AppConfig, AzureConfig, CodexAuthMode, CodexConfig, KimiThinkingMode, MemoryConfig,
+        ModelSelectionConfig, OpenRouterConfig, ReasoningEffort, ReasoningSetting, SafetyConfig,
+        SubagentConfig, ToolConfig, UiConfig,
     },
     features::planning::PlanningConfig,
 };
@@ -61,6 +61,7 @@ fn sample_config() -> AppConfig {
             model_name: "gpt-5.4-mini".into(),
             reasoning: ReasoningEffort::Low.into(),
         },
+        memory: MemoryConfig::default(),
         ui: UiConfig {
             show_thinking: true,
             show_tool_output: false,
@@ -492,6 +493,7 @@ async fn read_write_mode_registers_mutation_tools() {
         true,
         None,
         None,
+        None,
     )
     .expect("service builds");
 
@@ -541,6 +543,7 @@ async fn read_only_mode_omits_mutation_tools() {
         WriteApprovalController::default(),
         Some(AskUserController::default()),
         true,
+        None,
         None,
         None,
     )
@@ -786,6 +789,7 @@ async fn write_mode_preamble_is_the_same_for_both_approval_modes() {
         true,
         None,
         None,
+        None,
     )
     .expect("manual service builds")
     .preamble;
@@ -795,6 +799,7 @@ async fn write_mode_preamble_is_the_same_for_both_approval_modes() {
         WriteApprovalController::new(ApprovalMode::Disabled),
         Some(AskUserController::default()),
         true,
+        None,
         None,
         None,
     )
@@ -812,6 +817,7 @@ async fn todo_tool_can_be_disabled_independently_of_ask_user() {
         WriteApprovalController::default(),
         Some(AskUserController::default()),
         false,
+        None,
         None,
         None,
     )

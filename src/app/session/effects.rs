@@ -20,6 +20,26 @@ pub enum Effect {
         history_model_name: Option<String>,
     },
     CompactHistory,
+    SearchMemories {
+        query: String,
+        include_candidates: bool,
+    },
+    ShowMemory {
+        id: String,
+    },
+    ListMemoryCandidates,
+    PromoteMemory {
+        id: String,
+    },
+    ArchiveMemory {
+        id: String,
+    },
+    ReplaceMemory {
+        id: String,
+        text: String,
+    },
+    ClearMemories,
+    RebuildMemoryIndexes,
     ShowStats,
     OpenSessionPicker,
     OpenModelPicker,
@@ -36,6 +56,10 @@ pub enum Effect {
         planning_agents: Vec<PlanningAgentConfig>,
     },
     SetSafetySelection {
+        model_name: String,
+        reasoning: ReasoningSetting,
+    },
+    SetMemorySelection {
         model_name: String,
         reasoning: ReasoningSetting,
     },

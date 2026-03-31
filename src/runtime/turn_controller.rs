@@ -7,6 +7,7 @@ use crate::{
     config::AppConfig,
     debug_log::log_debug,
     llm::{LlmService, TurnInterruptRequest},
+    memory::{CompletedTurnMemoryInput, MemoryService},
     session_store::SessionStore,
     stats::StatsStore,
     subagents::{SubagentManager, SubagentUiEvent},
@@ -28,6 +29,7 @@ pub(crate) struct TurnController<'a> {
     app: &'a mut App,
     stats: &'a StatsStore,
     session_store: &'a mut SessionStore,
+    memory: &'a MemoryService,
     stream_tx: mpsc::UnboundedSender<RuntimeEvent>,
     subagents: &'a SubagentManager,
     terminals: &'a BackgroundTerminalManager,
@@ -45,6 +47,7 @@ impl<'a> TurnController<'a> {
         app: &'a mut App,
         stats: &'a StatsStore,
         session_store: &'a mut SessionStore,
+        memory: &'a MemoryService,
         stream_tx: mpsc::UnboundedSender<RuntimeEvent>,
         subagents: &'a SubagentManager,
         terminals: &'a BackgroundTerminalManager,
@@ -59,6 +62,7 @@ impl<'a> TurnController<'a> {
             app,
             stats,
             session_store,
+            memory,
             stream_tx,
             subagents,
             terminals,
@@ -76,6 +80,7 @@ impl<'a> TurnController<'a> {
             &mut state.app,
             &state.stats,
             &mut state.session_store,
+            &state.memory,
             state.stream_tx.clone(),
             &state.subagents,
             &state.terminals,
@@ -94,6 +99,31 @@ impl<'a> TurnController<'a> {
         );
         let effect = match runtime_event {
             RuntimeEvent::MainReply { reply_id, event } => {
+                let pending_seed = matches!(
+                    event,
+                    crate::app::StreamEvent::TurnEnded {
+                        reason: crate::app::TurnEndReason::Completed,
+                        ..
+                    }
+                )
+                .then(|| self.app.state().session.active_main_request_seed.clone())
+                .flatten();
+                let pending_plain_text = matches!(
+                    event,
+                    crate::app::StreamEvent::TurnEnded {
+                        reason: crate::app::TurnEndReason::Completed,
+                        ..
+                    }
+                )
+                .then(|| {
+                    self.app
+                        .state()
+                        .session
+                        .pending_reply
+                        .as_ref()
+                        .map(|pending| pending.plain_text.clone())
+                })
+                .flatten();
                 self.reply_driver.clear_completed_task(reply_id, &event);
                 if matches!(&event, crate::app::StreamEvent::Failed(_))
                     && self
@@ -103,7 +133,44 @@ impl<'a> TurnController<'a> {
                     return;
                 }
 
-                self.app.apply(Action::StreamEvent { reply_id, event })
+                let effect = self.app.apply(Action::StreamEvent { reply_id, event });
+                if let (Some(seed), Some(assistant_response)) = (pending_seed, pending_plain_text) {
+                    let transcript_entries =
+                        self.app.state().session.entries[seed.transcript_len_before..].to_vec();
+                    let input = CompletedTurnMemoryInput {
+                        session_id: Some(self.session_store.current_session_id().to_string()),
+                        seed,
+                        transcript_entries,
+                        assistant_response,
+                    };
+                    let memory = self.memory.clone();
+                    let config = self.config.clone();
+                    let stats_hook = self
+                        .stats
+                        .hook_for_model(config.memory.extraction.model_name.clone());
+                    if config.memory.extraction.run_in_background {
+                        self.runtime.spawn(async move {
+                            if let Err(error) = memory
+                                .process_completed_turn(config, stats_hook, input)
+                                .await
+                            {
+                                log_debug(
+                                    "memory",
+                                    format!("background_memory_extraction_failed error={error}"),
+                                );
+                            }
+                        });
+                    } else if let Err(error) = self
+                        .runtime
+                        .block_on(memory.process_completed_turn(config, stats_hook, input))
+                    {
+                        log_debug(
+                            "memory",
+                            format!("synchronous_memory_extraction_failed error={error}"),
+                        );
+                    }
+                }
+                effect
             }
             RuntimeEvent::SideChannel { reply_id, event } => {
                 self.side_channel_task_manager
@@ -181,6 +248,7 @@ impl<'a> TurnController<'a> {
             app: self.app,
             stats: self.stats,
             session_store: self.session_store,
+            memory: self.memory,
             stream_tx: self.stream_tx.clone(),
             subagents: self.subagents,
             terminals: self.terminals,

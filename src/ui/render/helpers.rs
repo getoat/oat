@@ -182,6 +182,11 @@ pub(super) fn model_picker_tab_line(active_tab: ModelPickerTab, accent: Color) -
     } else {
         Style::default().fg(Color::Gray)
     };
+    let memory_style = if active_tab == ModelPickerTab::MemoryModel {
+        Style::default().fg(accent).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Gray)
+    };
 
     Line::from(vec![
         Span::styled("Normal agent", normal_style),
@@ -189,6 +194,8 @@ pub(super) fn model_picker_tab_line(active_tab: ModelPickerTab, accent: Color) -
         Span::styled("Planning agents", planning_style),
         Span::styled("  |  ", Style::default().fg(Color::DarkGray)),
         Span::styled("Safety model", safety_style),
+        Span::styled("  |  ", Style::default().fg(Color::DarkGray)),
+        Span::styled("Memory model", memory_style),
     ])
 }
 

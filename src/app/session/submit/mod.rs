@@ -99,6 +99,7 @@ fn submit_normal_message_text(
         prompt.clone(),
         prompt.clone(),
         state.session.last_history_model_name.clone(),
+        state.session.entries.len(),
     );
 
     Some(Effect::PromptModel {

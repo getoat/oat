@@ -9,11 +9,17 @@ pub enum ModelPickerTab {
     NormalAgent,
     PlanningAgents,
     SafetyModel,
+    MemoryModel,
 }
 
 impl ModelPickerTab {
     pub fn toggle(&mut self, direction: isize) {
-        let tabs = [Self::NormalAgent, Self::PlanningAgents, Self::SafetyModel];
+        let tabs = [
+            Self::NormalAgent,
+            Self::PlanningAgents,
+            Self::SafetyModel,
+            Self::MemoryModel,
+        ];
         let current = tabs.iter().position(|tab| *tab == *self).unwrap_or(0);
         let next = (current as isize + direction).rem_euclid(tabs.len() as isize) as usize;
         *self = tabs[next];
@@ -25,6 +31,7 @@ pub enum ReasoningPickerTarget {
     NormalAgent,
     PlanningAgent,
     SafetyModel,
+    MemoryModel,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -42,6 +49,7 @@ pub enum SelectionPicker {
         normal_selected_model: String,
         planning_selected_model: String,
         safety_selected_model: String,
+        memory_selected_model: String,
     },
     Session {
         entries: Vec<SessionPickerEntry>,
@@ -139,6 +147,10 @@ pub enum PickerSelection {
     Reasoning(ReasoningSetting),
     PlanningAgent(PlanningAgentConfig),
     SafetySelection {
+        model_name: String,
+        reasoning: ReasoningSetting,
+    },
+    MemorySelection {
         model_name: String,
         reasoning: ReasoningSetting,
     },

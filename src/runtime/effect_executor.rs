@@ -19,6 +19,7 @@ use crate::{
     llm::{
         AskUserController, LlmService, WriteApprovalController, history_from_rig, history_into_rig,
     },
+    memory::MemoryService,
     model_registry::{self, ModelProvider},
     session_store::SessionStore,
     stats::StatsStore,
@@ -39,6 +40,7 @@ pub(crate) struct EffectExecutor<'a> {
     pub(crate) app: &'a mut App,
     pub(crate) stats: &'a StatsStore,
     pub(crate) session_store: &'a mut SessionStore,
+    pub(crate) memory: &'a MemoryService,
     pub(crate) stream_tx: mpsc::UnboundedSender<RuntimeEvent>,
     pub(crate) subagents: &'a SubagentManager,
     pub(crate) terminals: &'a BackgroundTerminalManager,
@@ -51,6 +53,7 @@ fn rebuild_main_llm(
     access_mode: app::AccessMode,
     subagents: &SubagentManager,
     terminals: &BackgroundTerminalManager,
+    memory: &MemoryService,
 ) -> Result<LlmService> {
     let _guard = runtime.enter();
     LlmService::from_config_with_controllers(
@@ -60,6 +63,7 @@ fn rebuild_main_llm(
         llm.shell_approvals(),
         llm.ask_user_controller(),
         llm.todo_available(),
+        Some(memory.clone()),
         Some(subagents.clone()),
         Some(terminals.clone()),
     )
@@ -72,6 +76,7 @@ fn build_fresh_main_llm(
     approval_mode: app::ApprovalMode,
     subagents: &SubagentManager,
     terminals: &BackgroundTerminalManager,
+    memory: &MemoryService,
 ) -> Result<LlmService> {
     let _guard = runtime.enter();
     LlmService::from_config(
@@ -80,6 +85,7 @@ fn build_fresh_main_llm(
         WriteApprovalController::new(approval_mode),
         Some(AskUserController::default()),
         true,
+        Some(memory.clone()),
         Some(subagents.clone()),
         Some(terminals.clone()),
     )
@@ -92,12 +98,21 @@ fn sync_main_llm_access_mode(
     access_mode: app::AccessMode,
     subagents: &SubagentManager,
     terminals: &BackgroundTerminalManager,
+    memory: &MemoryService,
 ) -> Result<bool> {
     if llm.access_mode == access_mode {
         return Ok(false);
     }
 
-    *llm = rebuild_main_llm(runtime, config, llm, access_mode, subagents, terminals)?;
+    *llm = rebuild_main_llm(
+        runtime,
+        config,
+        llm,
+        access_mode,
+        subagents,
+        terminals,
+        memory,
+    )?;
     Ok(true)
 }
 
@@ -111,6 +126,16 @@ impl EffectExecutor<'_> {
                 history_model_name,
                 session_title_prompt,
             } => {
+                let prompt = self.memory.augment_prompt(&prompt)?;
+                if let Some(seed) = self
+                    .app
+                    .state_mut()
+                    .session
+                    .active_main_request_seed
+                    .as_mut()
+                {
+                    seed.model_prompt = prompt.clone();
+                }
                 log_debug(
                     "effect_executor",
                     format!(
@@ -136,9 +161,10 @@ impl EffectExecutor<'_> {
                     app::ops::session::begin_session_title_request(self.app.state_mut(), reply_id);
                     let title_llm = self.llm.clone();
                     let title_stream_tx = self.stream_tx.clone();
+                    let title_stats_hook = stats_hook.clone();
                     self.runtime.spawn(async move {
                         let title = title_llm
-                            .generate_session_title(session_title_prompt)
+                            .generate_session_title(session_title_prompt, title_stats_hook)
                             .await
                             .ok()
                             .flatten()
@@ -169,6 +195,7 @@ impl EffectExecutor<'_> {
                 history,
                 history_model_name,
             } => {
+                let prompt = self.memory.augment_prompt(&prompt)?;
                 self.refresh_codex_auth_if_needed()?;
                 self.sync_llm_access_mode(query::mode(self.app.state()))?;
                 let model_names = vec![
@@ -207,11 +234,14 @@ impl EffectExecutor<'_> {
                 let history = query::session_history(self.app.state()).to_vec();
                 let history_model_name =
                     query::last_history_model_name(self.app.state()).map(str::to_string);
+                let stats_hook = self
+                    .stats
+                    .hook_for_model(query::model_name(self.app.state()).to_string());
                 let stream_tx = self.stream_tx.clone();
                 let reply_id = ReplyDriver::require_active_reply_id(self.app)?;
                 let task = self.runtime.spawn(async move {
                     let event = match llm
-                        .compact_history_for_session(history, history_model_name)
+                        .compact_history_for_session(history, history_model_name, stats_hook)
                         .await
                     {
                         Ok(result) => crate::app::StreamEvent::CompactionFinished {
@@ -223,6 +253,69 @@ impl EffectExecutor<'_> {
                     let _ = stream_tx.send(RuntimeEvent::MainReply { reply_id, event });
                 });
                 self.reply_driver.spawn_task(reply_id, task);
+                Ok(())
+            }
+            Effect::SearchMemories {
+                query,
+                include_candidates,
+            } => {
+                app::ops::transcript::push_agent_message(
+                    self.app.state_mut(),
+                    self.memory.search_text(
+                        &query,
+                        include_candidates,
+                        self.config.memory.max_candidate_search_results,
+                    )?,
+                );
+                Ok(())
+            }
+            Effect::ShowMemory { id } => {
+                app::ops::transcript::push_agent_message(
+                    self.app.state_mut(),
+                    self.memory.get_text(&id)?,
+                );
+                Ok(())
+            }
+            Effect::ListMemoryCandidates => {
+                app::ops::transcript::push_agent_message(
+                    self.app.state_mut(),
+                    self.memory.list_candidates_text()?,
+                );
+                Ok(())
+            }
+            Effect::PromoteMemory { id } => {
+                app::ops::transcript::push_agent_message(
+                    self.app.state_mut(),
+                    self.memory.promote(&id)?,
+                );
+                Ok(())
+            }
+            Effect::ArchiveMemory { id } => {
+                app::ops::transcript::push_agent_message(
+                    self.app.state_mut(),
+                    self.memory.archive(&id)?,
+                );
+                Ok(())
+            }
+            Effect::ReplaceMemory { id, text } => {
+                app::ops::transcript::push_agent_message(
+                    self.app.state_mut(),
+                    self.memory.replace(&id, &text)?,
+                );
+                Ok(())
+            }
+            Effect::ClearMemories => {
+                app::ops::transcript::push_agent_message(
+                    self.app.state_mut(),
+                    self.memory.clear()?,
+                );
+                Ok(())
+            }
+            Effect::RebuildMemoryIndexes => {
+                app::ops::transcript::push_agent_message(
+                    self.app.state_mut(),
+                    self.memory.rebuild_indexes()?,
+                );
                 Ok(())
             }
             Effect::ShowStats => {
@@ -273,6 +366,7 @@ impl EffectExecutor<'_> {
                     query::approval_mode(self.app.state()),
                     self.subagents,
                     self.terminals,
+                    self.memory,
                 )?;
                 *self.llm = rebuilt;
                 self.session_store
@@ -293,6 +387,7 @@ impl EffectExecutor<'_> {
                     &planning_agents,
                 )?;
                 let rebuilt = self.rebuild_llm(&updated_config, query::mode(self.app.state()))?;
+                self.memory.set_config(updated_config.memory.clone());
                 *self.config = updated_config;
                 *self.llm = rebuilt;
                 self.app.set_model_name(model_name.clone());
@@ -300,6 +395,10 @@ impl EffectExecutor<'_> {
                 self.app
                     .set_safety_model_name(self.config.safety.model_name.clone());
                 self.app.set_safety_reasoning(self.config.safety.reasoning);
+                self.app
+                    .set_memory_model_name(self.config.memory.extraction.model_name.clone());
+                self.app
+                    .set_memory_reasoning(self.config.memory.extraction.reasoning);
                 self.app.set_planning_agents(planning_agents);
                 app::ops::picker::open_reasoning_picker(self.app.state_mut());
                 let display_name = crate::codex::display_name(&model_name);
@@ -315,12 +414,17 @@ impl EffectExecutor<'_> {
             Effect::SetReasoning { reasoning } => {
                 let updated_config = AppConfig::set_default_reasoning(reasoning)?;
                 let rebuilt = self.rebuild_llm(&updated_config, query::mode(self.app.state()))?;
+                self.memory.set_config(updated_config.memory.clone());
                 *self.config = updated_config;
                 *self.llm = rebuilt;
                 self.app.set_reasoning(reasoning);
                 self.app
                     .set_safety_model_name(self.config.safety.model_name.clone());
                 self.app.set_safety_reasoning(self.config.safety.reasoning);
+                self.app
+                    .set_memory_model_name(self.config.memory.extraction.model_name.clone());
+                self.app
+                    .set_memory_reasoning(self.config.memory.extraction.reasoning);
                 let model_name = query::model_name(self.app.state()).to_string();
                 let display_name = crate::codex::display_name(&model_name);
                 app::ops::transcript::push_agent_message(
@@ -360,6 +464,7 @@ impl EffectExecutor<'_> {
                 let updated_config =
                     AppConfig::set_default_safety_selection(&model_name, reasoning)?;
                 let rebuilt = self.rebuild_llm(&updated_config, query::mode(self.app.state()))?;
+                self.memory.set_config(updated_config.memory.clone());
                 *self.config = updated_config;
                 *self.llm = rebuilt;
                 self.app.set_safety_model_name(model_name.clone());
@@ -369,6 +474,28 @@ impl EffectExecutor<'_> {
                     self.app.state_mut(),
                     format!(
                         "Safety model set to `{}` with `{}` reasoning and saved to the active config.",
+                        display_name,
+                        reasoning.as_str()
+                    ),
+                );
+                Ok(())
+            }
+            Effect::SetMemorySelection {
+                model_name,
+                reasoning,
+            } => {
+                self.ensure_codex_auth_for_model(&model_name)?;
+                let updated_config =
+                    AppConfig::set_default_memory_selection(&model_name, reasoning)?;
+                self.memory.set_config(updated_config.memory.clone());
+                *self.config = updated_config;
+                self.app.set_memory_model_name(model_name.clone());
+                self.app.set_memory_reasoning(reasoning);
+                let display_name = crate::codex::display_name(&model_name);
+                app::ops::transcript::push_agent_message(
+                    self.app.state_mut(),
+                    format!(
+                        "Memory model set to `{}` with `{}` reasoning and saved to the active config.",
                         display_name,
                         reasoning.as_str()
                     ),
@@ -439,6 +566,7 @@ impl EffectExecutor<'_> {
                                 shell_approvals,
                                 ask_user,
                                 todo_available,
+                                None,
                                 None,
                                 None,
                             )
@@ -602,6 +730,7 @@ impl EffectExecutor<'_> {
             access_mode,
             self.subagents,
             self.terminals,
+            self.memory,
         )
     }
 
@@ -613,6 +742,7 @@ impl EffectExecutor<'_> {
             access_mode,
             self.subagents,
             self.terminals,
+            self.memory,
         )
     }
 
@@ -635,6 +765,7 @@ impl EffectExecutor<'_> {
 
     fn sync_runtime_config(&mut self, updated_config: AppConfig) -> Result<()> {
         let rebuilt = self.rebuild_llm(&updated_config, query::mode(self.app.state()))?;
+        self.memory.set_config(updated_config.memory.clone());
         *self.config = updated_config;
         *self.llm = rebuilt;
         Ok(())
@@ -649,6 +780,8 @@ impl EffectExecutor<'_> {
         updated_config.model.reasoning = snapshot.runtime.reasoning;
         updated_config.safety.model_name = snapshot.runtime.safety_model_name.clone();
         updated_config.safety.reasoning = snapshot.runtime.safety_reasoning;
+        updated_config.memory.extraction.model_name = snapshot.runtime.memory_model_name.clone();
+        updated_config.memory.extraction.reasoning = snapshot.runtime.memory_reasoning;
         updated_config.planning.agents = sanitize_planning_agents(
             &snapshot.runtime.model_name,
             &snapshot.runtime.planning_agents,
@@ -660,6 +793,7 @@ impl EffectExecutor<'_> {
             snapshot.runtime.approval_mode,
             self.subagents,
             self.terminals,
+            self.memory,
         )?;
         Ok((updated_config, rebuilt))
     }
@@ -668,6 +802,7 @@ impl EffectExecutor<'_> {
         let mut snapshot = self.session_store.load_session(session_id)?;
         if model_registry::find_model(&snapshot.runtime.model_name).is_none()
             || model_registry::find_model(&snapshot.runtime.safety_model_name).is_none()
+            || model_registry::find_model(&snapshot.runtime.memory_model_name).is_none()
         {
             app::ops::transcript::push_error_message(
                 self.app.state_mut(),
@@ -700,6 +835,7 @@ impl EffectExecutor<'_> {
             .block_on(self.subagents.cancel_all_running(true));
         self.terminals.cancel_all_running();
 
+        self.memory.set_config(updated_config.memory.clone());
         *self.config = updated_config;
         *self.llm = rebuilt_llm;
         self.app.replace_state(restored_state);
@@ -719,7 +855,7 @@ impl EffectExecutor<'_> {
         if self.active_models_use_codex() {
             app::ops::transcript::push_error_message(
                 self.app.state_mut(),
-                "Switch the main, safety, and planning selections away from Codex before logging out.",
+                "Switch the main, safety, memory, and planning selections away from Codex before logging out.",
             );
             return Ok(());
         }
@@ -798,6 +934,7 @@ impl EffectExecutor<'_> {
     fn active_models_use_codex(&self) -> bool {
         Self::model_uses_codex(&self.config.model.model_name)
             || Self::model_uses_codex(&self.config.safety.model_name)
+            || Self::model_uses_codex(&self.config.memory.extraction.model_name)
             || self
                 .config
                 .planning
@@ -829,11 +966,12 @@ mod tests {
         app::{AccessMode, ApprovalMode},
         background_terminals::BackgroundTerminalManager,
         config::{
-            AppConfig, AzureConfig, ModelSelectionConfig, ReasoningEffort, SafetyConfig,
-            SubagentConfig, ToolConfig, UiConfig,
+            AppConfig, AzureConfig, MemoryConfig, ModelSelectionConfig, ReasoningEffort,
+            SafetyConfig, SubagentConfig, ToolConfig, UiConfig,
         },
         features::planning::PlanningConfig,
         llm::{AskUserController, LlmService, WriteApprovalController},
+        memory::MemoryService,
         stats::StatsStore,
         subagents::SubagentManager,
     };
@@ -856,6 +994,7 @@ mod tests {
                 model_name: "gpt-5.4-mini".into(),
                 reasoning: ReasoningEffort::Medium.into(),
             },
+            memory: MemoryConfig::default(),
             ui: UiConfig::default(),
             subagents: SubagentConfig::default(),
             planning: PlanningConfig::default(),
@@ -871,6 +1010,9 @@ mod tests {
         let subagents = SubagentManager::new(4, subagent_tx, StatsStore::new());
         let (terminal_tx, _) = mpsc::unbounded_channel();
         let terminals = BackgroundTerminalManager::new(terminal_tx);
+        let memory =
+            MemoryService::new(config.memory.clone(), std::env::current_dir().expect("cwd"))
+                .expect("memory");
         let _guard = runtime.enter();
         let mut llm = LlmService::from_config(
             &config,
@@ -878,6 +1020,7 @@ mod tests {
             WriteApprovalController::new(ApprovalMode::Manual),
             Some(AskUserController::default()),
             true,
+            Some(memory.clone()),
             Some(subagents.clone()),
             Some(terminals.clone()),
         )
@@ -891,6 +1034,7 @@ mod tests {
             AccessMode::ReadWrite,
             &subagents,
             &terminals,
+            &memory,
         )
         .expect("runtime mode sync succeeds");
 

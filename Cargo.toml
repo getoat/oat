@@ -9,6 +9,7 @@ base64 = "0.22.1"
 bytes = "1.10.1"
 chrono = { version = "0.4.42", features = ["serde"] }
 crossterm = "0.29"
+fastembed = { version = "5.13.0", default-features = false, features = ["hf-hub-native-tls", "ort-load-dynamic"] }
 futures-util = "0.3.32"
 globset = "0.4.18"
 ignore = "0.4.24"
