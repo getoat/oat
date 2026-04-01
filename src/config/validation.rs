@@ -8,7 +8,7 @@ use crate::{
     tool_policy,
 };
 
-use super::AppConfig;
+use super::{AppConfig, types::MemoryRetrievalModeConfig};
 
 pub(super) fn validate(config: &AppConfig) -> Result<()> {
     if config.model.model_name.trim().is_empty() {
@@ -57,6 +57,15 @@ pub(super) fn validate(config: &AppConfig) -> Result<()> {
     if config.memory.max_candidate_search_results == 0 {
         bail!("memory.max_candidate_search_results must be at least 1");
     }
+    validate_memory_retrieval_mode("memory.retrieval.search", &config.memory.retrieval.search)?;
+    validate_memory_retrieval_mode(
+        "memory.retrieval.auto_inject",
+        &config.memory.retrieval.auto_inject,
+    )?;
+    validate_memory_retrieval_mode(
+        "memory.retrieval.candidate_linking",
+        &config.memory.retrieval.candidate_linking,
+    )?;
     if config.memory.extraction.max_evidence_tokens == 0 {
         bail!("memory.extraction.max_evidence_tokens must be at least 1");
     }
@@ -88,6 +97,19 @@ pub(super) fn validate(config: &AppConfig) -> Result<()> {
 
     tool_policy::SearchPathPolicy::validate_patterns(&config.tools.search_include_patterns)?;
 
+    Ok(())
+}
+
+fn validate_memory_retrieval_mode(prefix: &str, config: &MemoryRetrievalModeConfig) -> Result<()> {
+    if !config.min_total_score.is_finite() || config.min_total_score <= 0.0 {
+        bail!("{prefix}.min_total_score must be a finite number greater than 0");
+    }
+    if !config.min_semantic_score.is_finite() || !(0.0..=1.0).contains(&config.min_semantic_score) {
+        bail!("{prefix}.min_semantic_score must be between 0 and 1");
+    }
+    if !config.min_lexical_score.is_finite() || config.min_lexical_score <= 0.0 {
+        bail!("{prefix}.min_lexical_score must be a finite number greater than 0");
+    }
     Ok(())
 }
 

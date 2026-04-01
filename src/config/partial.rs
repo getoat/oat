@@ -9,9 +9,9 @@ use crate::{
 
 use super::types::{
     AppConfig, AzureConfig, ChutesConfig, CodexConfig, MemoryConfig, MemoryExtractionConfig,
-    ModelSelectionConfig, OpenRouterConfig, RawReasoningSetting, SafetyConfig, SubagentConfig,
-    ToolConfig, UiConfig, default_api_version, default_command_history_limit,
-    default_max_concurrent_subagents, default_show_thinking,
+    MemoryRetrievalConfig, MemoryRetrievalModeConfig, ModelSelectionConfig, OpenRouterConfig,
+    RawReasoningSetting, SafetyConfig, SubagentConfig, ToolConfig, UiConfig, default_api_version,
+    default_command_history_limit, default_max_concurrent_subagents, default_show_thinking,
 };
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -447,7 +447,22 @@ struct PartialMemoryConfig {
     auto_inject_token_budget: Option<usize>,
     max_auto_results: Option<usize>,
     max_candidate_search_results: Option<usize>,
+    retrieval: Option<PartialMemoryRetrievalConfig>,
     extraction: Option<PartialMemoryExtractionConfig>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct PartialMemoryRetrievalConfig {
+    search: Option<PartialMemoryRetrievalModeConfig>,
+    auto_inject: Option<PartialMemoryRetrievalModeConfig>,
+    candidate_linking: Option<PartialMemoryRetrievalModeConfig>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct PartialMemoryRetrievalModeConfig {
+    min_total_score: Option<f32>,
+    min_semantic_score: Option<f32>,
+    min_lexical_score: Option<f32>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -514,6 +529,11 @@ impl PartialMemoryConfig {
         if other.max_candidate_search_results.is_some() {
             self.max_candidate_search_results = other.max_candidate_search_results;
         }
+        if let Some(retrieval) = other.retrieval {
+            self.retrieval
+                .get_or_insert_with(PartialMemoryRetrievalConfig::default)
+                .merge(retrieval);
+        }
         if let Some(extraction) = other.extraction {
             self.extraction
                 .get_or_insert_with(PartialMemoryExtractionConfig::default)
@@ -533,8 +553,68 @@ impl PartialMemoryConfig {
             max_candidate_search_results: self
                 .max_candidate_search_results
                 .unwrap_or(defaults.max_candidate_search_results),
+            retrieval: self.retrieval.unwrap_or_default().finalize(),
             extraction: self.extraction.unwrap_or_default().finalize(model)?,
         })
+    }
+}
+
+impl PartialMemoryRetrievalConfig {
+    fn merge(&mut self, other: Self) {
+        if let Some(search) = other.search {
+            self.search
+                .get_or_insert_with(PartialMemoryRetrievalModeConfig::default)
+                .merge(search);
+        }
+        if let Some(auto_inject) = other.auto_inject {
+            self.auto_inject
+                .get_or_insert_with(PartialMemoryRetrievalModeConfig::default)
+                .merge(auto_inject);
+        }
+        if let Some(candidate_linking) = other.candidate_linking {
+            self.candidate_linking
+                .get_or_insert_with(PartialMemoryRetrievalModeConfig::default)
+                .merge(candidate_linking);
+        }
+    }
+
+    fn finalize(self) -> MemoryRetrievalConfig {
+        let defaults = MemoryRetrievalConfig::default();
+        MemoryRetrievalConfig {
+            search: self.search.unwrap_or_default().finalize(defaults.search),
+            auto_inject: self
+                .auto_inject
+                .unwrap_or_default()
+                .finalize(defaults.auto_inject),
+            candidate_linking: self
+                .candidate_linking
+                .unwrap_or_default()
+                .finalize(defaults.candidate_linking),
+        }
+    }
+}
+
+impl PartialMemoryRetrievalModeConfig {
+    fn merge(&mut self, other: Self) {
+        if other.min_total_score.is_some() {
+            self.min_total_score = other.min_total_score;
+        }
+        if other.min_semantic_score.is_some() {
+            self.min_semantic_score = other.min_semantic_score;
+        }
+        if other.min_lexical_score.is_some() {
+            self.min_lexical_score = other.min_lexical_score;
+        }
+    }
+
+    fn finalize(self, defaults: MemoryRetrievalModeConfig) -> MemoryRetrievalModeConfig {
+        MemoryRetrievalModeConfig {
+            min_total_score: self.min_total_score.unwrap_or(defaults.min_total_score),
+            min_semantic_score: self
+                .min_semantic_score
+                .unwrap_or(defaults.min_semantic_score),
+            min_lexical_score: self.min_lexical_score.unwrap_or(defaults.min_lexical_score),
+        }
     }
 }
 

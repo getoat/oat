@@ -9,7 +9,7 @@ use std::{fmt, sync::LazyLock};
 
 use crate::{features::planning::PlanningConfig, model_registry, tool_policy};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AppConfig {
     pub azure: Option<AzureConfig>,
     pub chutes: Option<ChutesConfig>,
@@ -259,7 +259,7 @@ impl Default for SubagentConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct MemoryConfig {
     #[serde(default = "default_memory_enabled")]
     pub enabled: bool,
@@ -272,7 +272,29 @@ pub struct MemoryConfig {
     #[serde(default = "default_memory_max_candidate_search_results")]
     pub max_candidate_search_results: usize,
     #[serde(default)]
+    pub retrieval: MemoryRetrievalConfig,
+    #[serde(default)]
     pub extraction: MemoryExtractionConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct MemoryRetrievalConfig {
+    #[serde(default = "default_memory_search_retrieval")]
+    pub search: MemoryRetrievalModeConfig,
+    #[serde(default = "default_memory_auto_inject_retrieval")]
+    pub auto_inject: MemoryRetrievalModeConfig,
+    #[serde(default = "default_memory_candidate_linking_retrieval")]
+    pub candidate_linking: MemoryRetrievalModeConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct MemoryRetrievalModeConfig {
+    #[serde(default = "default_memory_retrieval_min_total_score")]
+    pub min_total_score: f32,
+    #[serde(default = "default_memory_retrieval_min_semantic_score")]
+    pub min_semantic_score: f32,
+    #[serde(default = "default_memory_retrieval_min_lexical_score")]
+    pub min_lexical_score: f32,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -303,7 +325,18 @@ impl Default for MemoryConfig {
             auto_inject_token_budget: default_memory_auto_inject_token_budget(),
             max_auto_results: default_memory_max_auto_results(),
             max_candidate_search_results: default_memory_max_candidate_search_results(),
+            retrieval: MemoryRetrievalConfig::default(),
             extraction: MemoryExtractionConfig::default(),
+        }
+    }
+}
+
+impl Default for MemoryRetrievalConfig {
+    fn default() -> Self {
+        Self {
+            search: default_memory_search_retrieval(),
+            auto_inject: default_memory_auto_inject_retrieval(),
+            candidate_linking: default_memory_candidate_linking_retrieval(),
         }
     }
 }
@@ -527,6 +560,42 @@ pub(super) fn default_memory_max_candidate_search_results() -> usize {
     50
 }
 
+pub(super) fn default_memory_retrieval_min_total_score() -> f32 {
+    0.0
+}
+
+pub(super) fn default_memory_retrieval_min_semantic_score() -> f32 {
+    0.0
+}
+
+pub(super) fn default_memory_retrieval_min_lexical_score() -> f32 {
+    0.0
+}
+
+pub(super) fn default_memory_search_retrieval() -> MemoryRetrievalModeConfig {
+    MemoryRetrievalModeConfig {
+        min_total_score: 2.2,
+        min_semantic_score: 0.58,
+        min_lexical_score: 1.6,
+    }
+}
+
+pub(super) fn default_memory_auto_inject_retrieval() -> MemoryRetrievalModeConfig {
+    MemoryRetrievalModeConfig {
+        min_total_score: 3.6,
+        min_semantic_score: 0.72,
+        min_lexical_score: 2.2,
+    }
+}
+
+pub(super) fn default_memory_candidate_linking_retrieval() -> MemoryRetrievalModeConfig {
+    MemoryRetrievalModeConfig {
+        min_total_score: 2.4,
+        min_semantic_score: 0.6,
+        min_lexical_score: 1.6,
+    }
+}
+
 pub(super) fn default_memory_extraction_enabled() -> bool {
     true
 }
@@ -544,11 +613,11 @@ pub(super) fn default_memory_max_candidates_per_turn() -> usize {
 }
 
 pub(super) fn default_memory_min_candidate_confidence() -> u8 {
-    45
+    55
 }
 
 pub(super) fn default_memory_min_active_confidence() -> u8 {
-    78
+    85
 }
 
 pub(super) fn default_memory_run_in_background() -> bool {

@@ -109,7 +109,7 @@ fn submit_memory_command(state: &mut AppState, arguments: &str) -> Option<Effect
     if trimmed.is_empty() {
         ops::transcript::push_error_message(
             state,
-            "Usage: /memory <search <query> | show <id> | candidates | promote <id> | archive <id> | replace <id> <text> | clear | reindex>",
+            "Usage: /memory <search <query> | show <id> | candidates | stats | promote <id> | archive <id> | replace <id> <text> | clear | reindex>",
         );
         return None;
     }
@@ -143,6 +143,14 @@ fn submit_memory_command(state: &mut AppState, arguments: &str) -> Option<Effect
             }
         }
         "candidates" => Some(Effect::ListMemoryCandidates),
+        "stats" => {
+            if !first_arg.is_empty() {
+                ops::transcript::push_error_message(state, "Usage: /memory stats");
+                None
+            } else {
+                Some(Effect::ShowMemoryStats)
+            }
+        }
         "promote" => {
             if first_arg.is_empty() {
                 ops::transcript::push_error_message(state, "Usage: /memory promote <id>");
@@ -186,7 +194,7 @@ fn submit_memory_command(state: &mut AppState, arguments: &str) -> Option<Effect
         _ => {
             ops::transcript::push_error_message(
                 state,
-                "Usage: /memory <search <query> | show <id> | candidates | promote <id> | archive <id> | replace <id> <text> | clear | reindex>",
+                "Usage: /memory <search <query> | show <id> | candidates | stats | promote <id> | archive <id> | replace <id> <text> | clear | reindex>",
             );
             None
         }
@@ -439,6 +447,36 @@ mod tests {
     }
 
     #[test]
+    fn memory_search_command_returns_effect() {
+        let mut app = new_app(true);
+        app.composer_mut().insert_str("/memory search warm replies");
+        app.sync_command_selection();
+
+        let effect = app.apply(crate::app::Action::SubmitMessage);
+
+        assert_eq!(
+            effect,
+            Some(Effect::SearchMemories {
+                query: "warm replies".into(),
+                include_candidates: false,
+            })
+        );
+        assert!(!app.composer_has_content());
+    }
+
+    #[test]
+    fn memory_stats_command_returns_effect() {
+        let mut app = new_app(true);
+        app.composer_mut().insert_str("/memory stats");
+        app.sync_command_selection();
+
+        let effect = app.apply(crate::app::Action::SubmitMessage);
+
+        assert_eq!(effect, Some(Effect::ShowMemoryStats));
+        assert!(!app.composer_has_content());
+    }
+
+    #[test]
     fn memory_clear_command_rejects_extra_arguments() {
         let mut app = new_app(true);
         app.composer_mut().insert_str("/memory clear now");
@@ -452,6 +490,22 @@ mod tests {
             panic!("expected error entry");
         };
         assert_eq!(message.text, "Usage: /memory clear");
+    }
+
+    #[test]
+    fn memory_stats_command_rejects_extra_arguments() {
+        let mut app = new_app(true);
+        app.composer_mut().insert_str("/memory stats now");
+        app.sync_command_selection();
+
+        let effect = app.apply(crate::app::Action::SubmitMessage);
+
+        assert!(effect.is_none());
+        let TranscriptEntry::Message(message) = app.entries().last().expect("error entry exists")
+        else {
+            panic!("expected error entry");
+        };
+        assert_eq!(message.text, "Usage: /memory stats");
     }
 
     #[test]

@@ -28,6 +28,7 @@ pub enum Effect {
         id: String,
     },
     ListMemoryCandidates,
+    ShowMemoryStats,
     PromoteMemory {
         id: String,
     },

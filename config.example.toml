@@ -91,6 +91,21 @@ auto_inject_token_budget = 3000
 max_auto_results = 12
 max_candidate_search_results = 50
 
+[memory.retrieval.search]
+min_total_score = 2.2
+min_semantic_score = 0.58
+min_lexical_score = 1.6
+
+[memory.retrieval.auto_inject]
+min_total_score = 3.6
+min_semantic_score = 0.72
+min_lexical_score = 2.2
+
+[memory.retrieval.candidate_linking]
+min_total_score = 2.4
+min_semantic_score = 0.6
+min_lexical_score = 1.6
+
 [memory.extraction]
 enabled = true
 
@@ -109,8 +124,8 @@ max_related_memories = 24
 max_candidates_per_turn = 10
 
 # Confidence thresholds expressed as percentages.
-min_candidate_confidence = 45
-min_active_confidence = 78
+min_candidate_confidence = 55
+min_active_confidence = 85
 
 # Run extraction asynchronously after a completed main-agent turn.
 run_in_background = true

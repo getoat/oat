@@ -73,6 +73,21 @@ fn parses_expected_config_shape() {
             max_auto_results = 9
             max_candidate_search_results = 77
 
+            [memory.retrieval.search]
+            min_total_score = 2.4
+            min_semantic_score = 0.61
+            min_lexical_score = 1.7
+
+            [memory.retrieval.auto_inject]
+            min_total_score = 3.9
+            min_semantic_score = 0.74
+            min_lexical_score = 2.3
+
+            [memory.retrieval.candidate_linking]
+            min_total_score = 2.7
+            min_semantic_score = 0.63
+            min_lexical_score = 1.8
+
             [memory.extraction]
             enabled = true
             model_name = "gpt-5.4"
@@ -114,6 +129,24 @@ fn parses_expected_config_shape() {
     assert_eq!(config.memory.auto_inject_token_budget, 1234);
     assert_eq!(config.memory.max_auto_results, 9);
     assert_eq!(config.memory.max_candidate_search_results, 77);
+    assert_eq!(config.memory.retrieval.search.min_total_score, 2.4);
+    assert_eq!(config.memory.retrieval.search.min_semantic_score, 0.61);
+    assert_eq!(config.memory.retrieval.search.min_lexical_score, 1.7);
+    assert_eq!(config.memory.retrieval.auto_inject.min_total_score, 3.9);
+    assert_eq!(config.memory.retrieval.auto_inject.min_semantic_score, 0.74);
+    assert_eq!(config.memory.retrieval.auto_inject.min_lexical_score, 2.3);
+    assert_eq!(
+        config.memory.retrieval.candidate_linking.min_total_score,
+        2.7
+    );
+    assert_eq!(
+        config.memory.retrieval.candidate_linking.min_semantic_score,
+        0.63
+    );
+    assert_eq!(
+        config.memory.retrieval.candidate_linking.min_lexical_score,
+        1.8
+    );
     assert!(config.memory.extraction.enabled);
     assert_eq!(config.memory.extraction.model_name, "gpt-5.4");
     assert_eq!(
@@ -152,6 +185,24 @@ fn ui_config_defaults_tool_output_to_hidden() {
     assert_eq!(config.memory.auto_inject_token_budget, 3000);
     assert_eq!(config.memory.max_auto_results, 12);
     assert_eq!(config.memory.max_candidate_search_results, 50);
+    assert_eq!(config.memory.retrieval.search.min_total_score, 2.2);
+    assert_eq!(config.memory.retrieval.search.min_semantic_score, 0.58);
+    assert_eq!(config.memory.retrieval.search.min_lexical_score, 1.6);
+    assert_eq!(config.memory.retrieval.auto_inject.min_total_score, 3.6);
+    assert_eq!(config.memory.retrieval.auto_inject.min_semantic_score, 0.72);
+    assert_eq!(config.memory.retrieval.auto_inject.min_lexical_score, 2.2);
+    assert_eq!(
+        config.memory.retrieval.candidate_linking.min_total_score,
+        2.4
+    );
+    assert_eq!(
+        config.memory.retrieval.candidate_linking.min_semantic_score,
+        0.6
+    );
+    assert_eq!(
+        config.memory.retrieval.candidate_linking.min_lexical_score,
+        1.6
+    );
     assert!(config.memory.extraction.enabled);
     assert_eq!(config.memory.extraction.model_name, "gpt-5.4-mini");
     assert_eq!(
@@ -161,8 +212,8 @@ fn ui_config_defaults_tool_output_to_hidden() {
     assert_eq!(config.memory.extraction.max_evidence_tokens, 12000);
     assert_eq!(config.memory.extraction.max_related_memories, 24);
     assert_eq!(config.memory.extraction.max_candidates_per_turn, 10);
-    assert_eq!(config.memory.extraction.min_candidate_confidence, 45);
-    assert_eq!(config.memory.extraction.min_active_confidence, 78);
+    assert_eq!(config.memory.extraction.min_candidate_confidence, 55);
+    assert_eq!(config.memory.extraction.min_active_confidence, 85);
     assert!(config.memory.extraction.run_in_background);
     assert!(config.tools.search_include_patterns.is_empty());
     assert_eq!(config.model.model_name, "gpt-5.4-mini");
@@ -789,6 +840,21 @@ fn validation_rejects_invalid_memory_extraction_thresholds() {
     let mut config = sample_config();
     config.memory.extraction.min_candidate_confidence = 90;
     config.memory.extraction.min_active_confidence = 80;
+    assert!(config.validate().is_err());
+}
+
+#[test]
+fn validation_rejects_invalid_memory_retrieval_thresholds() {
+    let mut config = sample_config();
+    config.memory.retrieval.search.min_total_score = 0.0;
+    assert!(config.validate().is_err());
+
+    let mut config = sample_config();
+    config.memory.retrieval.auto_inject.min_semantic_score = 1.2;
+    assert!(config.validate().is_err());
+
+    let mut config = sample_config();
+    config.memory.retrieval.candidate_linking.min_lexical_score = -1.0;
     assert!(config.validate().is_err());
 }
 

@@ -283,6 +283,13 @@ impl EffectExecutor<'_> {
                 );
                 Ok(())
             }
+            Effect::ShowMemoryStats => {
+                app::ops::transcript::push_agent_message(
+                    self.app.state_mut(),
+                    self.memory.stats_text()?,
+                );
+                Ok(())
+            }
             Effect::PromoteMemory { id } => {
                 app::ops::transcript::push_agent_message(
                     self.app.state_mut(),

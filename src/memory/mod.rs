@@ -192,6 +192,83 @@ struct MemoryEventRecord {
 struct MemorySearchHit {
     record: MemoryRecord,
     score: f32,
+    signals: MemoryMatchSignals,
+}
+
+#[derive(Clone, Debug, Default)]
+struct MemoryMatchSignals {
+    lexical_score: f32,
+    semantic_score: f32,
+    exact_subject: bool,
+    exact_path_match: bool,
+    exact_tag_hits: Vec<String>,
+    exact_term_hits: Vec<String>,
+    path_term_hits: Vec<String>,
+    total_score: f32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RetrievalMode {
+    Search,
+    AutoInject,
+    CandidateLinking,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct RetrievalPolicy {
+    mode: RetrievalMode,
+    include_candidates: bool,
+    limit: usize,
+    min_total_score: f32,
+    min_semantic_score: f32,
+    min_lexical_score: f32,
+}
+
+impl RetrievalPolicy {
+    fn search(config: &MemoryConfig, limit: usize, include_candidates: bool) -> Self {
+        Self {
+            mode: RetrievalMode::Search,
+            include_candidates,
+            limit: limit.max(1),
+            min_total_score: config.retrieval.search.min_total_score,
+            min_semantic_score: config.retrieval.search.min_semantic_score,
+            min_lexical_score: config.retrieval.search.min_lexical_score,
+        }
+    }
+
+    fn auto_inject(config: &MemoryConfig, limit: usize) -> Self {
+        Self {
+            mode: RetrievalMode::AutoInject,
+            include_candidates: false,
+            limit: limit.clamp(1, 3),
+            min_total_score: config.retrieval.auto_inject.min_total_score,
+            min_semantic_score: config.retrieval.auto_inject.min_semantic_score,
+            min_lexical_score: config.retrieval.auto_inject.min_lexical_score,
+        }
+    }
+
+    fn candidate_linking(config: &MemoryConfig, limit: usize) -> Self {
+        Self {
+            mode: RetrievalMode::CandidateLinking,
+            include_candidates: true,
+            limit: limit.max(1),
+            min_total_score: config.retrieval.candidate_linking.min_total_score,
+            min_semantic_score: config.retrieval.candidate_linking.min_semantic_score,
+            min_lexical_score: config.retrieval.candidate_linking.min_lexical_score,
+        }
+    }
+
+    fn allows_kind(self, kind: MemoryKind) -> bool {
+        match self.mode {
+            RetrievalMode::AutoInject => {
+                matches!(
+                    kind,
+                    MemoryKind::Preference | MemoryKind::Workflow | MemoryKind::Hazard
+                )
+            }
+            RetrievalMode::Search | RetrievalMode::CandidateLinking => true,
+        }
+    }
 }
 
 trait EmbeddingProvider: Send {
@@ -388,6 +465,11 @@ impl MemoryService {
         manager.list_candidates_text()
     }
 
+    pub(crate) fn stats_text(&self) -> Result<String> {
+        let manager = self.inner.lock().expect("memory lock");
+        manager.stats_text()
+    }
+
     pub(crate) fn promote(&self, id: &str) -> Result<String> {
         let mut manager = self.inner.lock().expect("memory lock");
         manager.promote(id)
@@ -533,7 +615,10 @@ impl MemoryManager {
             return Ok(prompt.to_string());
         }
 
-        let hits = self.search_hits(prompt, false, self.config.max_auto_results)?;
+        let hits = self.search_hits(
+            prompt,
+            RetrievalPolicy::auto_inject(&self.config, self.config.max_auto_results),
+        )?;
         if hits.is_empty() {
             return Ok(prompt.to_string());
         }
@@ -568,8 +653,11 @@ impl MemoryManager {
         include_candidates: bool,
         limit: usize,
     ) -> Result<String> {
-        let hits = self.search_hits(query, include_candidates, limit)?;
-        Ok(format_search_results(query, &hits))
+        let hits = self.search_hits(
+            query,
+            RetrievalPolicy::search(&self.config, limit, include_candidates),
+        )?;
+        Ok(format_search_results(query, &hits, true))
     }
 
     fn get_text(&self, id: &str) -> Result<String> {
@@ -584,7 +672,10 @@ impl MemoryManager {
     }
 
     fn list_candidates_text(&mut self) -> Result<String> {
-        let hits = self.search_hits("", true, self.config.max_candidate_search_results)?;
+        let hits = self.search_hits(
+            "",
+            RetrievalPolicy::search(&self.config, self.config.max_candidate_search_results, true),
+        )?;
         let candidates = hits
             .into_iter()
             .filter(|hit| hit.record.status == MemoryStatus::Candidate)
@@ -592,8 +683,17 @@ impl MemoryManager {
         if candidates.is_empty() {
             Ok("No memory candidates are waiting for review.".into())
         } else {
-            Ok(format_search_results("candidates", &candidates))
+            Ok(format_search_results("candidates", &candidates, false))
         }
+    }
+
+    fn stats_text(&self) -> Result<String> {
+        Ok(format_memory_stats(
+            &self.snapshot.records,
+            &self.vectors,
+            &self.repo_fingerprint,
+            self.embedder.backend_name(),
+        ))
     }
 
     fn promote(&mut self, id: &str) -> Result<String> {
@@ -790,7 +890,10 @@ impl MemoryManager {
             .map(|(candidate_index, candidate)| {
                 let query = candidate_lookup_query(candidate);
                 let related_memories = self
-                    .search_hits(&query, true, max_related_memories)?
+                    .search_hits(
+                        &query,
+                        RetrievalPolicy::candidate_linking(&self.config, max_related_memories),
+                    )?
                     .into_iter()
                     .map(|hit| related_memory_summary(&hit.record))
                     .collect();
@@ -981,8 +1084,7 @@ impl MemoryManager {
     fn search_hits(
         &mut self,
         query: &str,
-        include_candidates: bool,
-        limit: usize,
+        policy: RetrievalPolicy,
     ) -> Result<Vec<MemorySearchHit>> {
         let query = query.trim();
         let tokens = tokenize(query);
@@ -990,7 +1092,10 @@ impl MemoryManager {
             .snapshot
             .records
             .iter()
-            .filter(|record| self.record_is_eligible(record, include_candidates))
+            .filter(|record| {
+                self.record_is_eligible(record, policy.include_candidates)
+                    && policy.allows_kind(record.kind)
+            })
             .cloned()
             .collect::<Vec<_>>();
 
@@ -1014,22 +1119,24 @@ impl MemoryManager {
 
         let mut hits = eligible
             .into_iter()
-            .map(|record| {
-                let lexical = lexical_score(query, &tokens, &record);
-                let semantic_score = semantic
-                    .as_ref()
-                    .and_then(|query_vector| {
-                        self.vectors
-                            .get(&record.id)
-                            .map(|record_vector| cosine_similarity(query_vector, record_vector))
-                    })
-                    .unwrap_or(0.0);
-                let score = lexical * 2.0
-                    + semantic_score
+            .filter_map(|record| {
+                let signals = memory_match_signals(
+                    query,
+                    &tokens,
+                    semantic.as_ref().map(Vec::as_slice),
+                    self.vectors.get(&record.id).map(Vec::as_slice),
+                    &record,
+                );
+                let score = signals.total_score
                     + scope_bonus(&self.repo_fingerprint, &record)
                     + recency_bonus(record.updated_at)
                     + record.confidence * 0.3;
-                MemorySearchHit { record, score }
+
+                memory_passes_policy(query, &signals, policy).then_some(MemorySearchHit {
+                    record,
+                    score,
+                    signals,
+                })
             })
             .collect::<Vec<_>>();
         hits.sort_by(|left, right| {
@@ -1039,7 +1146,7 @@ impl MemoryManager {
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| right.record.updated_at.cmp(&left.record.updated_at))
         });
-        hits.truncate(limit.max(1));
+        hits.truncate(policy.limit);
         Ok(hits)
     }
 
@@ -1321,7 +1428,11 @@ fn apply_event(snapshot: &mut MemorySnapshot, event: MemoryEvent) {
     }
 }
 
-fn format_search_results(query: &str, hits: &[MemorySearchHit]) -> String {
+fn format_search_results(
+    query: &str,
+    hits: &[MemorySearchHit],
+    include_debug_reasons: bool,
+) -> String {
     if hits.is_empty() {
         return format!("No memories matched `{query}`.");
     }
@@ -1329,14 +1440,18 @@ fn format_search_results(query: &str, hits: &[MemorySearchHit]) -> String {
     let mut lines = vec![format!("Memory results for `{query}`:")];
     for hit in hits {
         lines.push(format!(
-            "- {} [{} | {} | {}] {}",
+            "- {} [{} | {} | {} | score {:.2}] {}",
             short_id(&hit.record.id),
             kind_label(hit.record.kind),
             scope_label(hit.record.scope),
             status_label(hit.record.status),
+            hit.score,
             hit.record.title
         ));
         lines.push(format!("  {}", hit.record.summary));
+        if include_debug_reasons {
+            lines.push(format!("  why: {}", memory_search_debug_reasons(hit)));
+        }
     }
     lines.join("\n")
 }
@@ -1419,6 +1534,132 @@ fn status_label(status: MemoryStatus) -> &'static str {
         MemoryStatus::Superseded => "superseded",
         MemoryStatus::Archived => "archived",
     }
+}
+
+fn source_label(source: MemorySource) -> &'static str {
+    match source {
+        MemorySource::ExplicitUser => "explicit_user",
+        MemorySource::Inferred => "inferred",
+        MemorySource::AutoSummary => "auto_summary",
+    }
+}
+
+fn bump_count(map: &mut BTreeMap<&'static str, usize>, key: &'static str) {
+    *map.entry(key).or_default() += 1;
+}
+
+fn format_count_map(title: &str, counts: &BTreeMap<&'static str, usize>) -> Vec<String> {
+    let mut lines = vec![format!("{title}:")];
+    for (label, count) in counts {
+        lines.push(format!("- {label}: {count}"));
+    }
+    lines
+}
+
+fn format_memory_stats(
+    records: &[MemoryRecord],
+    vectors: &BTreeMap<String, Vec<f32>>,
+    current_repo_fingerprint: &str,
+    embedder_backend: &str,
+) -> String {
+    let mut status_counts = BTreeMap::new();
+    let mut kind_counts = BTreeMap::new();
+    let mut scope_counts = BTreeMap::new();
+    let mut source_counts = BTreeMap::new();
+    let mut live_subject_counts: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut unique_subjects = BTreeSet::new();
+    let mut live_record_ids = BTreeSet::new();
+    let mut in_scope_now = 0usize;
+    let mut latest_updated_at: Option<DateTime<Utc>> = None;
+
+    for record in records {
+        bump_count(&mut status_counts, status_label(record.status));
+        bump_count(&mut kind_counts, kind_label(record.kind));
+        bump_count(&mut scope_counts, scope_label(record.scope));
+        bump_count(&mut source_counts, source_label(record.source));
+        unique_subjects.insert(record.subject_key.as_str());
+        latest_updated_at = Some(
+            latest_updated_at
+                .map(|current| current.max(record.updated_at))
+                .unwrap_or(record.updated_at),
+        );
+
+        let in_scope = match record.scope {
+            MemoryScope::Global => true,
+            MemoryScope::Repo | MemoryScope::Module => {
+                record.repo_fingerprint.as_deref() == Some(current_repo_fingerprint)
+            }
+        };
+        if in_scope {
+            in_scope_now += 1;
+        }
+
+        if matches!(
+            record.status,
+            MemoryStatus::Active | MemoryStatus::Candidate
+        ) {
+            *live_subject_counts
+                .entry(record.subject_key.as_str())
+                .or_default() += 1;
+            live_record_ids.insert(record.id.as_str());
+        }
+    }
+
+    let live_records = live_record_ids.len();
+    let indexed_live_records = live_record_ids
+        .iter()
+        .filter(|id| vectors.contains_key(**id))
+        .count();
+    let orphaned_vectors = vectors
+        .keys()
+        .filter(|id| !records.iter().any(|record| record.id == ***id))
+        .count();
+    let duplicated_live_subjects = live_subject_counts
+        .values()
+        .filter(|count| **count > 1)
+        .count();
+
+    let mut lines = vec![
+        "Memory stats:".to_string(),
+        format!("- total records: {}", records.len()),
+        format!("- in scope now: {in_scope_now}"),
+        format!(
+            "- live records: {} active, {} candidate",
+            status_counts.get("active").copied().unwrap_or(0),
+            status_counts.get("candidate").copied().unwrap_or(0)
+        ),
+        format!(
+            "- inactive records: {} superseded, {} archived",
+            status_counts.get("superseded").copied().unwrap_or(0),
+            status_counts.get("archived").copied().unwrap_or(0)
+        ),
+        format!(
+            "- vectors: {} stored, {}/{} live indexed, {} orphaned",
+            vectors.len(),
+            indexed_live_records,
+            live_records,
+            orphaned_vectors
+        ),
+        format!(
+            "- subject keys: {} unique, {} duplicate live subjects",
+            unique_subjects.len(),
+            duplicated_live_subjects
+        ),
+        format!("- embedder backend: {embedder_backend}"),
+    ];
+    if let Some(updated_at) = latest_updated_at {
+        lines.push(format!("- latest update: {}", updated_at.to_rfc3339()));
+    }
+
+    lines.push(String::new());
+    lines.extend(format_count_map("By status", &status_counts));
+    lines.push(String::new());
+    lines.extend(format_count_map("By kind", &kind_counts));
+    lines.push(String::new());
+    lines.extend(format_count_map("By scope", &scope_counts));
+    lines.push(String::new());
+    lines.extend(format_count_map("By source", &source_counts));
+    lines.join("\n")
 }
 
 fn detect_repo_root(workspace_root: &Path) -> PathBuf {
@@ -1772,12 +2013,285 @@ fn lexical_score(query: &str, tokens: &[String], record: &MemoryRecord) -> f32 {
     if haystack.contains(&query) {
         score += 2.0;
     }
-    for token in tokens {
+    for token in tokens.iter().collect::<BTreeSet<_>>() {
         if haystack.contains(token) {
             score += 0.8;
         }
     }
     score
+}
+
+fn memory_match_signals(
+    query: &str,
+    tokens: &[String],
+    query_embedding: Option<&[f32]>,
+    record_embedding: Option<&[f32]>,
+    record: &MemoryRecord,
+) -> MemoryMatchSignals {
+    let lexical_score = lexical_score(query, tokens, record);
+    let semantic_score = query_embedding
+        .zip(record_embedding)
+        .map(|(left, right)| cosine_similarity(left, right))
+        .unwrap_or(0.0);
+    let exact_subject = exact_subject_match(query, record);
+    let exact_path_match = exact_path_match(query, record);
+    let exact_tag_hits = exact_tag_hits(tokens, record);
+    let exact_term_hits = exact_term_hits(tokens, record);
+    let path_term_hits = path_term_hits(query, tokens, record);
+
+    let mut total_score = lexical_score * 2.0 + semantic_score;
+    if exact_subject {
+        total_score += 1.2;
+    }
+    if exact_path_match {
+        total_score += 1.4;
+    }
+    total_score += exact_tag_hits.len().min(4) as f32 * 0.7;
+    total_score += exact_term_hits.len().min(6) as f32 * 0.2;
+    total_score += path_term_hits.len().min(4) as f32 * 0.5;
+
+    MemoryMatchSignals {
+        lexical_score,
+        semantic_score,
+        exact_subject,
+        exact_path_match,
+        exact_tag_hits,
+        exact_term_hits,
+        path_term_hits,
+        total_score,
+    }
+}
+
+fn memory_passes_policy(
+    query: &str,
+    signals: &MemoryMatchSignals,
+    policy: RetrievalPolicy,
+) -> bool {
+    if query.trim().is_empty() {
+        return true;
+    }
+    if signals.total_score < policy.min_total_score {
+        return false;
+    }
+
+    if query_contains_path_hint(query) {
+        let path_hit =
+            signals.exact_subject || signals.exact_path_match || signals.path_term_hits.len() >= 2;
+        let strong_lexical = signals.lexical_score >= policy.min_lexical_score + 1.6;
+        return path_hit || strong_lexical;
+    }
+
+    let structured_hit = signals.exact_subject
+        || signals.exact_path_match
+        || !signals.exact_tag_hits.is_empty()
+        || !signals.path_term_hits.is_empty();
+    let lexical_hit = signals.lexical_score >= policy.min_lexical_score;
+    let semantic_hit = signals.semantic_score >= policy.min_semantic_score;
+    let multi_term_hit = signals.exact_term_hits.len() >= 2
+        && signals.lexical_score >= policy.min_lexical_score * 0.65;
+
+    structured_hit || lexical_hit || semantic_hit || multi_term_hit
+}
+
+fn exact_subject_match(query: &str, record: &MemoryRecord) -> bool {
+    let query = query.trim();
+    if query.is_empty() {
+        return false;
+    }
+    let subject = record.subject_key.to_ascii_lowercase();
+    let lowered_query = query.to_ascii_lowercase();
+    if subject == lowered_query {
+        return true;
+    }
+    let slug = slugify(query);
+    slug.len() >= 4 && (subject == slug || subject.contains(&slug))
+}
+
+fn exact_path_match(query: &str, record: &MemoryRecord) -> bool {
+    if !query_contains_path_hint(query) {
+        return false;
+    }
+
+    let lowered_query = query.trim().to_ascii_lowercase();
+    if lowered_query.is_empty() {
+        return false;
+    }
+
+    if record
+        .subject_key
+        .to_ascii_lowercase()
+        .contains(&lowered_query)
+    {
+        return true;
+    }
+
+    if record
+        .evidence
+        .iter()
+        .flat_map(|evidence| evidence.files.iter())
+        .any(|file| file.to_ascii_lowercase().contains(&lowered_query))
+    {
+        return true;
+    }
+
+    let Some(file_name) = Path::new(query)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.to_ascii_lowercase())
+    else {
+        return false;
+    };
+    file_name.len() >= 5
+        && record
+            .evidence
+            .iter()
+            .flat_map(|evidence| evidence.files.iter())
+            .any(|file| file.to_ascii_lowercase().ends_with(&file_name))
+}
+
+fn exact_tag_hits(tokens: &[String], record: &MemoryRecord) -> Vec<String> {
+    let tag_set = record
+        .tags
+        .iter()
+        .map(|tag| tag.to_ascii_lowercase())
+        .collect::<BTreeSet<_>>();
+    tokens
+        .iter()
+        .filter(|token| tag_set.contains(token.as_str()))
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn exact_term_hits(tokens: &[String], record: &MemoryRecord) -> Vec<String> {
+    let haystack_tokens = tokenize(&format!(
+        "{}\n{}\n{}\n{}",
+        record.subject_key,
+        record.title,
+        record.summary,
+        record.details.clone().unwrap_or_default()
+    ))
+    .into_iter()
+    .collect::<BTreeSet<_>>();
+    tokens
+        .iter()
+        .filter(|token| haystack_tokens.contains(token.as_str()))
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn path_term_hits(query: &str, tokens: &[String], record: &MemoryRecord) -> Vec<String> {
+    if !query_contains_path_hint(query) {
+        return Vec::new();
+    }
+    let query_tokens = path_query_tokens(query, tokens);
+    if query_tokens.is_empty() {
+        return Vec::new();
+    }
+    let pathish_tokens = tokenize(&format!(
+        "{}\n{}\n{}",
+        record.subject_key,
+        record.tags.join(" "),
+        record
+            .evidence
+            .iter()
+            .flat_map(|evidence| evidence.files.iter())
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" ")
+    ))
+    .into_iter()
+    .filter(|token| token.len() >= 3)
+    .collect::<BTreeSet<_>>();
+    query_tokens
+        .iter()
+        .filter(|token| pathish_tokens.contains(token.as_str()))
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn path_query_tokens(query: &str, tokens: &[String]) -> Vec<String> {
+    if query_contains_path_hint(query) {
+        tokenize(query)
+            .into_iter()
+            .filter(|token| token.len() >= 3 && !is_generic_path_token(token))
+            .collect()
+    } else {
+        tokens
+            .iter()
+            .filter(|token| token.len() >= 3 && !is_generic_path_token(token))
+            .cloned()
+            .collect()
+    }
+}
+
+fn is_generic_path_token(token: &str) -> bool {
+    matches!(
+        token,
+        "src"
+            | "app"
+            | "lib"
+            | "bin"
+            | "mod"
+            | "main"
+            | "index"
+            | "test"
+            | "tests"
+            | "spec"
+            | "rs"
+            | "ts"
+            | "tsx"
+            | "js"
+            | "jsx"
+            | "py"
+            | "go"
+            | "cs"
+            | "cpp"
+            | "c"
+            | "h"
+            | "hpp"
+            | "java"
+            | "json"
+            | "toml"
+            | "yaml"
+            | "yml"
+            | "md"
+            | "sql"
+    )
+}
+
+fn query_contains_path_hint(query: &str) -> bool {
+    query
+        .chars()
+        .any(|ch| matches!(ch, '/' | '\\' | '.' | '_' | '-'))
+}
+
+fn memory_search_debug_reasons(hit: &MemorySearchHit) -> String {
+    let mut reasons = Vec::new();
+    if hit.signals.exact_subject {
+        reasons.push("subject".to_string());
+    }
+    if hit.signals.exact_path_match {
+        reasons.push("path-exact".to_string());
+    }
+    if !hit.signals.exact_tag_hits.is_empty() {
+        reasons.push(format!("tags {}", hit.signals.exact_tag_hits.join(", ")));
+    }
+    if !hit.signals.path_term_hits.is_empty() {
+        reasons.push(format!("path {}", hit.signals.path_term_hits.join(", ")));
+    }
+    if !hit.signals.exact_term_hits.is_empty() {
+        reasons.push(format!("terms {}", hit.signals.exact_term_hits.join(", ")));
+    }
+    reasons.push(format!("lex {:.2}", hit.signals.lexical_score));
+    reasons.push(format!("sem {:.2}", hit.signals.semantic_score));
+    reasons.push(format!("query {:.2}", hit.signals.total_score));
+    reasons.join(", ")
 }
 
 fn scope_bonus(current_repo_fingerprint: &str, record: &MemoryRecord) -> f32 {
@@ -2039,6 +2553,145 @@ mod tests {
         .expect("memory service")
     }
 
+    fn real_embedder_memory_service() -> Option<MemoryService> {
+        let reason = fastembed_unavailable_reason();
+        if let Some(reason) = reason {
+            eprintln!("skipping real-embedder test: {reason}");
+            return None;
+        }
+
+        let root = temp_dir("workspace-real-embedder");
+        fs::create_dir_all(root.join(".git")).expect("repo");
+        fs::create_dir_all(root.join("src")).expect("workspace");
+        fs::write(root.join("src/module.rs"), "fn demo() {}\n").expect("file");
+        let store = temp_dir("store-real-embedder");
+        let cache_dir = std::env::temp_dir().join("oat-fastembed-test-cache");
+
+        MemoryService::with_embedder(
+            MemoryConfig::default(),
+            root,
+            Some(store),
+            Box::new(FastembedEmbeddingProvider::new(cache_dir)),
+        )
+        .ok()
+    }
+
+    fn repo_fingerprint(service: &MemoryService) -> String {
+        let manager = service.inner.lock().expect("lock");
+        manager.repo_fingerprint.clone()
+    }
+
+    fn seed_record(
+        service: &MemoryService,
+        scope: MemoryScope,
+        kind: MemoryKind,
+        subject_key: &str,
+        title: &str,
+        summary: &str,
+        tags: &[&str],
+        files: &[&str],
+        status: MemoryStatus,
+    ) {
+        let repo_fingerprint = repo_fingerprint(service);
+        service
+            .insert_test_record(MemoryRecord {
+                id: Uuid::now_v7().to_string(),
+                scope,
+                repo_fingerprint: memory_repo_fingerprint(&repo_fingerprint, scope),
+                subject_key: subject_key.into(),
+                kind,
+                title: title.into(),
+                summary: summary.into(),
+                details: None,
+                tags: tags.iter().map(|tag| (*tag).to_string()).collect(),
+                evidence: (!files.is_empty())
+                    .then(|| {
+                        vec![MemoryEvidenceRef {
+                            session_id: Some("session-test".into()),
+                            prompt: Some(summary.into()),
+                            files: files.iter().map(|file| (*file).to_string()).collect(),
+                        }]
+                    })
+                    .unwrap_or_default(),
+                source: MemorySource::Inferred,
+                confidence: 0.9,
+                status,
+                supersedes: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            })
+            .expect("seed record");
+    }
+
+    fn seed_noise_records(service: &MemoryService, count: usize, pathish: bool) {
+        let repo_fingerprint = repo_fingerprint(service);
+        for index in 0..count {
+            let scope = match index % 3 {
+                0 => MemoryScope::Global,
+                1 => MemoryScope::Repo,
+                _ => MemoryScope::Module,
+            };
+            let kind = match index % 6 {
+                0 => MemoryKind::Architecture,
+                1 => MemoryKind::Decision,
+                2 => MemoryKind::Episode,
+                3 => MemoryKind::Workflow,
+                4 => MemoryKind::Preference,
+                _ => MemoryKind::Hazard,
+            };
+            let subject_key = match scope {
+                MemoryScope::Global => format!("global:noise-{index}"),
+                MemoryScope::Repo => format!("repo:noise-{index}"),
+                MemoryScope::Module => format!("module:noise-{index}"),
+            };
+            let tags = if pathish {
+                vec!["src".into(), "rs".into(), "module".into()]
+            } else {
+                vec!["widget".into(), "cache".into(), "noise".into()]
+            };
+            let evidence = if pathish {
+                vec![MemoryEvidenceRef {
+                    session_id: Some("session-noise".into()),
+                    prompt: Some(format!("noise path memory {index}")),
+                    files: vec![format!("src/noise/module_{index}.rs")],
+                }]
+            } else {
+                Vec::new()
+            };
+            service
+                .insert_test_record(MemoryRecord {
+                    id: Uuid::now_v7().to_string(),
+                    scope,
+                    repo_fingerprint: memory_repo_fingerprint(&repo_fingerprint, scope),
+                    subject_key,
+                    kind,
+                    title: format!("Noise memory {index}"),
+                    summary: format!("Irrelevant widget cache note {index}."),
+                    details: None,
+                    tags,
+                    evidence,
+                    source: MemorySource::Inferred,
+                    confidence: 0.55,
+                    status: MemoryStatus::Active,
+                    supersedes: None,
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                })
+                .expect("seed noise record");
+        }
+    }
+
+    fn result_entry_count(output: &str) -> usize {
+        output.lines().filter(|line| line.starts_with("- ")).count()
+    }
+
+    fn injected_memory_count(prompt: &str) -> usize {
+        prompt
+            .lines()
+            .filter(|line| line.starts_with("- ["))
+            .count()
+    }
+
     #[test]
     fn prepare_completed_turn_collects_touched_files() {
         let service = memory_service();
@@ -2128,6 +2781,669 @@ mod tests {
         assert_eq!(contexts.len(), 1);
         assert_eq!(contexts[0].related_memories.len(), 1);
         assert_eq!(contexts[0].related_memories[0].title, "Module follow-up");
+    }
+
+    #[test]
+    fn search_text_filters_unrelated_memories() {
+        let service = memory_service();
+        seed_record(
+            &service,
+            MemoryScope::Global,
+            MemoryKind::Preference,
+            "global:reply-style",
+            "Reply style",
+            "Prefer warmer replies by default.",
+            &["warm", "replies"],
+            &[],
+            MemoryStatus::Active,
+        );
+        seed_record(
+            &service,
+            MemoryScope::Global,
+            MemoryKind::Hazard,
+            "global:banned-words",
+            "Banned words",
+            "Do not use boo or eggs in replies.",
+            &["boo", "eggs"],
+            &[],
+            MemoryStatus::Active,
+        );
+        seed_record(
+            &service,
+            MemoryScope::Repo,
+            MemoryKind::Workflow,
+            "repo:workspace:database-migrations",
+            "Database migration workflow",
+            "Run migrations before shipping schema changes.",
+            &["database", "migrations", "schema"],
+            &[],
+            MemoryStatus::Active,
+        );
+
+        let output = service
+            .search_text("database migrations", false, 10)
+            .expect("search");
+
+        assert!(output.contains("Database migration workflow"));
+        assert!(!output.contains("Reply style"));
+        assert!(!output.contains("Banned words"));
+        assert!(output.contains("why:"));
+    }
+
+    #[test]
+    fn search_text_stays_selective_with_large_noise_corpus() {
+        let service = memory_service();
+        seed_noise_records(&service, 150, false);
+        seed_record(
+            &service,
+            MemoryScope::Repo,
+            MemoryKind::Workflow,
+            "repo:workspace:database-migrations",
+            "Database migration workflow",
+            "Run migrations before shipping schema changes.",
+            &["database", "migrations", "schema"],
+            &[],
+            MemoryStatus::Active,
+        );
+
+        let output = service
+            .search_text("database migrations", false, 10)
+            .expect("search");
+
+        assert!(output.contains("Database migration workflow"));
+        assert_eq!(result_entry_count(&output), 1);
+    }
+
+    #[test]
+    fn search_text_supports_exact_module_path_lookup() {
+        let service = memory_service();
+        seed_record(
+            &service,
+            MemoryScope::Module,
+            MemoryKind::Decision,
+            "module:workspace:src-auth-session-rs:session-cache",
+            "Session cache invariants",
+            "Keep the auth session cache ordering stable.",
+            &["auth", "session", "cache"],
+            &["src/auth/session.rs"],
+            MemoryStatus::Active,
+        );
+
+        let output = service
+            .search_text("src/auth/session.rs", false, 10)
+            .expect("search");
+
+        assert!(output.contains("Session cache invariants"));
+        assert!(output.contains("why:"));
+        assert!(output.contains("subject") || output.contains("path"));
+    }
+
+    #[test]
+    fn search_text_does_not_match_generic_repo_memories_for_path_queries() {
+        let service = memory_service();
+        seed_record(
+            &service,
+            MemoryScope::Repo,
+            MemoryKind::Architecture,
+            "repo:workspace:semantic-memory",
+            "Semantic memory subsystem",
+            "The repo gained a semantic memory subsystem.",
+            &["memory", "src", "rs"],
+            &[],
+            MemoryStatus::Active,
+        );
+
+        let output = service
+            .search_text("src/auth/session.rs", false, 10)
+            .expect("search");
+
+        assert_eq!(output, "No memories matched `src/auth/session.rs`.");
+    }
+
+    #[test]
+    fn path_queries_ignore_large_generic_path_noise_corpus() {
+        let service = memory_service();
+        seed_noise_records(&service, 120, true);
+
+        let output = service
+            .search_text("src/auth/session.rs", false, 10)
+            .expect("search");
+
+        assert_eq!(output, "No memories matched `src/auth/session.rs`.");
+    }
+
+    #[test]
+    fn auto_inject_skips_episode_memories() {
+        let service = memory_service();
+        seed_record(
+            &service,
+            MemoryScope::Repo,
+            MemoryKind::Episode,
+            "repo:workspace:release-retro",
+            "Release retrospective",
+            "The database rollout failed during the release window.",
+            &["database", "release"],
+            &[],
+            MemoryStatus::Active,
+        );
+
+        let prompt = service
+            .augment_prompt("Investigate the database rollout failure.")
+            .expect("augment prompt");
+
+        assert_eq!(prompt, "Investigate the database rollout failure.");
+    }
+
+    #[test]
+    fn auto_inject_keeps_allowed_preference_memories() {
+        let service = memory_service();
+        seed_record(
+            &service,
+            MemoryScope::Global,
+            MemoryKind::Preference,
+            "global:reply-warmth",
+            "Reply warmth",
+            "Prefer warmer replies and avoid sounding abrupt.",
+            &["warm", "replies"],
+            &[],
+            MemoryStatus::Active,
+        );
+
+        let prompt = service
+            .augment_prompt("Please keep the tone warm in this reply.")
+            .expect("augment prompt");
+
+        assert!(prompt.contains("Relevant memory:"));
+        assert!(prompt.contains("Reply warmth"));
+    }
+
+    #[test]
+    fn decision_status_requires_higher_confidence_to_enter_store_by_default() {
+        let extraction = MemoryExtractionConfig::default();
+
+        let below_candidate = MemoryConsolidationDecision {
+            candidate_index: 0,
+            action: MemoryConsolidationAction::CreateCandidate,
+            existing_memory_id: None,
+            supersede_memory_ids: Vec::new(),
+            title: Some("Candidate".into()),
+            summary: Some("Candidate".into()),
+            details: None,
+            tags: Vec::new(),
+            confidence: extraction.min_candidate_confidence - 1,
+        };
+        assert_eq!(decision_status(&extraction, &below_candidate), None);
+
+        let between_candidate_and_active = MemoryConsolidationDecision {
+            candidate_index: 0,
+            action: MemoryConsolidationAction::CreateActive,
+            existing_memory_id: None,
+            supersede_memory_ids: Vec::new(),
+            title: Some("Active".into()),
+            summary: Some("Active".into()),
+            details: None,
+            tags: Vec::new(),
+            confidence: extraction.min_candidate_confidence,
+        };
+        assert_eq!(
+            decision_status(&extraction, &between_candidate_and_active),
+            Some(MemoryStatus::Candidate)
+        );
+
+        let active = MemoryConsolidationDecision {
+            confidence: extraction.min_active_confidence,
+            ..between_candidate_and_active
+        };
+        assert_eq!(
+            decision_status(&extraction, &active),
+            Some(MemoryStatus::Active)
+        );
+    }
+
+    #[test]
+    fn stats_text_reports_useful_store_summary() {
+        let service = memory_service();
+        seed_record(
+            &service,
+            MemoryScope::Global,
+            MemoryKind::Preference,
+            "global:reply-warmth",
+            "Reply warmth",
+            "Prefer warmer replies.",
+            &["warm", "replies"],
+            &[],
+            MemoryStatus::Active,
+        );
+        seed_record(
+            &service,
+            MemoryScope::Global,
+            MemoryKind::Preference,
+            "global:reply-warmth",
+            "Reply warmth candidate",
+            "Prefer warmer replies.",
+            &["warm", "replies"],
+            &[],
+            MemoryStatus::Candidate,
+        );
+        seed_record(
+            &service,
+            MemoryScope::Repo,
+            MemoryKind::Workflow,
+            "repo:workspace:db-migrate",
+            "DB migrate",
+            "Run db migrations before deploy.",
+            &["database", "migrations"],
+            &[],
+            MemoryStatus::Archived,
+        );
+
+        let stats = service.stats_text().expect("stats");
+
+        assert!(stats.contains("Memory stats:"));
+        assert!(stats.contains("- total records: 3"));
+        assert!(stats.contains("- live records: 1 active, 1 candidate"));
+        assert!(stats.contains("- inactive records: 0 superseded, 1 archived"));
+        assert!(stats.contains("- vectors: 2 stored, 2/2 live indexed, 0 orphaned"));
+        assert!(stats.contains("- subject keys: 2 unique, 1 duplicate live subjects"));
+        assert!(stats.contains("By status:"));
+        assert!(stats.contains("- active: 1"));
+        assert!(stats.contains("- candidate: 1"));
+        assert!(stats.contains("- archived: 1"));
+        assert!(stats.contains("By kind:"));
+        assert!(stats.contains("- User preference: 2"));
+        assert!(stats.contains("- Workflow: 1"));
+        assert!(stats.contains("By scope:"));
+        assert!(stats.contains("- global: 2"));
+        assert!(stats.contains("- repo: 1"));
+        assert!(stats.contains("By source:"));
+        assert!(stats.contains("- inferred: 3"));
+    }
+
+    #[test]
+    fn auto_inject_stays_selective_with_large_noise_and_respects_limit() {
+        let service = memory_service();
+        seed_noise_records(&service, 90, false);
+        seed_record(
+            &service,
+            MemoryScope::Global,
+            MemoryKind::Preference,
+            "global:reply-warmth",
+            "Reply warmth",
+            "Prefer warmer replies and avoid sounding abrupt.",
+            &["warm", "replies"],
+            &[],
+            MemoryStatus::Active,
+        );
+        seed_record(
+            &service,
+            MemoryScope::Global,
+            MemoryKind::Hazard,
+            "global:banned-words",
+            "Banned words",
+            "Do not use boo or eggs in replies.",
+            &["boo", "eggs", "avoid"],
+            &[],
+            MemoryStatus::Active,
+        );
+        seed_record(
+            &service,
+            MemoryScope::Global,
+            MemoryKind::Preference,
+            "global:file-refs",
+            "Exact file refs",
+            "Prefer exact file refs in responses.",
+            &["exact", "file", "refs"],
+            &[],
+            MemoryStatus::Active,
+        );
+        seed_record(
+            &service,
+            MemoryScope::Repo,
+            MemoryKind::Episode,
+            "repo:workspace:file-ref-incident",
+            "File ref incident",
+            "A previous file refs incident involved boo and eggs.",
+            &["file", "refs", "boo", "eggs"],
+            &[],
+            MemoryStatus::Active,
+        );
+
+        let prompt = service
+            .augment_prompt(
+                "Please keep replies warm, avoid boo and eggs, and include exact file refs.",
+            )
+            .expect("augment prompt");
+
+        assert!(prompt.contains("Relevant memory:"));
+        assert!(prompt.contains("Reply warmth"));
+        assert!(prompt.contains("Banned words"));
+        assert!(prompt.contains("Exact file refs"));
+        assert!(!prompt.contains("File ref incident"));
+        assert_eq!(injected_memory_count(&prompt), 3);
+    }
+
+    #[test]
+    fn real_embedder_large_corpus_search_and_path_remain_selective() {
+        let Some(service) = real_embedder_memory_service() else {
+            return;
+        };
+
+        seed_noise_records(&service, 180, false);
+        seed_noise_records(&service, 120, true);
+        seed_record(
+            &service,
+            MemoryScope::Repo,
+            MemoryKind::Workflow,
+            "repo:workspace:database-migrations",
+            "Database migration workflow",
+            "Run migrations before shipping schema changes.",
+            &["database", "migrations", "schema"],
+            &[],
+            MemoryStatus::Active,
+        );
+        seed_record(
+            &service,
+            MemoryScope::Module,
+            MemoryKind::Decision,
+            "module:workspace:src-auth-session-rs:session-cache",
+            "Session cache invariants",
+            "Keep the auth session cache ordering stable.",
+            &["auth", "session", "cache"],
+            &["src/auth/session.rs"],
+            MemoryStatus::Active,
+        );
+
+        let db = service
+            .search_text("database migrations", false, 10)
+            .expect("search");
+        assert!(db.contains("Database migration workflow"));
+        assert_eq!(result_entry_count(&db), 1);
+
+        let path = service
+            .search_text("src/auth/session.rs", false, 10)
+            .expect("search");
+        assert!(path.contains("Session cache invariants"));
+        assert_eq!(result_entry_count(&path), 1);
+        assert!(!path.contains("Noise memory"));
+    }
+
+    #[test]
+    fn real_embedder_large_corpus_auto_inject_and_candidate_linking_remain_selective() {
+        let Some(service) = real_embedder_memory_service() else {
+            return;
+        };
+
+        seed_noise_records(&service, 140, false);
+        seed_noise_records(&service, 80, true);
+        seed_record(
+            &service,
+            MemoryScope::Global,
+            MemoryKind::Preference,
+            "global:reply-warmth",
+            "Reply warmth",
+            "Prefer warmer replies and avoid sounding abrupt.",
+            &["warm", "replies"],
+            &[],
+            MemoryStatus::Active,
+        );
+        seed_record(
+            &service,
+            MemoryScope::Global,
+            MemoryKind::Hazard,
+            "global:banned-words",
+            "Banned words",
+            "Do not use boo or eggs in replies.",
+            &["boo", "eggs", "avoid"],
+            &[],
+            MemoryStatus::Active,
+        );
+        seed_record(
+            &service,
+            MemoryScope::Module,
+            MemoryKind::Decision,
+            "module:workspace:src-billing-ledger-rs:rounding",
+            "Billing ledger rounding",
+            "Keep billing ledger rounding stable in src/billing/ledger.rs.",
+            &["billing", "ledger", "rounding"],
+            &["src/billing/ledger.rs"],
+            MemoryStatus::Active,
+        );
+
+        let prompt = service
+            .augment_prompt(
+                "Keep replies warm, avoid boo and eggs, and review billing ledger work.",
+            )
+            .expect("augment prompt");
+        assert!(prompt.contains("Reply warmth"));
+        assert!(prompt.contains("Banned words"));
+        assert!(!prompt.contains("Noise memory"));
+        assert!(injected_memory_count(&prompt) <= 3);
+
+        let contexts = {
+            let mut manager = service.inner.lock().expect("lock");
+            manager
+                .build_candidate_contexts(
+                    &MemoryExtractorOutput {
+                        candidates: vec![MemoryCandidateDraft {
+                            scope: MemoryScope::Module,
+                            kind: MemoryKind::Decision,
+                            source: MemorySource::Inferred,
+                            subject_hint: "billing-ledger".into(),
+                            title: "Billing ledger rounding".into(),
+                            summary: "Adjust billing ledger rounding in src/billing/ledger.rs."
+                                .into(),
+                            details: None,
+                            tags: vec!["billing".into(), "ledger".into()],
+                            module_refs: vec!["src/billing/ledger.rs".into()],
+                            confidence: 88,
+                        }],
+                    },
+                    5,
+                )
+                .expect("candidate contexts")
+        };
+        assert_eq!(contexts.len(), 1);
+        assert_eq!(contexts[0].related_memories.len(), 1);
+        assert_eq!(
+            contexts[0].related_memories[0].title,
+            "Billing ledger rounding"
+        );
+    }
+
+    #[test]
+    fn candidate_contexts_remain_targeted_with_large_noise_corpus() {
+        let service = memory_service();
+        seed_noise_records(&service, 100, true);
+        seed_record(
+            &service,
+            MemoryScope::Module,
+            MemoryKind::Decision,
+            "module:workspace:src-billing-ledger-rs:rounding",
+            "Billing ledger rounding",
+            "Keep billing ledger rounding stable in src/billing/ledger.rs.",
+            &["billing", "ledger", "rounding"],
+            &["src/billing/ledger.rs"],
+            MemoryStatus::Active,
+        );
+
+        let contexts = {
+            let mut manager = service.inner.lock().expect("lock");
+            manager
+                .build_candidate_contexts(
+                    &MemoryExtractorOutput {
+                        candidates: vec![MemoryCandidateDraft {
+                            scope: MemoryScope::Module,
+                            kind: MemoryKind::Decision,
+                            source: MemorySource::Inferred,
+                            subject_hint: "billing-ledger".into(),
+                            title: "Billing ledger rounding".into(),
+                            summary: "Adjust billing ledger rounding in src/billing/ledger.rs."
+                                .into(),
+                            details: None,
+                            tags: vec!["billing".into(), "ledger".into()],
+                            module_refs: vec!["src/billing/ledger.rs".into()],
+                            confidence: 88,
+                        }],
+                    },
+                    5,
+                )
+                .expect("candidate contexts")
+        };
+
+        assert_eq!(contexts.len(), 1);
+        assert_eq!(contexts[0].related_memories.len(), 1);
+        assert_eq!(
+            contexts[0].related_memories[0].title,
+            "Billing ledger rounding"
+        );
+    }
+
+    #[test]
+    fn search_text_ignores_non_active_matches_even_in_large_corpus() {
+        let service = memory_service();
+        seed_noise_records(&service, 75, false);
+        seed_record(
+            &service,
+            MemoryScope::Global,
+            MemoryKind::Preference,
+            "global:reply-warmth-active",
+            "Active warm replies",
+            "Prefer warmer replies by default.",
+            &["warm", "replies"],
+            &[],
+            MemoryStatus::Active,
+        );
+        seed_record(
+            &service,
+            MemoryScope::Global,
+            MemoryKind::Preference,
+            "global:reply-warmth-candidate",
+            "Candidate warm replies",
+            "Prefer warmer replies by default.",
+            &["warm", "replies"],
+            &[],
+            MemoryStatus::Candidate,
+        );
+        seed_record(
+            &service,
+            MemoryScope::Global,
+            MemoryKind::Preference,
+            "global:reply-warmth-archived",
+            "Archived warm replies",
+            "Prefer warmer replies by default.",
+            &["warm", "replies"],
+            &[],
+            MemoryStatus::Archived,
+        );
+        seed_record(
+            &service,
+            MemoryScope::Global,
+            MemoryKind::Preference,
+            "global:reply-warmth-superseded",
+            "Superseded warm replies",
+            "Prefer warmer replies by default.",
+            &["warm", "replies"],
+            &[],
+            MemoryStatus::Superseded,
+        );
+
+        let output = service
+            .search_text("warm replies", false, 10)
+            .expect("search");
+
+        assert!(output.contains("Active warm replies"));
+        assert!(!output.contains("Candidate warm replies"));
+        assert!(!output.contains("Archived warm replies"));
+        assert!(!output.contains("Superseded warm replies"));
+        assert_eq!(result_entry_count(&output), 1);
+    }
+
+    fn copy_file_if_exists(from: &Path, to: &Path) {
+        if from.exists() {
+            fs::copy(from, to).expect("copy file");
+        }
+    }
+
+    #[test]
+    #[ignore = "manual smoke test that clones the live memory store for retrieval tuning"]
+    fn live_store_retrieval_smoke() {
+        let Some(live_store) =
+            default_memory_dir().filter(|dir| dir.join(SNAPSHOT_FILE_NAME).exists())
+        else {
+            return;
+        };
+
+        let cloned_store = temp_dir("live-memory-clone");
+        fs::create_dir_all(&cloned_store).expect("clone dir");
+        copy_file_if_exists(
+            &live_store.join(SNAPSHOT_FILE_NAME),
+            &cloned_store.join(SNAPSHOT_FILE_NAME),
+        );
+        copy_file_if_exists(
+            &live_store.join(VECTORS_FILE_NAME),
+            &cloned_store.join(VECTORS_FILE_NAME),
+        );
+        copy_file_if_exists(
+            &live_store.join(EVENTS_FILE_NAME),
+            &cloned_store.join(EVENTS_FILE_NAME),
+        );
+
+        let service = MemoryService::with_storage_dir(
+            MemoryConfig::default(),
+            std::env::current_dir().expect("cwd"),
+            cloned_store,
+        )
+        .expect("memory service");
+
+        let warm = service
+            .search_text("warm replies", false, 10)
+            .expect("warm search");
+        println!("warm replies:\n{warm}\n");
+        assert!(warm.contains("Prefers warmer replies"));
+        assert!(!warm.contains("Semantic long-term memory subsystem"));
+
+        let path_before = service
+            .search_text("src/auth/session.rs", false, 10)
+            .expect("path search");
+        println!("path before synthetic:\n{path_before}\n");
+        assert_eq!(path_before, "No memories matched `src/auth/session.rs`.");
+
+        seed_record(
+            &service,
+            MemoryScope::Repo,
+            MemoryKind::Workflow,
+            "repo:root-oat:database-migrations",
+            "Database migration workflow",
+            "Run migrations before shipping schema changes.",
+            &["database", "migrations", "schema"],
+            &[],
+            MemoryStatus::Active,
+        );
+        seed_record(
+            &service,
+            MemoryScope::Module,
+            MemoryKind::Decision,
+            "module:root-oat:src-auth-session-rs:session-cache",
+            "Session cache invariants",
+            "Keep the auth session cache ordering stable.",
+            &["auth", "session", "cache"],
+            &["src/auth/session.rs"],
+            MemoryStatus::Active,
+        );
+
+        let db = service
+            .search_text("database migrations", false, 10)
+            .expect("db search");
+        println!("database migrations:\n{db}\n");
+        assert!(db.contains("Database migration workflow"));
+        assert!(!db.contains("Prefers warmer replies"));
+
+        let path_after = service
+            .search_text("src/auth/session.rs", false, 10)
+            .expect("path search");
+        println!("path after synthetic:\n{path_after}\n");
+        assert!(path_after.contains("Session cache invariants"));
+        assert!(!path_after.contains("Semantic long-term memory subsystem"));
     }
 
     #[test]
