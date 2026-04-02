@@ -173,7 +173,7 @@ impl ParseReasoningSettingError {
     }
 }
 
-const BASE_MODELS: [ModelInfo; 17] = [
+const BASE_MODELS: [ModelInfo; 18] = [
     ModelInfo {
         name: "gpt-5.4",
         provider: ModelProvider::AzureOpenAi,
@@ -412,6 +412,20 @@ const BASE_MODELS: [ModelInfo; 17] = [
         long_context_pricing: None,
         supported_reasoning_settings: &OPENROUTER_REASONING_SETTINGS,
     },
+    ModelInfo {
+        name: "qwen/qwen3.6-plus-preview:free",
+        provider: ModelProvider::OpenRouter,
+        context_length: 1_000_000,
+        context_length_display: Some("1M"),
+        compaction_trigger_percent_used: 90,
+        pricing: ModelPricing {
+            input_per_million_tokens: 0.0,
+            cache_read_per_million_tokens: 0.0,
+            output_per_million_tokens: 0.0,
+        },
+        long_context_pricing: None,
+        supported_reasoning_settings: &OPENROUTER_REASONING_SETTINGS,
+    },
 ];
 
 static MODEL_REGISTRY: LazyLock<RwLock<&'static [ModelInfo]>> =
@@ -617,7 +631,7 @@ mod tests {
 
     #[test]
     fn seeded_models_are_available() {
-        assert!(models().len() >= 22);
+        assert!(models().len() >= 23);
         assert!(find_model("gpt-5.4").is_some());
         assert!(find_model("gpt-5.4-mini").is_some());
         assert!(find_model("gpt-5.4-nano").is_some());
@@ -642,6 +656,7 @@ mod tests {
         assert!(find_model("xiaomi/mimo-v2-omni").is_some());
         assert!(find_model("xiaomi/mimo-v2-pro").is_some());
         assert!(find_model("xiaomi/mimo-v2-flash").is_some());
+        assert!(find_model("qwen/qwen3.6-plus-preview:free").is_some());
     }
 
     #[test]
@@ -797,6 +812,7 @@ mod tests {
         let mimo_omni = find_model("xiaomi/mimo-v2-omni").expect("registry model");
         let mimo_pro = find_model("xiaomi/mimo-v2-pro").expect("registry model");
         let mimo_flash = find_model("xiaomi/mimo-v2-flash").expect("registry model");
+        let qwen_preview = find_model("qwen/qwen3.6-plus-preview:free").expect("registry model");
 
         assert_eq!(gpt_54.recommended_prompt_token_budget(), 104_000);
         assert_eq!(gpt_54_mini.recommended_prompt_token_budget(), 104_000);
@@ -826,6 +842,7 @@ mod tests {
         assert_eq!(mimo_omni.recommended_prompt_token_budget(), 99_072);
         assert_eq!(mimo_pro.recommended_prompt_token_budget(), 492_288);
         assert_eq!(mimo_flash.recommended_prompt_token_budget(), 99_072);
+        assert_eq!(qwen_preview.recommended_prompt_token_budget(), 468_000);
     }
 
     #[test]
@@ -839,6 +856,7 @@ mod tests {
         let mimo_omni = find_model("xiaomi/mimo-v2-omni").expect("registry model");
         let mimo_pro = find_model("xiaomi/mimo-v2-pro").expect("registry model");
         let mimo_flash = find_model("xiaomi/mimo-v2-flash").expect("registry model");
+        let qwen_preview = find_model("qwen/qwen3.6-plus-preview:free").expect("registry model");
 
         assert_eq!(gpt_54.provider, ModelProvider::OpenRouter);
         assert_eq!(gpt_54_mini.provider, ModelProvider::OpenRouter);
@@ -849,6 +867,7 @@ mod tests {
         assert_eq!(mimo_omni.provider, ModelProvider::OpenRouter);
         assert_eq!(mimo_pro.provider, ModelProvider::OpenRouter);
         assert_eq!(mimo_flash.provider, ModelProvider::OpenRouter);
+        assert_eq!(qwen_preview.provider, ModelProvider::OpenRouter);
         assert_eq!(
             gpt_54.supported_reasoning_settings,
             &OPENROUTER_REASONING_SETTINGS
@@ -868,6 +887,14 @@ mod tests {
         assert_eq!(mimo_flash.pricing.input_per_million_tokens, 0.09);
         assert_eq!(mimo_flash.pricing.cache_read_per_million_tokens, 0.045);
         assert_eq!(mimo_flash.pricing.output_per_million_tokens, 0.29);
+        assert_eq!(qwen_preview.context_length, 1_000_000);
+        assert_eq!(qwen_preview.display_context_length(), Some("1M"));
+        assert_eq!(
+            qwen_preview.supported_reasoning_settings,
+            &OPENROUTER_REASONING_SETTINGS
+        );
+        assert_eq!(qwen_preview.pricing.input_per_million_tokens, 0.0);
+        assert_eq!(qwen_preview.pricing.output_per_million_tokens, 0.0);
     }
 
     #[test]
