@@ -1,5 +1,6 @@
 use super::super::{
-    Effect, PendingReplyActivity, PendingReplyKind, SideChannelEvent, StreamEvent, TurnEndReason,
+    ActivityDisplayState, Effect, PendingReplyActivity, PendingReplyKind, SideChannelEvent,
+    StreamEvent, TurnEndReason,
 };
 use crate::app::{AppState, MessageStyle, ops, query};
 use crate::features::planning::{PlanningReply, PlanningStage, parse_planning_reply};
@@ -43,6 +44,28 @@ pub(crate) fn on_stream_event(
         StreamEvent::ToolCall { name, arguments } => {
             ops::session::set_pending_reply_activity(state, PendingReplyActivity::WaitingForTool);
             ops::transcript::push_tool_call(state, name, arguments);
+            None
+        }
+        StreamEvent::HostedToolStarted { id, kind, detail } => {
+            ops::session::set_pending_reply_activity(state, PendingReplyActivity::SearchingWeb);
+            ops::transcript::upsert_hosted_tool_status(
+                state,
+                id,
+                kind,
+                ActivityDisplayState::Running,
+                detail,
+            );
+            None
+        }
+        StreamEvent::HostedToolCompleted { id, kind, detail } => {
+            ops::session::set_pending_reply_activity(state, PendingReplyActivity::Responding);
+            ops::transcript::upsert_hosted_tool_status(
+                state,
+                id,
+                kind,
+                ActivityDisplayState::Completed,
+                detail,
+            );
             None
         }
         StreamEvent::ToolResult { name, output } => {
@@ -213,9 +236,10 @@ mod tests {
     use super::*;
     use crate::{
         app::{
-            Action, ChatMessage, Effect, MainRequestSeed, MessageStyle, PendingReply,
-            PendingReplyKind, PendingSideReply, SessionHistoryMessage, SideChannelEvent,
-            SideChannelKind, Speaker, TranscriptEntry,
+            Action, ChatMessage, Effect, HostedToolKind, MainRequestSeed, MessageStyle,
+            PendingReply, PendingReplyKind, PendingSideReply, SessionHistoryMessage,
+            SideChannelEvent, SideChannelKind, Speaker, TranscriptEntry,
+            session::PendingReplyActivity,
             session::test_support::{new_app, registry_app},
         },
         ask_user::{AskUserAnswer, AskUserQuestion, AskUserRequest},
@@ -1095,5 +1119,68 @@ mod tests {
         assert_eq!(message.style, MessageStyle::Error);
         assert_eq!(message.tag.as_deref(), Some("btw 1"));
         assert_eq!(message.text, "Request failed: boom");
+    }
+
+    #[test]
+    fn hosted_tool_events_update_status_and_activity() {
+        let mut app = new_app(true);
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(11, PendingReplyKind::Normal));
+
+        app.apply(Action::StreamEvent {
+            reply_id: 11,
+            event: StreamEvent::HostedToolStarted {
+                id: "ws_1".into(),
+                kind: HostedToolKind::WebSearch,
+                detail: "latest rust news".into(),
+            },
+        });
+
+        assert_eq!(
+            app.state()
+                .session
+                .pending_reply
+                .as_ref()
+                .map(|pending| pending.activity),
+            Some(PendingReplyActivity::SearchingWeb)
+        );
+        assert!(matches!(
+            app.entries().last(),
+            Some(TranscriptEntry::HostedToolStatus(status))
+                if status.id == "ws_1"
+                    && status.state == ActivityDisplayState::Running
+                    && status.detail == "latest rust news"
+        ));
+
+        app.apply(Action::StreamEvent {
+            reply_id: 11,
+            event: StreamEvent::HostedToolCompleted {
+                id: "ws_1".into(),
+                kind: HostedToolKind::WebSearch,
+                detail: "latest rust news".into(),
+            },
+        });
+
+        assert_eq!(
+            app.state()
+                .session
+                .pending_reply
+                .as_ref()
+                .map(|pending| pending.activity),
+            Some(PendingReplyActivity::Responding)
+        );
+        assert_eq!(
+            app.entries()
+                .iter()
+                .filter(|entry| matches!(entry, TranscriptEntry::HostedToolStatus(_)))
+                .count(),
+            1
+        );
+        assert!(matches!(
+            app.entries().last(),
+            Some(TranscriptEntry::HostedToolStatus(status))
+                if status.id == "ws_1"
+                    && status.state == ActivityDisplayState::Completed
+        ));
     }
 }

@@ -8,12 +8,12 @@ use rig::{
     http_client::{HeaderMap, HeaderValue},
     streaming::{StreamedAssistantContent, StreamingChat},
 };
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::{
     agent::{AgentContext, AgentRole},
     app::AccessMode,
-    config::{AppConfig, KimiThinkingMode, ReasoningSetting},
+    config::{AppConfig, KimiThinkingMode, ReasoningSetting, WebSearchMode},
     model_registry,
     tools::{ToolContext, tools_for_context},
 };
@@ -22,6 +22,11 @@ const OPENROUTER_REFERER: &str = "https://getoat.app";
 const OPENROUTER_TITLE: &str = "oat";
 const OPENAI_BETA_HEADER: &str = "responses=experimental";
 const OPENAI_ORIGINATOR_HEADER_VALUE: &str = "codex_cli_rs";
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct RequestFeatures {
+    pub(crate) web_search: Option<WebSearchMode>,
+}
 
 pub(crate) fn reasoning_params(model_name: &str, reasoning: ReasoningSetting) -> serde_json::Value {
     match reasoning {
@@ -53,6 +58,28 @@ pub(crate) fn reasoning_params(model_name: &str, reasoning: ReasoningSetting) ->
         }),
         ReasoningSetting::Kimi(KimiThinkingMode::Off) => json!({}),
     }
+}
+
+pub(crate) fn request_params(
+    model_name: &str,
+    reasoning: ReasoningSetting,
+    features: RequestFeatures,
+) -> Value {
+    let mut params = reasoning_params(model_name, reasoning);
+    if let Some(web_search_mode) = features
+        .web_search
+        .filter(|_| model_registry::uses_responses_api(model_name))
+    {
+        let tools = json!([{
+            "type": "web_search",
+            "external_web_access": matches!(web_search_mode, WebSearchMode::Live),
+        }]);
+        params
+            .as_object_mut()
+            .expect("reasoning params should serialize to an object")
+            .insert("tools".into(), tools);
+    }
+    params
 }
 
 pub(crate) fn openai_base_url_for_model(
@@ -144,6 +171,7 @@ pub(crate) fn build_agent<C>(
     model_name: &str,
     preamble: &str,
     reasoning: ReasoningSetting,
+    features: RequestFeatures,
     tool_context: Option<ToolContext>,
 ) -> rig::agent::Agent<C::CompletionModel>
 where
@@ -154,7 +182,7 @@ where
     let builder = client
         .agent(api_model_name.to_string())
         .preamble(preamble)
-        .additional_params(reasoning_params(model_name, reasoning));
+        .additional_params(request_params(model_name, reasoning, features));
     match tool_context {
         Some(tool_context) => builder.tools(tools_for_context(tool_context)).build(),
         None => builder.build(),

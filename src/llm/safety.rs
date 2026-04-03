@@ -19,13 +19,13 @@ pub(crate) struct SafetyClassifier {
 #[derive(Clone)]
 enum SafetyAgent {
     Completions(super::OpenAiCompletionsAgent),
-    Responses(super::OpenAiResponsesAgent),
+    Responses(super::ResponsesAgent),
 }
 
 #[derive(Clone)]
 pub(crate) enum SafetyClient {
     Completions(openai::CompletionsClient),
-    Responses(super::CodexResponsesClient),
+    Responses(super::ResponsesClient),
 }
 
 #[derive(Clone)]

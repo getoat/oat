@@ -11,6 +11,7 @@ use anyhow::{Context, Result, anyhow};
 use base64::Engine;
 use bytes::Bytes;
 use chrono::Utc;
+use futures_util::StreamExt;
 use rig::http_client::{
     self, HeaderValue, HttpClientExt, LazyBody, MultipartForm, Request, ReqwestClient, Response,
     StreamingResponse,
@@ -122,17 +123,17 @@ fn http_client() -> reqwest::Client {
 }
 
 #[derive(Clone, Debug, Default)]
-pub(crate) struct CodexHttpClient {
+pub(crate) struct ResponsesHttpClient {
     inner: ReqwestClient,
 }
 
-impl CodexHttpClient {
+impl ResponsesHttpClient {
     pub(crate) fn new(inner: ReqwestClient) -> Self {
         Self { inner }
     }
 }
 
-impl HttpClientExt for CodexHttpClient {
+impl HttpClientExt for ResponsesHttpClient {
     fn send<T, U>(
         &self,
         req: Request<T>,
@@ -142,7 +143,7 @@ impl HttpClientExt for CodexHttpClient {
         U: From<Bytes> + Send + 'static,
     {
         let inner = self.inner.clone();
-        let req = normalize_codex_request(req);
+        let req = normalize_responses_request(req);
         async move {
             let req = req?;
             HttpClientExt::send(&inner, req).await
@@ -168,9 +169,10 @@ impl HttpClientExt for CodexHttpClient {
         T: Into<Bytes>,
     {
         let inner = self.inner.clone();
-        let req = normalize_codex_request(req);
+        let req = normalize_responses_request(req);
         async move {
             let req = req?;
+            let (req, interaction_scope) = strip_interaction_scope(req);
             let mut response = HttpClientExt::send_streaming(&inner, req).await?;
             if !response.headers().contains_key("content-type") {
                 response.headers_mut().insert(
@@ -178,12 +180,12 @@ impl HttpClientExt for CodexHttpClient {
                     HeaderValue::from_static("text/event-stream; charset=utf-8"),
                 );
             }
-            Ok(response)
+            Ok(observe_streaming_response(response, interaction_scope))
         }
     }
 }
 
-fn normalize_codex_request<T>(req: Request<T>) -> http_client::Result<Request<Bytes>>
+fn normalize_responses_request<T>(req: Request<T>) -> http_client::Result<Request<Bytes>>
 where
     T: Into<Bytes>,
 {
@@ -199,6 +201,35 @@ where
 
     let normalized = normalize_codex_request_body(&body).unwrap_or(body);
     Ok(Request::from_parts(parts, normalized))
+}
+
+fn strip_interaction_scope(mut req: Request<Bytes>) -> (Request<Bytes>, Option<String>) {
+    let scope = req
+        .headers_mut()
+        .remove(crate::llm::OAT_INTERACTION_SCOPE_HEADER)
+        .and_then(|value| value.to_str().ok().map(str::to_string));
+    (req, scope)
+}
+
+fn observe_streaming_response(
+    response: StreamingResponse,
+    interaction_scope: Option<String>,
+) -> StreamingResponse {
+    let Some(scope) = interaction_scope else {
+        return response;
+    };
+    let Some(observer) = crate::llm::responses_search_observer_for_scope(&scope) else {
+        return response;
+    };
+
+    let (parts, body) = response.into_parts();
+    let body = body.map(move |chunk| {
+        if let Ok(ref bytes) = chunk {
+            observer.observe_chunk(bytes);
+        }
+        chunk
+    });
+    Response::from_parts(parts, Box::pin(body))
 }
 
 fn normalize_codex_request_body(body: &Bytes) -> Option<Bytes> {

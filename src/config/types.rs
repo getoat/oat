@@ -363,6 +363,8 @@ pub struct ToolConfig {
     pub search_include_patterns: Vec<String>,
     #[serde(default = "tool_policy::default_tool_output_max_tokens")]
     pub max_output_tokens: usize,
+    #[serde(default)]
+    pub web_search: ToolWebSearchConfig,
 }
 
 impl Default for ToolConfig {
@@ -370,7 +372,36 @@ impl Default for ToolConfig {
         Self {
             search_include_patterns: Vec::new(),
             max_output_tokens: tool_policy::default_tool_output_max_tokens(),
+            web_search: ToolWebSearchConfig::default(),
         }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct ToolWebSearchConfig {
+    #[serde(default = "default_web_search_mode")]
+    pub mode: WebSearchMode,
+}
+
+impl Default for ToolWebSearchConfig {
+    fn default() -> Self {
+        Self {
+            mode: default_web_search_mode(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum WebSearchMode {
+    Disabled,
+    Cached,
+    Live,
+}
+
+impl Default for WebSearchMode {
+    fn default() -> Self {
+        default_web_search_mode()
     }
 }
 
@@ -530,6 +561,10 @@ impl<'de> Deserialize<'de> for ReasoningSetting {
 
 pub(super) fn default_show_thinking() -> bool {
     true
+}
+
+pub(super) fn default_web_search_mode() -> WebSearchMode {
+    WebSearchMode::Live
 }
 
 pub(super) fn default_command_history_limit() -> usize {

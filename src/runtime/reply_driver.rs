@@ -198,6 +198,8 @@ fn stream_event_label(event: &StreamEvent) -> &'static str {
         StreamEvent::Commentary(_) => "Commentary",
         StreamEvent::ReasoningDelta(_) => "ReasoningDelta",
         StreamEvent::ToolCall { .. } => "ToolCall",
+        StreamEvent::HostedToolStarted { .. } => "HostedToolStarted",
+        StreamEvent::HostedToolCompleted { .. } => "HostedToolCompleted",
         StreamEvent::ToolResult { .. } => "ToolResult",
         StreamEvent::TodoSnapshot(_) => "TodoSnapshot",
         StreamEvent::AskUserRequested { .. } => "AskUserRequested",

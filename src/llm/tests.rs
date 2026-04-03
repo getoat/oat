@@ -14,7 +14,8 @@ use super::{
     AskUserController, InteractionResolveResult, LlmService, ResumeOverride, ResumeRequest,
     WriteApprovalController,
     agent_builder::{
-        http_headers_for_model, mode_preamble, openai_base_url_for_model, reasoning_params,
+        RequestFeatures, http_headers_for_model, mode_preamble, openai_base_url_for_model,
+        reasoning_params, request_params,
     },
     compaction::{
         COMPACTION_SUMMARY_PREFIX, message_contains_tool_state, rebuild_compacted_history,
@@ -38,7 +39,7 @@ use crate::{
     config::{
         AppConfig, AzureConfig, CodexAuthMode, CodexConfig, KimiThinkingMode, MemoryConfig,
         ModelSelectionConfig, OpenRouterConfig, ReasoningEffort, ReasoningSetting, SafetyConfig,
-        SubagentConfig, ToolConfig, UiConfig,
+        SubagentConfig, ToolConfig, UiConfig, WebSearchMode,
     },
     features::planning::PlanningConfig,
 };
@@ -140,6 +141,60 @@ fn codex_reasoning_params_use_responses_shape() {
             "store": false
         })
     );
+}
+
+#[test]
+fn responses_models_add_live_hosted_web_search_when_enabled() {
+    let params = request_params(
+        "gpt-5.4-mini",
+        ReasoningSetting::Gpt(ReasoningEffort::Minimal),
+        RequestFeatures {
+            web_search: Some(WebSearchMode::Live),
+        },
+    );
+
+    assert_eq!(params["reasoning_effort"], "minimal");
+    assert_eq!(params["tools"][0]["type"], "web_search");
+    assert_eq!(params["tools"][0]["external_web_access"], true);
+}
+
+#[test]
+fn responses_models_add_cached_hosted_web_search_when_enabled() {
+    let params = request_params(
+        "gpt-5.4-mini",
+        ReasoningSetting::Gpt(ReasoningEffort::Minimal),
+        RequestFeatures {
+            web_search: Some(WebSearchMode::Cached),
+        },
+    );
+
+    assert_eq!(params["reasoning_effort"], "minimal");
+    assert_eq!(params["tools"][0]["type"], "web_search");
+    assert_eq!(params["tools"][0]["external_web_access"], false);
+}
+
+#[test]
+fn request_params_skip_hosted_search_when_feature_disabled() {
+    let params = request_params(
+        "gpt-5.4-mini",
+        ReasoningSetting::Gpt(ReasoningEffort::Minimal),
+        RequestFeatures::default(),
+    );
+
+    assert!(params.get("tools").is_none());
+}
+
+#[test]
+fn request_params_skip_hosted_search_for_non_responses_models() {
+    let params = request_params(
+        "gpt-5-mini",
+        ReasoningSetting::Default,
+        RequestFeatures {
+            web_search: Some(WebSearchMode::Live),
+        },
+    );
+
+    assert!(params.get("tools").is_none());
 }
 
 #[test]

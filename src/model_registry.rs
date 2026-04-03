@@ -55,6 +55,12 @@ pub enum ModelProvider {
     OpenRouter,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelApiFamily {
+    Completions,
+    Responses,
+}
+
 impl ModelProvider {
     pub fn display_name(self) -> &'static str {
         match self {
@@ -83,12 +89,14 @@ pub struct LongContextPricing {
 pub struct ModelInfo {
     pub name: &'static str,
     pub provider: ModelProvider,
+    pub api_family: ModelApiFamily,
     pub context_length: usize,
     pub context_length_display: Option<&'static str>,
     pub compaction_trigger_percent_used: u8,
     pub pricing: ModelPricing,
     pub long_context_pricing: Option<LongContextPricing>,
     pub supported_reasoning_settings: &'static [ReasoningSetting],
+    pub supports_search: bool,
 }
 
 impl ModelInfo {
@@ -177,6 +185,7 @@ const BASE_MODELS: [ModelInfo; 18] = [
     ModelInfo {
         name: "gpt-5.4",
         provider: ModelProvider::AzureOpenAi,
+        api_family: ModelApiFamily::Responses,
         context_length: 272_000,
         context_length_display: None,
         compaction_trigger_percent_used: 90,
@@ -187,10 +196,12 @@ const BASE_MODELS: [ModelInfo; 18] = [
         },
         long_context_pricing: None,
         supported_reasoning_settings: &GPT_5_4_REASONING_SETTINGS,
+        supports_search: true,
     },
     ModelInfo {
         name: "gpt-5.4-mini",
         provider: ModelProvider::AzureOpenAi,
+        api_family: ModelApiFamily::Responses,
         context_length: 272_000,
         context_length_display: None,
         compaction_trigger_percent_used: 90,
@@ -201,10 +212,12 @@ const BASE_MODELS: [ModelInfo; 18] = [
         },
         long_context_pricing: None,
         supported_reasoning_settings: &GPT_5_4_REASONING_SETTINGS,
+        supports_search: true,
     },
     ModelInfo {
         name: "gpt-5.4-nano",
         provider: ModelProvider::AzureOpenAi,
+        api_family: ModelApiFamily::Responses,
         context_length: 272_000,
         context_length_display: None,
         compaction_trigger_percent_used: 90,
@@ -215,10 +228,12 @@ const BASE_MODELS: [ModelInfo; 18] = [
         },
         long_context_pricing: None,
         supported_reasoning_settings: &GPT_5_4_REASONING_SETTINGS,
+        supports_search: true,
     },
     ModelInfo {
         name: "gpt-5.2",
         provider: ModelProvider::AzureOpenAi,
+        api_family: ModelApiFamily::Responses,
         context_length: 272_000,
         context_length_display: None,
         compaction_trigger_percent_used: 90,
@@ -229,10 +244,12 @@ const BASE_MODELS: [ModelInfo; 18] = [
         },
         long_context_pricing: None,
         supported_reasoning_settings: &GPT_5_2_REASONING_SETTINGS,
+        supports_search: true,
     },
     ModelInfo {
         name: "gpt-5.3-codex",
         provider: ModelProvider::AzureOpenAi,
+        api_family: ModelApiFamily::Responses,
         context_length: 272_000,
         context_length_display: None,
         compaction_trigger_percent_used: 90,
@@ -243,10 +260,12 @@ const BASE_MODELS: [ModelInfo; 18] = [
         },
         long_context_pricing: None,
         supported_reasoning_settings: &GPT_5_CODEX_REASONING_SETTINGS,
+        supports_search: true,
     },
     ModelInfo {
         name: "kimi-k2.5",
         provider: ModelProvider::AzureOpenAi,
+        api_family: ModelApiFamily::Completions,
         context_length: 262_144,
         context_length_display: Some("256K"),
         compaction_trigger_percent_used: 90,
@@ -257,10 +276,12 @@ const BASE_MODELS: [ModelInfo; 18] = [
         },
         long_context_pricing: None,
         supported_reasoning_settings: &KIMI_K2_5_REASONING_SETTINGS,
+        supports_search: false,
     },
     ModelInfo {
         name: "zai-org/GLM-5-TEE",
         provider: ModelProvider::ChutesAi,
+        api_family: ModelApiFamily::Completions,
         context_length: 200_000,
         context_length_display: Some("200K"),
         compaction_trigger_percent_used: 90,
@@ -271,10 +292,12 @@ const BASE_MODELS: [ModelInfo; 18] = [
         },
         long_context_pricing: None,
         supported_reasoning_settings: &DEFAULT_REASONING_SETTINGS,
+        supports_search: false,
     },
     ModelInfo {
         name: "MiniMaxAI/MiniMax-M2.5-TEE",
         provider: ModelProvider::ChutesAi,
+        api_family: ModelApiFamily::Completions,
         context_length: 200_000,
         context_length_display: Some("200K"),
         compaction_trigger_percent_used: 90,
@@ -285,10 +308,12 @@ const BASE_MODELS: [ModelInfo; 18] = [
         },
         long_context_pricing: None,
         supported_reasoning_settings: &DEFAULT_REASONING_SETTINGS,
+        supports_search: false,
     },
     ModelInfo {
         name: "openai/gpt-5.4",
         provider: ModelProvider::OpenRouter,
+        api_family: ModelApiFamily::Completions,
         context_length: 272_000,
         context_length_display: None,
         compaction_trigger_percent_used: 90,
@@ -299,10 +324,12 @@ const BASE_MODELS: [ModelInfo; 18] = [
         },
         long_context_pricing: None,
         supported_reasoning_settings: &OPENROUTER_REASONING_SETTINGS,
+        supports_search: false,
     },
     ModelInfo {
         name: "openai/gpt-5.4-mini",
         provider: ModelProvider::OpenRouter,
+        api_family: ModelApiFamily::Completions,
         context_length: 272_000,
         context_length_display: None,
         compaction_trigger_percent_used: 90,
@@ -313,10 +340,12 @@ const BASE_MODELS: [ModelInfo; 18] = [
         },
         long_context_pricing: None,
         supported_reasoning_settings: &OPENROUTER_REASONING_SETTINGS,
+        supports_search: false,
     },
     ModelInfo {
         name: "openai/gpt-5.4-nano",
         provider: ModelProvider::OpenRouter,
+        api_family: ModelApiFamily::Completions,
         context_length: 272_000,
         context_length_display: None,
         compaction_trigger_percent_used: 90,
@@ -327,10 +356,12 @@ const BASE_MODELS: [ModelInfo; 18] = [
         },
         long_context_pricing: None,
         supported_reasoning_settings: &OPENROUTER_REASONING_SETTINGS,
+        supports_search: false,
     },
     ModelInfo {
         name: "openai/gpt-5.2",
         provider: ModelProvider::OpenRouter,
+        api_family: ModelApiFamily::Completions,
         context_length: 400_000,
         context_length_display: Some("400K"),
         compaction_trigger_percent_used: 90,
@@ -341,10 +372,12 @@ const BASE_MODELS: [ModelInfo; 18] = [
         },
         long_context_pricing: None,
         supported_reasoning_settings: &GPT_5_2_REASONING_SETTINGS,
+        supports_search: false,
     },
     ModelInfo {
         name: "openai/gpt-5.3-codex",
         provider: ModelProvider::OpenRouter,
+        api_family: ModelApiFamily::Completions,
         context_length: 400_000,
         context_length_display: Some("400K"),
         compaction_trigger_percent_used: 90,
@@ -355,10 +388,12 @@ const BASE_MODELS: [ModelInfo; 18] = [
         },
         long_context_pricing: None,
         supported_reasoning_settings: &GPT_5_CODEX_REASONING_SETTINGS,
+        supports_search: false,
     },
     ModelInfo {
         name: "minimax/minimax-m2.7",
         provider: ModelProvider::OpenRouter,
+        api_family: ModelApiFamily::Completions,
         context_length: 204_800,
         context_length_display: Some("204K"),
         compaction_trigger_percent_used: 90,
@@ -369,10 +404,12 @@ const BASE_MODELS: [ModelInfo; 18] = [
         },
         long_context_pricing: None,
         supported_reasoning_settings: &OPENROUTER_REASONING_SETTINGS,
+        supports_search: false,
     },
     ModelInfo {
         name: "xiaomi/mimo-v2-omni",
         provider: ModelProvider::OpenRouter,
+        api_family: ModelApiFamily::Completions,
         context_length: 262_144,
         context_length_display: Some("256K"),
         compaction_trigger_percent_used: 90,
@@ -383,10 +420,12 @@ const BASE_MODELS: [ModelInfo; 18] = [
         },
         long_context_pricing: None,
         supported_reasoning_settings: &OPENROUTER_REASONING_SETTINGS,
+        supports_search: false,
     },
     ModelInfo {
         name: "xiaomi/mimo-v2-pro",
         provider: ModelProvider::OpenRouter,
+        api_family: ModelApiFamily::Completions,
         context_length: 1_048_576,
         context_length_display: Some("1.05M"),
         compaction_trigger_percent_used: 90,
@@ -397,10 +436,12 @@ const BASE_MODELS: [ModelInfo; 18] = [
         },
         long_context_pricing: None,
         supported_reasoning_settings: &OPENROUTER_REASONING_SETTINGS,
+        supports_search: false,
     },
     ModelInfo {
         name: "xiaomi/mimo-v2-flash",
         provider: ModelProvider::OpenRouter,
+        api_family: ModelApiFamily::Completions,
         context_length: 262_144,
         context_length_display: Some("256K"),
         compaction_trigger_percent_used: 90,
@@ -411,10 +452,12 @@ const BASE_MODELS: [ModelInfo; 18] = [
         },
         long_context_pricing: None,
         supported_reasoning_settings: &OPENROUTER_REASONING_SETTINGS,
+        supports_search: false,
     },
     ModelInfo {
         name: "qwen/qwen3.6-plus-preview:free",
         provider: ModelProvider::OpenRouter,
+        api_family: ModelApiFamily::Completions,
         context_length: 1_000_000,
         context_length_display: Some("1M"),
         compaction_trigger_percent_used: 90,
@@ -425,6 +468,7 @@ const BASE_MODELS: [ModelInfo; 18] = [
         },
         long_context_pricing: None,
         supported_reasoning_settings: &OPENROUTER_REASONING_SETTINGS,
+        supports_search: false,
     },
 ];
 
@@ -485,6 +529,7 @@ fn bundled_codex_model(
     ModelInfo {
         name,
         provider: ModelProvider::Codex,
+        api_family: ModelApiFamily::Responses,
         context_length: 272_000,
         context_length_display: None,
         compaction_trigger_percent_used: 90,
@@ -503,6 +548,7 @@ fn bundled_codex_model(
         },
         long_context_pricing: None,
         supported_reasoning_settings,
+        supports_search: true,
     }
 }
 
@@ -517,6 +563,8 @@ fn dynamic_codex_model(name: &str) -> ModelInfo {
         let mut model = *template;
         model.name = leaked_name;
         model.provider = ModelProvider::Codex;
+        model.api_family = ModelApiFamily::Responses;
+        model.supports_search = true;
         return model;
     }
 
@@ -559,12 +607,14 @@ fn dynamic_codex_model(name: &str) -> ModelInfo {
     ModelInfo {
         name: leaked_name,
         provider: ModelProvider::Codex,
+        api_family: ModelApiFamily::Responses,
         context_length,
         context_length_display,
         compaction_trigger_percent_used: 90,
         pricing,
         long_context_pricing: None,
         supported_reasoning_settings,
+        supports_search: true,
     }
 }
 
@@ -598,6 +648,14 @@ fn generic_codex_model(name: &str) -> Option<&'static ModelInfo> {
 
 pub fn reasoning_settings_for_model(name: &str) -> Option<&'static [ReasoningSetting]> {
     find_model(name).map(|model| model.supported_reasoning_settings)
+}
+
+pub fn uses_responses_api(name: &str) -> bool {
+    find_model(name).is_some_and(|model| model.api_family == ModelApiFamily::Responses)
+}
+
+pub fn supports_search(name: &str) -> bool {
+    find_model(name).is_some_and(|model| model.supports_search)
 }
 
 pub fn parse_reasoning_setting_for_model(
@@ -768,9 +826,11 @@ mod tests {
         let model = ModelInfo {
             name: "synthetic-tiered-model",
             provider: ModelProvider::AzureOpenAi,
+            api_family: ModelApiFamily::Completions,
             context_length: 272_000,
             context_length_display: None,
             compaction_trigger_percent_used: 95,
+            supports_search: false,
             pricing: ModelPricing {
                 input_per_million_tokens: 1.0,
                 cache_read_per_million_tokens: 0.1,
@@ -902,9 +962,11 @@ mod tests {
         let model = ModelInfo {
             name: "synthetic-late-model",
             provider: ModelProvider::AzureOpenAi,
+            api_family: ModelApiFamily::Completions,
             context_length: 100,
             context_length_display: None,
             compaction_trigger_percent_used: 99,
+            supports_search: false,
             pricing: ModelPricing {
                 input_per_million_tokens: 1.0,
                 cache_read_per_million_tokens: 0.1,

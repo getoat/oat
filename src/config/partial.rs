@@ -10,8 +10,9 @@ use crate::{
 use super::types::{
     AppConfig, AzureConfig, ChutesConfig, CodexConfig, MemoryConfig, MemoryExtractionConfig,
     MemoryRetrievalConfig, MemoryRetrievalModeConfig, ModelSelectionConfig, OpenRouterConfig,
-    RawReasoningSetting, SafetyConfig, SubagentConfig, ToolConfig, UiConfig, default_api_version,
-    default_command_history_limit, default_max_concurrent_subagents, default_show_thinking,
+    RawReasoningSetting, SafetyConfig, SubagentConfig, ToolConfig, ToolWebSearchConfig, UiConfig,
+    WebSearchMode, default_api_version, default_command_history_limit,
+    default_max_concurrent_subagents, default_show_thinking, default_web_search_mode,
 };
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -692,6 +693,7 @@ impl PartialMemoryExtractionConfig {
 struct PartialToolConfig {
     search_include_patterns: Option<Vec<String>>,
     max_output_tokens: Option<usize>,
+    web_search: Option<PartialToolWebSearchConfig>,
 }
 
 impl PartialToolConfig {
@@ -702,6 +704,11 @@ impl PartialToolConfig {
         if other.max_output_tokens.is_some() {
             self.max_output_tokens = other.max_output_tokens;
         }
+        if let Some(web_search) = other.web_search {
+            self.web_search
+                .get_or_insert_with(PartialToolWebSearchConfig::default)
+                .merge(web_search);
+        }
     }
 
     fn finalize(self) -> ToolConfig {
@@ -710,7 +717,42 @@ impl PartialToolConfig {
             max_output_tokens: self
                 .max_output_tokens
                 .unwrap_or_else(tool_policy::default_tool_output_max_tokens),
+            web_search: self.web_search.unwrap_or_default().finalize(),
         }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct PartialToolWebSearchConfig {
+    mode: Option<WebSearchMode>,
+    enabled: Option<bool>,
+}
+
+impl PartialToolWebSearchConfig {
+    fn merge(&mut self, other: Self) {
+        if other.mode.is_some() {
+            self.mode = other.mode;
+        }
+        if other.enabled.is_some() {
+            self.enabled = other.enabled;
+        }
+    }
+
+    fn finalize(self) -> ToolWebSearchConfig {
+        ToolWebSearchConfig {
+            mode: self
+                .mode
+                .or_else(|| self.enabled.map(legacy_web_search_mode))
+                .unwrap_or_else(default_web_search_mode),
+        }
+    }
+}
+
+fn legacy_web_search_mode(enabled: bool) -> WebSearchMode {
+    if enabled {
+        WebSearchMode::Live
+    } else {
+        WebSearchMode::Disabled
     }
 }
 

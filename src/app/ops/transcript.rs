@@ -1,9 +1,9 @@
 use crate::app::session::pending_stream_text_is_visible;
 use crate::{
     app::{
-        ActivityDisplayState, AppState, BackgroundTerminalStatusEntry, ChatMessage, MessageStyle,
-        Speaker, SubagentStatusEntry, SubagentStatusKind, ToolCall, ToolResultEntry,
-        TranscriptEntry,
+        ActivityDisplayState, AppState, BackgroundTerminalStatusEntry, ChatMessage, HostedToolKind,
+        HostedToolStatusEntry, MessageStyle, Speaker, SubagentStatusEntry, SubagentStatusKind,
+        ToolCall, ToolResultEntry, TranscriptEntry,
     },
     todo::TodoSnapshot,
     tools::mutation_preview,
@@ -115,6 +115,42 @@ pub(crate) fn push_todo_snapshot(state: &mut AppState, snapshot: TodoSnapshot) {
         .session
         .entries
         .push(TranscriptEntry::TodoSnapshot(snapshot));
+    bump_transcript_revision(state);
+}
+
+pub(crate) fn upsert_hosted_tool_status(
+    state: &mut AppState,
+    id: String,
+    kind: HostedToolKind,
+    display_state: ActivityDisplayState,
+    detail: String,
+) {
+    if let Some(pending) = state.session.pending_reply.as_mut() {
+        pending.reset_active_stream_segment();
+        pending.has_visible_content = true;
+    }
+
+    if let Some(TranscriptEntry::HostedToolStatus(entry)) =
+        state.session.entries.iter_mut().find(
+            |entry| matches!(entry, TranscriptEntry::HostedToolStatus(status) if status.id == id),
+        )
+    {
+        entry.kind = kind;
+        entry.state = display_state;
+        entry.detail = detail;
+        bump_transcript_revision(state);
+        return;
+    }
+
+    state
+        .session
+        .entries
+        .push(TranscriptEntry::HostedToolStatus(HostedToolStatusEntry {
+            id,
+            kind,
+            state: display_state,
+            detail,
+        }));
     bump_transcript_revision(state);
 }
 

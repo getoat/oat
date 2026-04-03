@@ -8,13 +8,14 @@ use ratatui::{
 
 use crate::app::session::ProposedPlanEntry;
 use crate::app::{
-    App, BackgroundTerminalStatusEntry, ChatMessage, MessageStyle, SubagentStatusEntry, ToolCall,
-    ToolResultEntry, TranscriptEntry, query,
+    App, BackgroundTerminalStatusEntry, ChatMessage, HostedToolStatusEntry, MessageStyle,
+    SubagentStatusEntry, ToolCall, ToolResultEntry, TranscriptEntry, query,
 };
 use crate::todo::TodoSnapshot;
 
 use super::{
     background_terminal_activity::push_background_terminal_status_lines,
+    hosted_tool_activity::push_hosted_tool_status_lines,
     markdown::{push_message_lines, push_pending_lines, rendered_line_text},
     subagent_activity::push_subagent_status_lines,
     todo_activity::push_todo_snapshot_lines,
@@ -40,6 +41,7 @@ enum VisibleEntry<'a> {
     ProposedPlan(&'a ProposedPlanEntry),
     ToolCall(&'a ToolCall),
     ToolResult(&'a ToolResultEntry),
+    HostedToolStatus(&'a HostedToolStatusEntry),
     TodoSnapshot(&'a TodoSnapshot),
     SubagentStatus(&'a SubagentStatusEntry),
     BackgroundTerminalStatus(&'a BackgroundTerminalStatusEntry),
@@ -51,6 +53,7 @@ impl VisibleEntry<'_> {
             self,
             Self::ToolCall(_)
                 | Self::ToolResult(_)
+                | Self::HostedToolStatus(_)
                 | Self::SubagentStatus(_)
                 | Self::BackgroundTerminalStatus(_)
         )
@@ -338,6 +341,9 @@ fn visible_entries(app: &App) -> Vec<VisibleEntry<'_>> {
             TranscriptEntry::ToolCall(tool_call) => Some(VisibleEntry::ToolCall(tool_call)),
             TranscriptEntry::ToolResult(tool_result) => query::show_tool_output(app.state())
                 .then_some(VisibleEntry::ToolResult(tool_result)),
+            TranscriptEntry::HostedToolStatus(status) => {
+                Some(VisibleEntry::HostedToolStatus(status))
+            }
             TranscriptEntry::TodoSnapshot(snapshot) => Some(VisibleEntry::TodoSnapshot(snapshot)),
             TranscriptEntry::SubagentStatus(status) => Some(VisibleEntry::SubagentStatus(status)),
             TranscriptEntry::BackgroundTerminalStatus(status) => {
@@ -379,6 +385,9 @@ fn push_visible_entry_lines(
         }
         VisibleEntry::ToolCall(tool_call) => push_tool_call_lines(lines, tool_call, width),
         VisibleEntry::ToolResult(tool_result) => push_tool_result_lines(lines, tool_result, width),
+        VisibleEntry::HostedToolStatus(status) => {
+            push_hosted_tool_status_lines(lines, status, width)
+        }
         VisibleEntry::TodoSnapshot(snapshot) => {
             push_todo_snapshot_lines(lines, snapshot, width, accent)
         }
@@ -416,6 +425,9 @@ fn push_tool_activity_run_lines(
             VisibleEntry::ToolCall(tool_call) => push_tool_call_lines(lines, tool_call, width),
             VisibleEntry::ToolResult(tool_result) => {
                 push_tool_result_lines(lines, tool_result, width)
+            }
+            VisibleEntry::HostedToolStatus(status) => {
+                push_hosted_tool_status_lines(lines, status, width)
             }
             VisibleEntry::TodoSnapshot(_) => {
                 unreachable!("todo snapshots are rendered outside tool activity runs")

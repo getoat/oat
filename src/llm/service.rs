@@ -13,13 +13,13 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::{
     agent::AgentContext,
     app::{
-        AccessMode, PendingReplyReplaySeed, SessionHistoryMessage, ShellApprovalDecision,
-        SideChannelEvent, TurnEndReason, WriteApprovalDecision,
+        AccessMode, HostedToolKind, PendingReplyReplaySeed, SessionHistoryMessage,
+        ShellApprovalDecision, SideChannelEvent, TurnEndReason, WriteApprovalDecision,
     },
     ask_user::AskUserResponse,
     background_terminals::BackgroundTerminalManager,
     completion_request::CompletionRequestSnapshot,
-    config::{AppConfig, ReasoningSetting},
+    config::{AppConfig, ReasoningSetting, WebSearchMode},
     debug_log::log_debug,
     memory::MemoryService,
     model_registry,
@@ -30,11 +30,12 @@ use crate::{
 };
 
 use super::{
-    CodexResponsesClient, CompletionCapture, EventCallback, HistoryCompactionResult,
-    InteractionResolveResult, PromptRunResult, ResumeOverride, StreamEvent,
+    CompletionCapture, EventCallback, HistoryCompactionResult, InteractionResolveResult,
+    PromptRunResult, ResponsesClient, ResponsesHostedToolEvent, ResponsesSearchObserverGuard,
+    ResumeOverride, StreamEvent,
     agent_builder::{
-        build_agent, http_headers_for_model, mode_preamble, openai_base_url_for_model,
-        run_plain_prompt_with_hook,
+        RequestFeatures, build_agent, http_headers_for_model, mode_preamble,
+        openai_base_url_for_model, run_plain_prompt_with_hook,
     },
     compaction::{
         COMPACTION_NOTICE, COMPACTION_PROMPT, compaction_model_for_pre_turn,
@@ -62,33 +63,41 @@ static NEXT_INTERACTION_SCOPE_ID: AtomicU64 = AtomicU64::new(1);
 #[derive(Clone)]
 enum AgentVariant {
     Completions(super::OpenAiCompletionsAgent),
-    Responses(super::OpenAiResponsesAgent),
+    Responses(super::ResponsesAgent),
 }
 
 #[derive(Clone)]
 enum ClientVariant {
     Completions(openai::CompletionsClient),
-    Responses(CodexResponsesClient),
+    Responses(ResponsesClient),
 }
 
-fn is_codex_model(model_name: &str) -> bool {
-    matches!(
-        model_registry::find_model(model_name).map(|model| model.provider),
-        Some(model_registry::ModelProvider::Codex)
-    )
+fn uses_responses_api(model_name: &str) -> bool {
+    model_registry::uses_responses_api(model_name)
 }
 
-fn codex_http_client() -> crate::codex::CodexHttpClient {
-    crate::codex::CodexHttpClient::new(rig::http_client::ReqwestClient::new())
+fn responses_http_client() -> crate::codex::ResponsesHttpClient {
+    crate::codex::ResponsesHttpClient::new(rig::http_client::ReqwestClient::new())
 }
 
-fn build_responses_client(config: &AppConfig, model_name: &str) -> Result<CodexResponsesClient> {
+fn build_responses_client(
+    config: &AppConfig,
+    model_name: &str,
+    interaction_scope: Option<&str>,
+) -> Result<ResponsesClient> {
     let provider_config = config.provider_config_for_model(model_name)?;
+    let mut headers = http_headers_for_model(config, model_name)?;
+    if let Some(scope) = interaction_scope {
+        headers.insert(
+            super::OAT_INTERACTION_SCOPE_HEADER,
+            rig::http_client::HeaderValue::from_str(scope)?,
+        );
+    }
     openai::Client::builder()
-        .http_client(codex_http_client())
+        .http_client(responses_http_client())
         .api_key(provider_config.auth_token().unwrap_or_default())
         .base_url(openai_base_url_for_model(config, model_name)?)
-        .http_headers(http_headers_for_model(config, model_name)?)
+        .http_headers(headers)
         .build()
         .context("failed to build OpenAI Responses client")
 }
@@ -111,18 +120,34 @@ fn build_client_and_agent(
     model_name: &str,
     preamble: &str,
     reasoning: ReasoningSetting,
+    interactive_features: RequestFeatures,
+    interaction_scope: &str,
     tool_context: ToolContext,
 ) -> Result<(ClientVariant, AgentVariant)> {
-    if is_codex_model(model_name) {
-        let client = build_responses_client(config, model_name)?;
-        let agent = build_agent(&client, model_name, preamble, reasoning, Some(tool_context));
+    if uses_responses_api(model_name) {
+        let client = build_responses_client(config, model_name, Some(interaction_scope))?;
+        let agent = build_agent(
+            &client,
+            model_name,
+            preamble,
+            reasoning,
+            interactive_features,
+            Some(tool_context),
+        );
         Ok((
             ClientVariant::Responses(client),
             AgentVariant::Responses(agent),
         ))
     } else {
         let client = build_completions_client(config, model_name)?;
-        let agent = build_agent(&client, model_name, preamble, reasoning, Some(tool_context));
+        let agent = build_agent(
+            &client,
+            model_name,
+            preamble,
+            reasoning,
+            RequestFeatures::default(),
+            Some(tool_context),
+        );
         Ok((
             ClientVariant::Completions(client),
             AgentVariant::Completions(agent),
@@ -132,9 +157,9 @@ fn build_client_and_agent(
 
 fn build_safety_client(config: &AppConfig) -> Result<super::safety::SafetyClient> {
     let model_name = &config.safety.model_name;
-    if is_codex_model(model_name) {
+    if uses_responses_api(model_name) {
         Ok(super::safety::SafetyClient::Responses(
-            build_responses_client(config, model_name)
+            build_responses_client(config, model_name, None)
                 .context("failed to build safety OpenAI Responses client")?,
         ))
     } else {
@@ -145,12 +170,24 @@ fn build_safety_client(config: &AppConfig) -> Result<super::safety::SafetyClient
     }
 }
 
+fn interactive_request_features(config: &AppConfig, model_name: &str) -> RequestFeatures {
+    RequestFeatures {
+        web_search: model_registry::supports_search(model_name)
+            .then_some(config.tools.web_search.mode)
+            .and_then(|mode| match mode {
+                WebSearchMode::Disabled => None,
+                WebSearchMode::Cached | WebSearchMode::Live => Some(mode),
+            }),
+    }
+}
+
 #[derive(Clone)]
 pub struct LlmService {
     agent: AgentVariant,
     client: ClientVariant,
     model_name: String,
     reasoning: ReasoningSetting,
+    interactive_features: RequestFeatures,
     pub(crate) access_mode: AccessMode,
     role: crate::agent::AgentRole,
     pub(crate) approvals: WriteApprovalController,
@@ -207,6 +244,12 @@ impl LlmService {
             .model_name_override
             .clone()
             .unwrap_or_else(|| config.model.model_name.clone());
+        let interaction_scope = next_interaction_scope_id();
+        let interactive_features = if context.role == crate::agent::AgentRole::Main {
+            interactive_request_features(config, &model_name)
+        } else {
+            RequestFeatures::default()
+        };
 
         let preamble = mode_preamble(&context);
         let tool_context = ToolContext {
@@ -227,6 +270,8 @@ impl LlmService {
             &model_name,
             &preamble,
             config.model.reasoning,
+            interactive_features,
+            &interaction_scope,
             tool_context,
         )?;
         let safety_client = build_safety_client(config)?;
@@ -237,6 +282,7 @@ impl LlmService {
             client,
             model_name,
             reasoning: config.model.reasoning,
+            interactive_features,
             access_mode: context.access_mode,
             role: context.role,
             approvals,
@@ -246,7 +292,7 @@ impl LlmService {
             todo_available,
             tool_names,
             preamble,
-            interaction_scope: next_interaction_scope_id(),
+            interaction_scope,
             turn_interrupt_request: super::TurnInterruptController::default(),
         })
     }
@@ -332,6 +378,42 @@ impl LlmService {
         self.turn_interrupt_request.take()
     }
 
+    fn search_observer_guard(
+        &self,
+        reply_id: u64,
+        emit: EventCallback,
+    ) -> Option<ResponsesSearchObserverGuard> {
+        if self.interactive_features.web_search.is_none()
+            || !matches!(self.client, ClientVariant::Responses(_))
+        {
+            return None;
+        }
+
+        let scope = self.interaction_scope.clone();
+        Some(ResponsesSearchObserverGuard::register(
+            scope,
+            Arc::new(move |event| {
+                let event = match event {
+                    ResponsesHostedToolEvent::WebSearchStarted { id, detail } => {
+                        StreamEvent::HostedToolStarted {
+                            id,
+                            kind: HostedToolKind::WebSearch,
+                            detail,
+                        }
+                    }
+                    ResponsesHostedToolEvent::WebSearchCompleted { id, detail } => {
+                        StreamEvent::HostedToolCompleted {
+                            id,
+                            kind: HostedToolKind::WebSearch,
+                            detail,
+                        }
+                    }
+                };
+                let _ = emit(reply_id, event);
+            }),
+        ))
+    }
+
     pub async fn stream_prompt(
         &self,
         reply_id: u64,
@@ -351,6 +433,7 @@ impl LlmService {
                 .send(RuntimeEvent::MainReply { reply_id, event })
                 .is_ok()
         });
+        let _search_observer = self.search_observer_guard(reply_id, emit.clone());
         if let Err(error) = self
             .run_prompt(
                 reply_id,
@@ -408,6 +491,7 @@ impl LlmService {
                     &self.model_name,
                     &self.preamble,
                     self.reasoning,
+                    RequestFeatures::default(),
                     None,
                 );
                 run_plain_prompt_with_hook(
@@ -424,6 +508,7 @@ impl LlmService {
                     &self.model_name,
                     &self.preamble,
                     self.reasoning,
+                    RequestFeatures::default(),
                     None,
                 );
                 run_plain_prompt_with_hook(
@@ -458,6 +543,7 @@ impl LlmService {
                 .send(RuntimeEvent::MainReply { reply_id, event })
                 .is_ok()
         });
+        let _search_observer = self.search_observer_guard(reply_id, emit.clone());
         if let Err(error) = self
             .run_prompt_from_state(
                 reply_id,
@@ -540,6 +626,7 @@ impl LlmService {
                     &self.model_name,
                     &self.preamble,
                     self.reasoning,
+                    RequestFeatures::default(),
                     None,
                 );
                 run_prompt_step(
@@ -553,6 +640,7 @@ impl LlmService {
                     &self.model_name,
                     &self.preamble,
                     self.reasoning,
+                    RequestFeatures::default(),
                     None,
                 );
                 run_prompt_step(
@@ -752,8 +840,14 @@ impl LlmService {
 
             let summary = match &self.client {
                 ClientVariant::Completions(client) => {
-                    let compact_agent =
-                        build_agent(client, model_name, &self.preamble, self.reasoning, None);
+                    let compact_agent = build_agent(
+                        client,
+                        model_name,
+                        &self.preamble,
+                        self.reasoning,
+                        RequestFeatures::default(),
+                        None,
+                    );
                     run_plain_prompt_with_hook(
                         &compact_agent,
                         COMPACTION_PROMPT.to_string(),
@@ -763,8 +857,14 @@ impl LlmService {
                     .await
                 }
                 ClientVariant::Responses(client) => {
-                    let compact_agent =
-                        build_agent(client, model_name, &self.preamble, self.reasoning, None);
+                    let compact_agent = build_agent(
+                        client,
+                        model_name,
+                        &self.preamble,
+                        self.reasoning,
+                        RequestFeatures::default(),
+                        None,
+                    );
                     run_plain_prompt_with_hook(
                         &compact_agent,
                         COMPACTION_PROMPT.to_string(),
@@ -805,13 +905,27 @@ pub(crate) async fn run_internal_plain_prompt(
     prompt: String,
     stats_hook: StatsHook,
 ) -> Result<String> {
-    if is_codex_model(model_name) {
-        let client = build_responses_client(config, model_name)?;
-        let agent = build_agent(&client, model_name, preamble, reasoning, None);
+    if uses_responses_api(model_name) {
+        let client = build_responses_client(config, model_name, None)?;
+        let agent = build_agent(
+            &client,
+            model_name,
+            preamble,
+            reasoning,
+            RequestFeatures::default(),
+            None,
+        );
         run_plain_prompt_with_hook(&agent, prompt, Vec::new(), stats_hook).await
     } else {
         let client = build_completions_client(config, model_name)?;
-        let agent = build_agent(&client, model_name, preamble, reasoning, None);
+        let agent = build_agent(
+            &client,
+            model_name,
+            preamble,
+            reasoning,
+            RequestFeatures::default(),
+            None,
+        );
         run_plain_prompt_with_hook(&agent, prompt, Vec::new(), stats_hook).await
     }
 }

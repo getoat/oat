@@ -264,6 +264,8 @@ fn runtime_event_label(event: &RuntimeEvent) -> &'static str {
             crate::app::StreamEvent::Commentary(_) => "MainReply:Commentary",
             crate::app::StreamEvent::ReasoningDelta(_) => "MainReply:ReasoningDelta",
             crate::app::StreamEvent::ToolCall { .. } => "MainReply:ToolCall",
+            crate::app::StreamEvent::HostedToolStarted { .. } => "MainReply:HostedToolStarted",
+            crate::app::StreamEvent::HostedToolCompleted { .. } => "MainReply:HostedToolCompleted",
             crate::app::StreamEvent::ToolResult { .. } => "MainReply:ToolResult",
             crate::app::StreamEvent::TodoSnapshot(_) => "MainReply:TodoSnapshot",
             crate::app::StreamEvent::AskUserRequested { .. } => "MainReply:AskUserRequested",

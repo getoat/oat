@@ -102,6 +102,9 @@ fn parses_expected_config_shape() {
             [tools]
             search_include_patterns = [".research/**"]
             max_output_tokens = 2048
+
+            [tools.web_search]
+            mode = "cached"
             "#,
     )
     .expect("config parses");
@@ -161,6 +164,7 @@ fn parses_expected_config_shape() {
     assert!(!config.memory.extraction.run_in_background);
     assert_eq!(config.tools.search_include_patterns, vec![".research/**"]);
     assert_eq!(config.tools.max_output_tokens, 2048);
+    assert_eq!(config.tools.web_search.mode, WebSearchMode::Cached);
 }
 
 #[test]
@@ -218,6 +222,7 @@ fn ui_config_defaults_tool_output_to_hidden() {
     assert!(config.tools.search_include_patterns.is_empty());
     assert_eq!(config.model.model_name, "gpt-5.4-mini");
     assert_eq!(config.safety.model_name, "gpt-5.4-mini");
+    assert_eq!(config.tools.web_search.mode, WebSearchMode::Live);
     assert_eq!(
         config.safety.reasoning,
         ReasoningSetting::Gpt(ReasoningEffort::Medium)
@@ -226,6 +231,64 @@ fn ui_config_defaults_tool_output_to_hidden() {
         config.tools.max_output_tokens,
         tool_policy::default_tool_output_max_tokens()
     );
+}
+
+#[test]
+fn legacy_web_search_enabled_false_maps_to_disabled() {
+    let config: AppConfig = toml::from_str(
+        r#"
+            [azure]
+            resource_name = "demo-resource"
+            api_key = "secret"
+            model_name = "gpt-5.4-mini"
+            reasoning = "medium"
+
+            [tools.web_search]
+            enabled = false
+            "#,
+    )
+    .expect("config parses");
+
+    assert_eq!(config.tools.web_search.mode, WebSearchMode::Disabled);
+}
+
+#[test]
+fn legacy_web_search_enabled_true_maps_to_live() {
+    let config: AppConfig = toml::from_str(
+        r#"
+            [azure]
+            resource_name = "demo-resource"
+            api_key = "secret"
+            model_name = "gpt-5.4-mini"
+            reasoning = "medium"
+
+            [tools.web_search]
+            enabled = true
+            "#,
+    )
+    .expect("config parses");
+
+    assert_eq!(config.tools.web_search.mode, WebSearchMode::Live);
+}
+
+#[test]
+fn explicit_web_search_mode_takes_precedence_over_legacy_enabled() {
+    let config: AppConfig = toml::from_str(
+        r#"
+            [azure]
+            resource_name = "demo-resource"
+            api_key = "secret"
+            model_name = "gpt-5.4-mini"
+            reasoning = "medium"
+
+            [tools.web_search]
+            mode = "cached"
+            enabled = false
+            "#,
+    )
+    .expect("config parses");
+
+    assert_eq!(config.tools.web_search.mode, WebSearchMode::Cached);
 }
 
 #[test]

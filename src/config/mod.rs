@@ -22,7 +22,7 @@ use paths::{default_config_update_path, default_home_config_path};
 use types::default_api_version;
 pub(crate) use types::{
     AppConfig, CodexAuthMode, CodexConfig, KimiThinkingMode, MemoryConfig, MemoryExtractionConfig,
-    RawReasoningSetting, ReasoningEffort, ReasoningSetting,
+    RawReasoningSetting, ReasoningEffort, ReasoningSetting, WebSearchMode,
 };
 #[cfg(test)]
 pub(crate) use types::{

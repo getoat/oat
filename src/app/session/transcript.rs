@@ -37,6 +37,27 @@ pub struct ToolResultEntry {
     pub output: String,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub enum HostedToolKind {
+    WebSearch,
+}
+
+impl HostedToolKind {
+    pub fn status_label(self) -> &'static str {
+        match self {
+            Self::WebSearch => "Searching the web",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct HostedToolStatusEntry {
+    pub id: String,
+    pub kind: HostedToolKind,
+    pub state: ActivityDisplayState,
+    pub detail: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ProposedPlanEntry {
     pub markdown: String,
@@ -82,6 +103,7 @@ pub enum TranscriptEntry {
     ProposedPlan(ProposedPlanEntry),
     ToolCall(ToolCall),
     ToolResult(ToolResultEntry),
+    HostedToolStatus(HostedToolStatusEntry),
     TodoSnapshot(TodoSnapshot),
     SubagentStatus(SubagentStatusEntry),
     BackgroundTerminalStatus(BackgroundTerminalStatusEntry),
@@ -149,6 +171,7 @@ pub enum PendingReplyActivity {
     Starting,
     Responding,
     Thinking,
+    SearchingWeb,
     WaitingForTool,
     WaitingForApproval,
     WaitingForInput,
@@ -160,6 +183,7 @@ impl PendingReplyActivity {
             Self::Starting => "Starting",
             Self::Responding => "Responding",
             Self::Thinking => "thinking",
+            Self::SearchingWeb => "Searching the web",
             Self::WaitingForTool => "Waiting for tool",
             Self::WaitingForApproval => "Waiting for approval",
             Self::WaitingForInput => "Waiting for input",
