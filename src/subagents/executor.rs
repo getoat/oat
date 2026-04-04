@@ -72,6 +72,7 @@ impl SubagentManager {
             None,
             Some(self.clone()),
             None,
+            request.web.clone(),
         )
         .map_err(|error| SubagentExecutionFailure {
             raw_error: error.to_string(),

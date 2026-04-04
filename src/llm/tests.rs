@@ -42,6 +42,7 @@ use crate::{
         SubagentConfig, ToolConfig, UiConfig, WebSearchMode,
     },
     features::planning::PlanningConfig,
+    web::WebService,
 };
 
 fn sample_config() -> AppConfig {
@@ -72,6 +73,10 @@ fn sample_config() -> AppConfig {
         planning: PlanningConfig::default(),
         tools: ToolConfig::default(),
     }
+}
+
+fn test_web_service() -> WebService {
+    WebService::new(sample_config().tools.max_output_tokens).expect("web service")
 }
 
 #[test]
@@ -528,6 +533,10 @@ fn read_only_mode_preamble_uses_shared_prompt_and_read_only_suffix() {
     assert!(preamble.contains("You are oat: an opinionated agent thing."));
     assert!(preamble.contains("You are a provider-agnostic coding agent."));
     assert!(preamble.contains("You have three modes: read-only, write, and plan mode."));
+    assert!(preamble.contains(
+        "When you need to fetch or retrieve a web page, use the WebRun tool instead of hosted `web_search`."
+    ));
+    assert!(preamble.contains("Use `open` for a known URL"));
     assert!(
         preamble
             .contains("Intermediary updates are provided to the user via the `Commentary` tool.")
@@ -549,6 +558,7 @@ async fn read_write_mode_registers_mutation_tools() {
         None,
         None,
         None,
+        test_web_service(),
     )
     .expect("service builds");
 
@@ -601,6 +611,7 @@ async fn read_only_mode_omits_mutation_tools() {
         None,
         None,
         None,
+        test_web_service(),
     )
     .expect("service builds");
 
@@ -845,6 +856,7 @@ async fn write_mode_preamble_is_the_same_for_both_approval_modes() {
         None,
         None,
         None,
+        test_web_service(),
     )
     .expect("manual service builds")
     .preamble;
@@ -857,10 +869,15 @@ async fn write_mode_preamble_is_the_same_for_both_approval_modes() {
         None,
         None,
         None,
+        test_web_service(),
     )
     .expect("disabled service builds")
     .preamble;
 
+    assert!(manual.contains(
+        "When you need to fetch or retrieve a web page, use the WebRun tool instead of hosted `web_search`."
+    ));
+    assert!(manual.contains("Use `open` for a known URL"));
     assert_eq!(manual, disabled);
 }
 
@@ -875,6 +892,7 @@ async fn todo_tool_can_be_disabled_independently_of_ask_user() {
         None,
         None,
         None,
+        test_web_service(),
     )
     .expect("service builds");
 

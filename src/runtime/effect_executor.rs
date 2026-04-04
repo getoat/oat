@@ -25,6 +25,7 @@ use crate::{
     stats::StatsStore,
     subagents::SubagentManager,
     ui,
+    web::WebService,
 };
 
 use super::side_channel_task_manager::SideChannelTaskManager;
@@ -54,6 +55,7 @@ fn rebuild_main_llm(
     subagents: &SubagentManager,
     terminals: &BackgroundTerminalManager,
     memory: &MemoryService,
+    web: WebService,
 ) -> Result<LlmService> {
     let _guard = runtime.enter();
     LlmService::from_config_with_controllers(
@@ -66,6 +68,7 @@ fn rebuild_main_llm(
         Some(memory.clone()),
         Some(subagents.clone()),
         Some(terminals.clone()),
+        web,
     )
 }
 
@@ -77,6 +80,7 @@ fn build_fresh_main_llm(
     subagents: &SubagentManager,
     terminals: &BackgroundTerminalManager,
     memory: &MemoryService,
+    web: WebService,
 ) -> Result<LlmService> {
     let _guard = runtime.enter();
     LlmService::from_config(
@@ -88,6 +92,7 @@ fn build_fresh_main_llm(
         Some(memory.clone()),
         Some(subagents.clone()),
         Some(terminals.clone()),
+        web,
     )
 }
 
@@ -99,6 +104,7 @@ fn sync_main_llm_access_mode(
     subagents: &SubagentManager,
     terminals: &BackgroundTerminalManager,
     memory: &MemoryService,
+    web: WebService,
 ) -> Result<bool> {
     if llm.access_mode == access_mode {
         return Ok(false);
@@ -112,6 +118,7 @@ fn sync_main_llm_access_mode(
         subagents,
         terminals,
         memory,
+        web,
     )?;
     Ok(true)
 }
@@ -374,6 +381,7 @@ impl EffectExecutor<'_> {
                     self.subagents,
                     self.terminals,
                     self.memory,
+                    self.llm.web_service(),
                 )?;
                 *self.llm = rebuilt;
                 self.session_store
@@ -536,6 +544,7 @@ impl EffectExecutor<'_> {
                 let todo_available = self.llm.todo_available();
                 let write_approvals = self.llm.approvals();
                 let shell_approvals = self.llm.shell_approvals();
+                let web = self.llm.web_service();
                 let stream_tx = self.stream_tx.clone();
                 let stats = self.stats.clone();
                 let task = self.runtime.spawn(async move {
@@ -558,6 +567,7 @@ impl EffectExecutor<'_> {
                     let synth_stats = stats.clone();
                     let workflow_write_approvals = write_approvals.clone();
                     let workflow_shell_approvals = shell_approvals.clone();
+                    let planning_web = web.clone();
                     let synthesize = Arc::new(move |prompt, history, history_model_name| {
                         let config = synth_config.clone();
                         let stream_tx = synth_stream_tx.clone();
@@ -565,6 +575,7 @@ impl EffectExecutor<'_> {
                         let ask_user = ask_user.clone();
                         let write_approvals = write_approvals.clone();
                         let shell_approvals = shell_approvals.clone();
+                        let web = planning_web.clone();
                         Box::pin(async move {
                             let llm = LlmService::from_config_with_controllers(
                                 &config,
@@ -576,6 +587,7 @@ impl EffectExecutor<'_> {
                                 None,
                                 None,
                                 None,
+                                web,
                             )
                             .map_err(|error| {
                                 format!("Failed to start planning synthesis: {error}")
@@ -611,6 +623,7 @@ impl EffectExecutor<'_> {
                         subagents,
                         workflow_write_approvals,
                         workflow_shell_approvals,
+                        web,
                         on_finalization_started,
                         on_failure,
                         synthesize,
@@ -738,10 +751,12 @@ impl EffectExecutor<'_> {
             self.subagents,
             self.terminals,
             self.memory,
+            self.llm.web_service(),
         )
     }
 
     fn sync_llm_access_mode(&mut self, access_mode: app::AccessMode) -> Result<bool> {
+        let web = self.llm.web_service();
         sync_main_llm_access_mode(
             self.runtime,
             self.config,
@@ -750,6 +765,7 @@ impl EffectExecutor<'_> {
             self.subagents,
             self.terminals,
             self.memory,
+            web,
         )
     }
 
@@ -801,6 +817,7 @@ impl EffectExecutor<'_> {
             self.subagents,
             self.terminals,
             self.memory,
+            self.llm.web_service(),
         )?;
         Ok((updated_config, rebuilt))
     }
@@ -981,6 +998,7 @@ mod tests {
         memory::MemoryService,
         stats::StatsStore,
         subagents::SubagentManager,
+        web::WebService,
     };
 
     fn sample_config() -> AppConfig {
@@ -1020,6 +1038,7 @@ mod tests {
         let memory =
             MemoryService::new(config.memory.clone(), std::env::current_dir().expect("cwd"))
                 .expect("memory");
+        let web = WebService::new(config.tools.max_output_tokens).expect("web");
         let _guard = runtime.enter();
         let mut llm = LlmService::from_config(
             &config,
@@ -1030,6 +1049,7 @@ mod tests {
             Some(memory.clone()),
             Some(subagents.clone()),
             Some(terminals.clone()),
+            web.clone(),
         )
         .expect("service builds");
         drop(_guard);
@@ -1042,6 +1062,7 @@ mod tests {
             &subagents,
             &terminals,
             &memory,
+            web,
         )
         .expect("runtime mode sync succeeds");
 

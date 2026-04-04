@@ -16,6 +16,7 @@ mod run_shell_script;
 mod shell_command;
 mod subagent;
 mod todo;
+mod web_run;
 mod write_file;
 
 pub(crate) use apply_patches::{ApplyPatchesArgs, ApplyPatchesTool, TextPatch};
@@ -54,4 +55,5 @@ pub(crate) use subagent::{
     WAIT_SUBAGENT_TOOL_NAME, WaitSubagentTool,
 };
 pub(crate) use todo::TodoTool;
+pub(crate) use web_run::WebRunTool;
 pub(crate) use write_file::{WriteFileArgs, WriteFileTool};

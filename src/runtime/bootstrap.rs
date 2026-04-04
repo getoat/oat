@@ -15,6 +15,7 @@ use crate::{
     session_store::SessionStore,
     stats::StatsStore,
     subagents::{SubagentManager, SubagentUiEvent},
+    web::WebService,
 };
 
 use super::{
@@ -81,6 +82,7 @@ pub(crate) fn bootstrap_tui(config: AppConfig, startup: StartupOptions) -> Resul
         config.memory.clone(),
         app.state().session.workspace_root.clone(),
     )?;
+    let web = WebService::new(config.tools.max_output_tokens)?;
     let llm = {
         let _guard = runtime.enter();
         LlmService::from_config(
@@ -92,6 +94,7 @@ pub(crate) fn bootstrap_tui(config: AppConfig, startup: StartupOptions) -> Resul
             Some(memory.clone()),
             Some(subagents.clone()),
             Some(terminals.clone()),
+            web,
         )?
     };
     let (stream_tx, stream_rx) = mpsc::unbounded_channel();
@@ -134,6 +137,7 @@ pub(crate) fn bootstrap_headless(
     let runtime = Runtime::new()?;
     let stats = StatsStore::new();
     let memory = MemoryService::new(config.memory.clone(), std::env::current_dir()?)?;
+    let web = WebService::new(config.tools.max_output_tokens)?;
     let llm = {
         let _guard = runtime.enter();
         LlmService::from_config(
@@ -145,6 +149,7 @@ pub(crate) fn bootstrap_headless(
             Some(memory.clone()),
             None,
             None,
+            web,
         )?
     };
     let (stream_tx, stream_rx) = mpsc::unbounded_channel();

@@ -39,13 +39,42 @@ pub struct ToolResultEntry {
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub enum HostedToolKind {
-    WebSearch,
+    Search,
+    OpenPage,
+    FindInPage,
 }
 
 impl HostedToolKind {
     pub fn status_label(self) -> &'static str {
         match self {
-            Self::WebSearch => "Searching the web",
+            Self::Search => "Web search",
+            Self::OpenPage => "Open page",
+            Self::FindInPage => "Find in page",
+        }
+    }
+
+    pub fn transcript_prefix(self) -> &'static str {
+        match self {
+            Self::Search => "● search",
+            Self::OpenPage => "● open",
+            Self::FindInPage => "● find",
+        }
+    }
+
+    pub fn action_label(self, state: ActivityDisplayState) -> &'static str {
+        match (self, state) {
+            (Self::Search, ActivityDisplayState::Running) => "Searching the web",
+            (Self::Search, ActivityDisplayState::Completed) => "Searched the web",
+            (Self::Search, ActivityDisplayState::Failed) => "Web search failed",
+            (Self::Search, ActivityDisplayState::Cancelled) => "Web search cancelled",
+            (Self::OpenPage, ActivityDisplayState::Running) => "Opening page",
+            (Self::OpenPage, ActivityDisplayState::Completed) => "Opened page",
+            (Self::OpenPage, ActivityDisplayState::Failed) => "Page open failed",
+            (Self::OpenPage, ActivityDisplayState::Cancelled) => "Page open cancelled",
+            (Self::FindInPage, ActivityDisplayState::Running) => "Finding in page",
+            (Self::FindInPage, ActivityDisplayState::Completed) => "Found in page",
+            (Self::FindInPage, ActivityDisplayState::Failed) => "Find in page failed",
+            (Self::FindInPage, ActivityDisplayState::Cancelled) => "Find in page cancelled",
         }
     }
 }

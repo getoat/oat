@@ -27,12 +27,13 @@ use crate::{
     stats::StatsHook,
     subagents::SubagentManager,
     tools::{ToolContext, tool_names_for_context},
+    web::WebService,
 };
 
 use super::{
     CompletionCapture, EventCallback, HistoryCompactionResult, InteractionResolveResult,
-    PromptRunResult, ResponsesClient, ResponsesHostedToolEvent, ResponsesSearchObserverGuard,
-    ResumeOverride, StreamEvent,
+    PromptRunResult, ResponsesClient, ResponsesHostedToolEvent, ResponsesHostedToolKind,
+    ResponsesSearchObserverGuard, ResumeOverride, StreamEvent,
     agent_builder::{
         RequestFeatures, build_agent, http_headers_for_model, mode_preamble,
         openai_base_url_for_model, run_plain_prompt_with_hook,
@@ -195,6 +196,7 @@ pub struct LlmService {
     pub(crate) safety: SafetyClassifier,
     pub(crate) ask_user: Option<AskUserController>,
     todo_available: bool,
+    web: WebService,
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) tool_names: Vec<String>,
     #[cfg_attr(not(test), allow(dead_code))]
@@ -213,6 +215,7 @@ impl LlmService {
         memory: Option<MemoryService>,
         subagents: Option<SubagentManager>,
         terminals: Option<BackgroundTerminalManager>,
+        web: WebService,
     ) -> Result<Self> {
         let shell_approvals = ShellApprovalController::new(approvals.mode());
         Self::from_config_with_controllers(
@@ -225,6 +228,7 @@ impl LlmService {
             memory,
             subagents,
             terminals,
+            web,
         )
     }
 
@@ -238,6 +242,7 @@ impl LlmService {
         memory: Option<MemoryService>,
         subagents: Option<SubagentManager>,
         terminals: Option<BackgroundTerminalManager>,
+        web: WebService,
     ) -> Result<Self> {
         let workspace_root = env::current_dir().context("failed to determine workspace root")?;
         let model_name = context
@@ -263,6 +268,7 @@ impl LlmService {
             todo_available,
             subagents,
             terminals,
+            web: web.clone(),
         };
         let tool_names = tool_names_for_context(&tool_context);
         let (client, agent) = build_client_and_agent(
@@ -290,6 +296,7 @@ impl LlmService {
             safety,
             ask_user,
             todo_available,
+            web,
             tool_names,
             preamble,
             interaction_scope,
@@ -315,6 +322,10 @@ impl LlmService {
 
     pub fn todo_available(&self) -> bool {
         self.todo_available
+    }
+
+    pub(crate) fn web_service(&self) -> WebService {
+        self.web.clone()
     }
 
     pub fn resolve_write_approval(
@@ -394,17 +405,25 @@ impl LlmService {
             scope,
             Arc::new(move |event| {
                 let event = match event {
-                    ResponsesHostedToolEvent::WebSearchStarted { id, detail } => {
+                    ResponsesHostedToolEvent::WebSearchStarted { id, kind, detail } => {
                         StreamEvent::HostedToolStarted {
                             id,
-                            kind: HostedToolKind::WebSearch,
+                            kind: match kind {
+                                ResponsesHostedToolKind::Search => HostedToolKind::Search,
+                                ResponsesHostedToolKind::OpenPage => HostedToolKind::OpenPage,
+                                ResponsesHostedToolKind::FindInPage => HostedToolKind::FindInPage,
+                            },
                             detail,
                         }
                     }
-                    ResponsesHostedToolEvent::WebSearchCompleted { id, detail } => {
+                    ResponsesHostedToolEvent::WebSearchCompleted { id, kind, detail } => {
                         StreamEvent::HostedToolCompleted {
                             id,
-                            kind: HostedToolKind::WebSearch,
+                            kind: match kind {
+                                ResponsesHostedToolKind::Search => HostedToolKind::Search,
+                                ResponsesHostedToolKind::OpenPage => HostedToolKind::OpenPage,
+                                ResponsesHostedToolKind::FindInPage => HostedToolKind::FindInPage,
+                            },
                             detail,
                         }
                     }

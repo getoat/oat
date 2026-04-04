@@ -22,6 +22,7 @@ mod token_counting;
 mod tool_policy;
 mod tools;
 mod ui;
+mod web;
 
 use std::{
     error::Error,

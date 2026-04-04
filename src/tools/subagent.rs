@@ -10,6 +10,7 @@ use crate::{
     llm::{ShellApprovalController, WriteApprovalController},
     model_registry,
     subagents::{SubagentManager, SubagentSpawnRequest, estimate_prompt_tokens},
+    web::WebService,
 };
 
 use super::common::ToolExecError;
@@ -25,6 +26,7 @@ pub struct SpawnSubagentTool {
     main_access_mode: AccessMode,
     write_approvals: WriteApprovalController,
     shell_approvals: ShellApprovalController,
+    web: WebService,
 }
 
 #[derive(Clone)]
@@ -77,6 +79,7 @@ impl SpawnSubagentTool {
         main_access_mode: AccessMode,
         write_approvals: WriteApprovalController,
         shell_approvals: ShellApprovalController,
+        web: WebService,
     ) -> Self {
         Self {
             manager,
@@ -84,6 +87,7 @@ impl SpawnSubagentTool {
             main_access_mode,
             write_approvals,
             shell_approvals,
+            web,
         }
     }
 }
@@ -156,6 +160,7 @@ impl Tool for SpawnSubagentTool {
                 config: self.config.clone(),
                 write_approvals: self.write_approvals.clone(),
                 shell_approvals: self.shell_approvals.clone(),
+                web: self.web.clone(),
             })
             .await
             .map_err(|error| ToolExecError::new(error.to_string()))?;
@@ -252,6 +257,7 @@ mod tests {
         },
         features::planning::PlanningConfig,
         stats::StatsStore,
+        web::WebService,
     };
 
     fn sample_config() -> AppConfig {
@@ -285,6 +291,10 @@ mod tests {
         SubagentManager::new(4, tx, StatsStore::new())
     }
 
+    fn web() -> WebService {
+        WebService::new(sample_config().tools.max_output_tokens).expect("web")
+    }
+
     #[tokio::test]
     async fn spawn_tool_rejects_write_mode_when_main_agent_is_read_only() {
         let tool = SpawnSubagentTool::new(
@@ -293,6 +303,7 @@ mod tests {
             AccessMode::ReadOnly,
             WriteApprovalController::default(),
             ShellApprovalController::default(),
+            web(),
         );
 
         let error = tool

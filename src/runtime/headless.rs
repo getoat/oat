@@ -220,7 +220,7 @@ mod tests {
                         match maybe_event {
                             Some(RuntimeEvent::MainReply { reply_id: 1, event }) => match event {
                                 StreamEvent::HostedToolStarted {
-                                    kind: HostedToolKind::WebSearch,
+                                    kind: HostedToolKind::Search,
                                     detail,
                                     ..
                                 } => {
@@ -228,7 +228,7 @@ mod tests {
                                     let _ = detail;
                                 }
                                 StreamEvent::HostedToolCompleted {
-                                    kind: HostedToolKind::WebSearch,
+                                    kind: HostedToolKind::Search,
                                     ..
                                 } => {
                                     saw_search_complete = true;

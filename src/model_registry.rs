@@ -455,7 +455,7 @@ const BASE_MODELS: [ModelInfo; 18] = [
         supports_search: false,
     },
     ModelInfo {
-        name: "qwen/qwen3.6-plus-preview:free",
+        name: "qwen/qwen3.6-plus:free",
         provider: ModelProvider::OpenRouter,
         api_family: ModelApiFamily::Completions,
         context_length: 1_000_000,
@@ -714,7 +714,7 @@ mod tests {
         assert!(find_model("xiaomi/mimo-v2-omni").is_some());
         assert!(find_model("xiaomi/mimo-v2-pro").is_some());
         assert!(find_model("xiaomi/mimo-v2-flash").is_some());
-        assert!(find_model("qwen/qwen3.6-plus-preview:free").is_some());
+        assert!(find_model("qwen/qwen3.6-plus:free").is_some());
     }
 
     #[test]
@@ -872,7 +872,7 @@ mod tests {
         let mimo_omni = find_model("xiaomi/mimo-v2-omni").expect("registry model");
         let mimo_pro = find_model("xiaomi/mimo-v2-pro").expect("registry model");
         let mimo_flash = find_model("xiaomi/mimo-v2-flash").expect("registry model");
-        let qwen_preview = find_model("qwen/qwen3.6-plus-preview:free").expect("registry model");
+        let qwen_preview = find_model("qwen/qwen3.6-plus:free").expect("registry model");
 
         assert_eq!(gpt_54.recommended_prompt_token_budget(), 104_000);
         assert_eq!(gpt_54_mini.recommended_prompt_token_budget(), 104_000);
@@ -916,7 +916,7 @@ mod tests {
         let mimo_omni = find_model("xiaomi/mimo-v2-omni").expect("registry model");
         let mimo_pro = find_model("xiaomi/mimo-v2-pro").expect("registry model");
         let mimo_flash = find_model("xiaomi/mimo-v2-flash").expect("registry model");
-        let qwen_preview = find_model("qwen/qwen3.6-plus-preview:free").expect("registry model");
+        let qwen_preview = find_model("qwen/qwen3.6-plus:free").expect("registry model");
 
         assert_eq!(gpt_54.provider, ModelProvider::OpenRouter);
         assert_eq!(gpt_54_mini.provider, ModelProvider::OpenRouter);

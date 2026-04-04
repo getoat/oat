@@ -1131,7 +1131,7 @@ mod tests {
             reply_id: 11,
             event: StreamEvent::HostedToolStarted {
                 id: "ws_1".into(),
-                kind: HostedToolKind::WebSearch,
+                kind: HostedToolKind::Search,
                 detail: "latest rust news".into(),
             },
         });
@@ -1156,7 +1156,7 @@ mod tests {
             reply_id: 11,
             event: StreamEvent::HostedToolCompleted {
                 id: "ws_1".into(),
-                kind: HostedToolKind::WebSearch,
+                kind: HostedToolKind::Search,
                 detail: "latest rust news".into(),
             },
         });

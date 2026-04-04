@@ -20,8 +20,8 @@ pub(crate) type ResponsesAgent = rig::agent::Agent<
 pub(crate) use crate::app::StreamEvent;
 pub(crate) use hooks::{AskUserController, ShellApprovalController, WriteApprovalController};
 pub(crate) use responses_search::{
-    OAT_INTERACTION_SCOPE_HEADER, ResponsesHostedToolEvent, ResponsesSearchObserverGuard,
-    observer_for_scope as responses_search_observer_for_scope,
+    OAT_INTERACTION_SCOPE_HEADER, ResponsesHostedToolEvent, ResponsesHostedToolKind,
+    ResponsesSearchObserverGuard, observer_for_scope as responses_search_observer_for_scope,
 };
 pub(crate) use service::{LlmService, run_internal_plain_prompt};
 pub(crate) use types::{

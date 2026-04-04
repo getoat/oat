@@ -12,6 +12,7 @@ use crate::{
     memory::MemoryService,
     subagents::SubagentManager,
     tool_policy::{SearchPathPolicy, ToolOutputPolicy},
+    web::WebService,
 };
 
 use super::{
@@ -22,7 +23,7 @@ use super::{
     ListTool, ReadFileTool, ReadFilesTool, RunShellScriptTool, SEARCH_MEMORIES_TOOL_NAME,
     SPAWN_SUBAGENT_TOOL_NAME, START_BACKGROUND_TERMINAL_TOOL_NAME, SearchMemoriesTool,
     SpawnSubagentTool, StartBackgroundTerminalTool, TodoTool, WAIT_SUBAGENT_TOOL_NAME,
-    WaitSubagentTool, WriteFileTool, output_limit::OutputLimitedTool,
+    WaitSubagentTool, WebRunTool, WriteFileTool, output_limit::OutputLimitedTool,
 };
 
 #[derive(Clone)]
@@ -33,6 +34,7 @@ pub struct ToolContext {
     pub write_approvals: WriteApprovalController,
     pub shell_approvals: ShellApprovalController,
     pub memory: Option<MemoryService>,
+    pub web: WebService,
     pub ask_user_available: bool,
     pub todo_available: bool,
     pub subagents: Option<SubagentManager>,
@@ -68,7 +70,7 @@ enum ToolRoleScope {
     MainWithTerminalManager,
 }
 
-const TOOL_DESCRIPTORS: [ToolDescriptor; 20] = [
+const TOOL_DESCRIPTORS: [ToolDescriptor; 21] = [
     ToolDescriptor::read_only(AskUserTool::NAME, ToolRoleScope::MainOnly, |_context| {
         Box::new(AskUserTool)
     }),
@@ -91,6 +93,9 @@ const TOOL_DESCRIPTORS: [ToolDescriptor; 20] = [
     ToolDescriptor::read_only(GrepTool::NAME, ToolRoleScope::Any, |context| {
         let search_policy = context.search_policy();
         Box::new(GrepTool::new(context.root, search_policy))
+    }),
+    ToolDescriptor::read_only(WebRunTool::NAME, ToolRoleScope::Any, |context| {
+        Box::new(WebRunTool::new(context.web))
     }),
     ToolDescriptor::read_only(RunShellScriptTool::NAME, ToolRoleScope::Any, |context| {
         Box::new(RunShellScriptTool::new(context.root))
@@ -179,6 +184,7 @@ const TOOL_DESCRIPTORS: [ToolDescriptor; 20] = [
                 context.agent.access_mode,
                 context.write_approvals,
                 context.shell_approvals,
+                context.web,
             ))
         },
     ),
@@ -300,6 +306,7 @@ fn is_shell_tool(tool_name: &str) -> bool {
 mod tests {
     use super::*;
     use crate::background_terminals::BackgroundTerminalManager;
+    use crate::web::WebService;
 
     #[test]
     fn read_only_mode_exposes_only_read_tools() {
@@ -310,6 +317,7 @@ mod tests {
             write_approvals: WriteApprovalController::default(),
             shell_approvals: ShellApprovalController::default(),
             memory: None,
+            web: test_web_service(),
             ask_user_available: true,
             todo_available: true,
             subagents: Some(test_subagent_manager()),
@@ -326,6 +334,7 @@ mod tests {
                 "ReadFile",
                 "ReadFiles",
                 "Grep",
+                "WebRun",
                 "RunShellScript",
                 "StartBackgroundTerminal",
                 "ListBackgroundTerminals",
@@ -347,6 +356,7 @@ mod tests {
             write_approvals: WriteApprovalController::default(),
             shell_approvals: ShellApprovalController::default(),
             memory: None,
+            web: test_web_service(),
             ask_user_available: true,
             todo_available: true,
             subagents: Some(test_subagent_manager()),
@@ -357,6 +367,7 @@ mod tests {
         assert!(tool_names.contains(&"Commentary".to_string()));
         assert!(tool_names.contains(&"Todo".to_string()));
         assert!(tool_names.contains(&"RunShellScript".to_string()));
+        assert!(tool_names.contains(&"WebRun".to_string()));
         assert!(tool_names.contains(&"StartBackgroundTerminal".to_string()));
         assert!(tool_names.contains(&"ApplyPatches".to_string()));
         assert!(tool_names.contains(&"WriteFile".to_string()));
@@ -373,6 +384,7 @@ mod tests {
             write_approvals: WriteApprovalController::default(),
             shell_approvals: ShellApprovalController::default(),
             memory: None,
+            web: test_web_service(),
             ask_user_available: true,
             todo_available: true,
             subagents: Some(test_subagent_manager()),
@@ -399,6 +411,7 @@ mod tests {
             write_approvals: WriteApprovalController::default(),
             shell_approvals: ShellApprovalController::default(),
             memory: None,
+            web: test_web_service(),
             ask_user_available: true,
             todo_available: true,
             subagents: Some(test_subagent_manager()),
@@ -420,6 +433,7 @@ mod tests {
             write_approvals: WriteApprovalController::default(),
             shell_approvals: ShellApprovalController::default(),
             memory: None,
+            web: test_web_service(),
             ask_user_available: false,
             todo_available: false,
             subagents: None,
@@ -434,6 +448,7 @@ mod tests {
                 "ReadFile",
                 "ReadFiles",
                 "Grep",
+                "WebRun",
                 "RunShellScript"
             ]
         );
@@ -473,5 +488,9 @@ mod tests {
     fn test_terminal_manager() -> BackgroundTerminalManager {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         BackgroundTerminalManager::new(tx)
+    }
+
+    fn test_web_service() -> WebService {
+        WebService::new(sample_config().tools.max_output_tokens).expect("web service")
     }
 }

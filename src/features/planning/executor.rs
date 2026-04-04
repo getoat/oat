@@ -4,6 +4,7 @@ use crate::{
     config::AppConfig,
     llm::{ShellApprovalController, WriteApprovalController},
     subagents::{SubagentActivityKind, SubagentManager, SubagentSpawnRequest, SubagentStatus},
+    web::WebService,
 };
 
 use super::protocol::{PlanningJob, planner_prompt, planning_finalization_prompt, planning_jobs};
@@ -26,6 +27,7 @@ pub async fn run_planning_workflow(
     subagents: SubagentManager,
     write_approvals: WriteApprovalController,
     shell_approvals: ShellApprovalController,
+    web: WebService,
     on_finalization_started: PlanningFinalizationHandler,
     on_failure: PlanningFailureHandler,
     synthesize: PlanningSynthesizer,
@@ -46,6 +48,7 @@ pub async fn run_planning_workflow(
             batch,
             write_approvals.clone(),
             shell_approvals.clone(),
+            web.clone(),
             &mut failed_models,
         )
         .await;
@@ -83,6 +86,7 @@ async fn spawn_planning_batch(
     batch: &[PlanningJob],
     write_approvals: WriteApprovalController,
     shell_approvals: ShellApprovalController,
+    web: WebService,
     failed_models: &mut Vec<String>,
 ) -> Vec<(PlanningJob, String)> {
     let mut spawned = Vec::new();
@@ -95,6 +99,7 @@ async fn spawn_planning_batch(
             job.clone(),
             write_approvals.clone(),
             shell_approvals.clone(),
+            web.clone(),
         )
         .await
         {
@@ -113,6 +118,7 @@ async fn spawn_planning_subagent(
     job: PlanningJob,
     write_approvals: WriteApprovalController,
     shell_approvals: ShellApprovalController,
+    web: WebService,
 ) -> anyhow::Result<String> {
     let mut planner_config = config.clone();
     planner_config.model.model_name = job.model_name.clone();
@@ -128,6 +134,7 @@ async fn spawn_planning_subagent(
             config: planner_config,
             write_approvals,
             shell_approvals,
+            web,
         })
         .await?;
 

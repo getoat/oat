@@ -8,10 +8,25 @@ use serde_json::Value;
 
 pub(crate) const OAT_INTERACTION_SCOPE_HEADER: &str = "x-oat-interaction-scope";
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ResponsesHostedToolKind {
+    Search,
+    OpenPage,
+    FindInPage,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ResponsesHostedToolEvent {
-    WebSearchStarted { id: String, detail: String },
-    WebSearchCompleted { id: String, detail: String },
+    WebSearchStarted {
+        id: String,
+        kind: ResponsesHostedToolKind,
+        detail: String,
+    },
+    WebSearchCompleted {
+        id: String,
+        kind: ResponsesHostedToolKind,
+        detail: String,
+    },
 }
 
 type HostedToolEventSink = Arc<dyn Fn(ResponsesHostedToolEvent) + Send + Sync>;
@@ -98,7 +113,7 @@ impl ResponsesSearchObserver {
         let Ok(payload) = serde_json::from_str::<Value>(&data) else {
             return;
         };
-        let Some(kind) = payload.get("type").and_then(Value::as_str) else {
+        let Some(payload_kind) = payload.get("type").and_then(Value::as_str) else {
             return;
         };
         let Some(item) = payload.get("item").and_then(Value::as_object) else {
@@ -118,17 +133,31 @@ impl ResponsesSearchObserver {
             return;
         }
 
+        let kind = web_search_kind(item);
         let detail = web_search_detail(item);
-        let event = match kind {
+        let event = match payload_kind {
             "response.output_item.added" => {
-                ResponsesHostedToolEvent::WebSearchStarted { id, detail }
+                ResponsesHostedToolEvent::WebSearchStarted { id, kind, detail }
             }
             "response.output_item.done" => {
-                ResponsesHostedToolEvent::WebSearchCompleted { id, detail }
+                ResponsesHostedToolEvent::WebSearchCompleted { id, kind, detail }
             }
             _ => return,
         };
         (self.sink)(event);
+    }
+}
+
+fn web_search_kind(item: &serde_json::Map<String, Value>) -> ResponsesHostedToolKind {
+    let action_type = item
+        .get("action")
+        .and_then(Value::as_object)
+        .and_then(|action| action.get("type"))
+        .and_then(Value::as_str);
+    match action_type {
+        Some("open_page") => ResponsesHostedToolKind::OpenPage,
+        Some("find_in_page") => ResponsesHostedToolKind::FindInPage,
+        Some("search") | Some(_) | None => ResponsesHostedToolKind::Search,
     }
 }
 
@@ -225,10 +254,12 @@ mod tests {
             vec![
                 ResponsesHostedToolEvent::WebSearchStarted {
                     id: "ws_1".into(),
+                    kind: ResponsesHostedToolKind::Search,
                     detail: "latest rust news".into(),
                 },
                 ResponsesHostedToolEvent::WebSearchCompleted {
                     id: "ws_1".into(),
+                    kind: ResponsesHostedToolKind::Search,
                     detail: "latest rust news".into(),
                 },
             ]
@@ -255,7 +286,40 @@ mod tests {
             events,
             vec![ResponsesHostedToolEvent::WebSearchStarted {
                 id: "ws_1".into(),
+                kind: ResponsesHostedToolKind::Search,
                 detail: "one ...".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn captures_open_page_action_kind_and_detail() {
+        let events = capture_events(&[
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"ws_1\",\"type\":\"web_search_call\",\"action\":{\"type\":\"open_page\",\"url\":\"https://example.com\"}}}\n\n",
+        ]);
+
+        assert_eq!(
+            events,
+            vec![ResponsesHostedToolEvent::WebSearchCompleted {
+                id: "ws_1".into(),
+                kind: ResponsesHostedToolKind::OpenPage,
+                detail: "https://example.com".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn captures_find_in_page_action_kind_and_detail() {
+        let events = capture_events(&[
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"ws_1\",\"type\":\"web_search_call\",\"action\":{\"type\":\"find_in_page\",\"url\":\"https://example.com\",\"pattern\":\"rust\"}}}\n\n",
+        ]);
+
+        assert_eq!(
+            events,
+            vec![ResponsesHostedToolEvent::WebSearchCompleted {
+                id: "ws_1".into(),
+                kind: ResponsesHostedToolKind::FindInPage,
+                detail: "'rust' in https://example.com".into(),
             }]
         );
     }

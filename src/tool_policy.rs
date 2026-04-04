@@ -119,7 +119,7 @@ impl ToolOutputPolicy {
             concat!(
                 "[tool output truncated]\n",
                 "`{tool_name}` returned approximately {actual} tokens; only the first {limit} tokens are shown below.\n",
-                "Fetch the next chunk or narrow the request with a more specific path, pattern, offset, or line range.\n\n",
+                "Request the next chunk or narrow the request with a more specific path, pattern, offset, or line range.\n\n",
                 "{truncated_output}"
             ),
             tool_name = tool_name,
@@ -247,7 +247,7 @@ mod tests {
 
         assert!(truncated.contains("[tool output truncated]"));
         assert!(truncated.contains("`Grep` returned approximately"));
-        assert!(truncated.contains("Fetch the next chunk"));
+        assert!(truncated.contains("Request the next chunk"));
     }
 
     #[test]
