@@ -50,7 +50,10 @@ use super::{
     streaming::{PromptStepOutcome, run_prompt_step},
 };
 
-const MAX_TOOL_STEPS_PER_TURN: usize = 64;
+// rig-core's multi_turn API requires a usize bound and internally checks
+// `max_turns + 1`, so `usize::MAX` would overflow. Use the largest safe value
+// to avoid imposing an application-level turn cap.
+const UNBOUNDED_TOOL_STEPS_PER_TURN: usize = usize::MAX - 1;
 const SESSION_TITLE_PROMPT_PREFIX: &str = concat!(
     "Write a concise title for this session based on the user's first request.\n",
     "Respond with only the title.\n",
@@ -723,17 +726,7 @@ impl LlmService {
         resume: Option<ResumeOverrideController>,
         mut replay_seed: Option<PendingReplyReplaySeed>,
     ) -> Result<PromptRunResult> {
-        let mut steps = 0;
-
         loop {
-            steps += 1;
-            if steps > MAX_TOOL_STEPS_PER_TURN {
-                let message =
-                    format!("Request exceeded the turn step limit ({MAX_TOOL_STEPS_PER_TURN}).");
-                let _ = (emit)(reply_id, StreamEvent::Failed(message.clone()));
-                return Err(anyhow::anyhow!(message));
-            }
-
             let replay_seed = replay_seed.take();
             let outcome = match &self.agent {
                 AgentVariant::Completions(agent) => {
@@ -748,7 +741,7 @@ impl LlmService {
                         emit.clone(),
                         resume.clone(),
                         replay_seed.clone(),
-                        MAX_TOOL_STEPS_PER_TURN,
+                        UNBOUNDED_TOOL_STEPS_PER_TURN,
                     )
                     .await?
                 }
@@ -764,7 +757,7 @@ impl LlmService {
                         emit.clone(),
                         resume.clone(),
                         replay_seed,
-                        MAX_TOOL_STEPS_PER_TURN,
+                        UNBOUNDED_TOOL_STEPS_PER_TURN,
                     )
                     .await?
                 }
