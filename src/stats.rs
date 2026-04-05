@@ -466,7 +466,23 @@ fn unix_timestamp_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use futures_util::StreamExt;
+    use rig::{
+        agent::{AgentBuilder, MultiTurnStreamItem},
+        completion::{CompletionError, CompletionRequest, CompletionResponse},
+        streaming::{
+            RawStreamingChoice, RawStreamingToolCall, StreamingCompletionResponse, StreamingPrompt,
+        },
+    };
+    use serde::{Deserialize, Serialize};
 
     fn unique_temp_dir(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
@@ -724,6 +740,128 @@ mod tests {
         drop(mini_hook);
         drop(main_hook);
         drop(store);
+        fs::remove_dir_all(dir).expect("remove temp dir");
+    }
+
+    #[derive(Clone, Debug, Deserialize, Serialize)]
+    struct MockStreamingResponse {
+        usage: Usage,
+    }
+
+    impl MockStreamingResponse {
+        fn new(input_tokens: u64, output_tokens: u64) -> Self {
+            Self {
+                usage: Usage {
+                    input_tokens,
+                    cached_input_tokens: 0,
+                    output_tokens,
+                    total_tokens: input_tokens + output_tokens,
+                },
+            }
+        }
+    }
+
+    impl GetTokenUsage for MockStreamingResponse {
+        fn token_usage(&self) -> Option<Usage> {
+            Some(self.usage)
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct ToolThenFailureModel {
+        turn_counter: Arc<AtomicUsize>,
+    }
+
+    #[allow(refining_impl_trait)]
+    impl CompletionModel for ToolThenFailureModel {
+        type Response = ();
+        type StreamingResponse = MockStreamingResponse;
+        type Client = ();
+
+        fn make(_: &Self::Client, _: impl Into<String>) -> Self {
+            Self::default()
+        }
+
+        async fn completion(
+            &self,
+            _request: CompletionRequest,
+        ) -> std::result::Result<CompletionResponse<Self::Response>, CompletionError> {
+            Err(CompletionError::ProviderError(
+                "completion is unused in this streaming test".to_string(),
+            ))
+        }
+
+        async fn stream(
+            &self,
+            _request: CompletionRequest,
+        ) -> std::result::Result<
+            StreamingCompletionResponse<Self::StreamingResponse>,
+            CompletionError,
+        > {
+            let turn = self.turn_counter.fetch_add(1, Ordering::SeqCst);
+            let stream = async_stream::stream! {
+                if turn == 0 {
+                    yield Ok(RawStreamingChoice::ToolCall(
+                        RawStreamingToolCall::new(
+                            "tool_call_1".to_string(),
+                            "missing_tool".to_string(),
+                            serde_json::json!({"input": "value"}),
+                        )
+                        .with_call_id("call_1".to_string()),
+                    ));
+                    yield Ok(RawStreamingChoice::FinalResponse(MockStreamingResponse::new(12, 4)));
+                } else {
+                    yield Err(CompletionError::ProviderError("boom".to_string()));
+                }
+            };
+
+            Ok(StreamingCompletionResponse::stream(Box::pin(stream)))
+        }
+    }
+
+    #[tokio::test]
+    async fn completed_tool_only_steps_record_usage_before_later_failure() {
+        let dir = unique_temp_dir("tool-step-usage");
+        let store = StatsStore::with_stats_dir(Some(dir.clone()));
+        let hook = store.hook_for_model("gpt-5.4-mini");
+        let agent = AgentBuilder::new(ToolThenFailureModel::default()).build();
+
+        let mut stream = agent
+            .stream_prompt("do tool work")
+            .with_history(Vec::new())
+            .with_hook(hook)
+            .multi_turn(3)
+            .await;
+
+        let mut saw_tool_result = false;
+        let mut saw_failure = false;
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(MultiTurnStreamItem::StreamUserItem(_)) => {
+                    saw_tool_result = true;
+                }
+                Ok(MultiTurnStreamItem::FinalResponse(_)) => {
+                    panic!("stream should fail before the overall turn completes");
+                }
+                Err(error) if error.to_string().contains("boom") => {
+                    saw_failure = true;
+                    break;
+                }
+                Err(error) => panic!("unexpected stream error: {error:?}"),
+                Ok(_) => {}
+            }
+        }
+
+        assert!(saw_tool_result);
+        assert!(saw_failure);
+
+        let report = store.report().expect("load stats report");
+        assert_eq!(report.current.request_count, 2);
+        assert_eq!(report.current.tool_call_count, 1);
+        assert_eq!(report.current.input_tokens, 12);
+        assert_eq!(report.current.output_tokens, 4);
+        assert_eq!(report.current.estimated_cost_nanos_usd, 27_000);
+
         fs::remove_dir_all(dir).expect("remove temp dir");
     }
 }

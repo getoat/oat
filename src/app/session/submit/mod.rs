@@ -85,6 +85,8 @@ fn submit_normal_message_text(
     }
 
     let session_title_prompt = should_request_session_title(state).then(|| prompt.clone());
+    let history = state.session.session_history.to_vec();
+    let history_model_name = state.session.last_history_model_name.clone();
     if record_recall_history {
         ops::composer::record_submitted_input(state, &prompt);
     }
@@ -95,18 +97,18 @@ fn submit_normal_message_text(
     ops::session::set_pending_reply(state, reply_id, PendingReplyKind::Normal);
     ops::session::set_active_main_request_seed(
         state,
-        state.session.session_history.to_vec(),
+        history.clone(),
         prompt.clone(),
         prompt.clone(),
-        state.session.last_history_model_name.clone(),
+        history_model_name.clone(),
         state.session.entries.len(),
     );
 
     Some(Effect::PromptModel {
         reply_id,
         prompt,
-        history: state.session.session_history.to_vec(),
-        history_model_name: state.session.last_history_model_name.clone(),
+        history,
+        history_model_name,
         session_title_prompt,
     })
 }

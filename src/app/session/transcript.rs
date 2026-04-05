@@ -1,6 +1,15 @@
 use crate::{
     features::planning::pending_plain_text_is_visible, todo::TodoSnapshot, tools::MutationPreview,
 };
+use std::collections::VecDeque;
+
+use rig::{
+    OneOrMany,
+    completion::{
+        Message as RigMessage,
+        message::{AssistantContent, ToolResultContent, UserContent},
+    },
+};
 use serde::{Deserialize, Serialize};
 
 use super::{
@@ -151,6 +160,16 @@ pub struct PendingReply {
     pub reasoning_text: String,
     pub commentary_messages: Vec<String>,
     pub has_visible_content: bool,
+    canonical_turn_messages: Vec<RigMessage>,
+    pending_tool_calls: VecDeque<PendingToolCallLink>,
+    next_tool_call_sequence: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PendingToolCallLink {
+    id: String,
+    call_id: String,
+    name: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -234,6 +253,9 @@ impl PendingReply {
             reasoning_text: String::new(),
             commentary_messages: Vec::new(),
             has_visible_content: false,
+            canonical_turn_messages: Vec::new(),
+            pending_tool_calls: VecDeque::new(),
+            next_tool_call_sequence: 1,
         }
     }
 
@@ -242,6 +264,84 @@ impl PendingReply {
         self.text_entry_index = None;
         self.staged_reasoning_text.clear();
         self.staged_plain_text.clear();
+    }
+
+    pub fn initialize_canonical_turn(&mut self, visible_prompt: &str) {
+        self.canonical_turn_messages = vec![RigMessage::user(visible_prompt)];
+        self.pending_tool_calls.clear();
+        self.next_tool_call_sequence = 1;
+    }
+
+    pub fn canonical_turn_messages(&self) -> &[RigMessage] {
+        &self.canonical_turn_messages
+    }
+
+    pub fn append_canonical_assistant_text(&mut self, delta: &str) {
+        if delta.is_empty() {
+            return;
+        }
+
+        if let Some(RigMessage::Assistant { content, .. }) = self.canonical_turn_messages.last_mut()
+        {
+            let is_single_text = content.len() == 1;
+            if is_single_text && let AssistantContent::Text(text) = content.first_mut() {
+                text.text.push_str(delta);
+                return;
+            }
+        }
+
+        self.canonical_turn_messages
+            .push(RigMessage::assistant(delta));
+    }
+
+    pub fn push_canonical_tool_call(&mut self, name: &str, arguments: &str) {
+        let arguments = serde_json::from_str(arguments)
+            .unwrap_or_else(|_| serde_json::Value::String(arguments.to_string()));
+        let sequence = self.next_tool_call_sequence;
+        self.next_tool_call_sequence += 1;
+
+        let id = format!("oat_tool_call_{sequence}");
+        let call_id = format!("oat_call_{sequence}");
+        self.pending_tool_calls.push_back(PendingToolCallLink {
+            id: id.clone(),
+            call_id: call_id.clone(),
+            name: name.to_string(),
+        });
+        self.canonical_turn_messages.push(RigMessage::Assistant {
+            id: None,
+            content: OneOrMany::one(AssistantContent::tool_call_with_call_id(
+                id,
+                call_id,
+                name.to_string(),
+                arguments,
+            )),
+        });
+    }
+
+    pub fn push_canonical_tool_result(&mut self, name: &str, output: &str) {
+        let tool_call = self
+            .pending_tool_calls
+            .iter()
+            .position(|tool_call| tool_call.name == name)
+            .and_then(|index| self.pending_tool_calls.remove(index))
+            .or_else(|| self.pending_tool_calls.pop_front())
+            .unwrap_or_else(|| {
+                let sequence = self.next_tool_call_sequence;
+                self.next_tool_call_sequence += 1;
+                PendingToolCallLink {
+                    id: format!("oat_tool_call_{sequence}"),
+                    call_id: format!("oat_call_{sequence}"),
+                    name: name.to_string(),
+                }
+            });
+
+        self.canonical_turn_messages.push(RigMessage::User {
+            content: OneOrMany::one(UserContent::tool_result_with_call_id(
+                tool_call.id,
+                tool_call.call_id,
+                OneOrMany::one(ToolResultContent::text(output)),
+            )),
+        });
     }
 }
 

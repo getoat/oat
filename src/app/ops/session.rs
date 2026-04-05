@@ -6,6 +6,7 @@ use crate::{
     },
     debug_log::log_debug,
     features::planning::PlanningStage,
+    llm,
     todo::TodoSnapshot,
 };
 
@@ -116,6 +117,79 @@ pub(crate) fn set_active_main_request_seed(
         history_model_name,
         transcript_len_before,
     });
+    initialize_pending_reply_history(state);
+}
+
+pub(crate) fn initialize_pending_reply_history(state: &mut AppState) {
+    let Some(visible_prompt) = state
+        .session
+        .active_main_request_seed
+        .as_ref()
+        .map(|seed| seed.visible_prompt.clone())
+    else {
+        return;
+    };
+    let Some(pending) = state.session.pending_reply.as_mut() else {
+        return;
+    };
+    pending.initialize_canonical_turn(&visible_prompt);
+    sync_pending_reply_history(state);
+}
+
+pub(crate) fn append_pending_reply_history_text(state: &mut AppState, delta: &str) {
+    let Some(pending) = state.session.pending_reply.as_mut() else {
+        return;
+    };
+    pending.append_canonical_assistant_text(delta);
+    sync_pending_reply_history(state);
+}
+
+pub(crate) fn push_pending_reply_history_tool_call(
+    state: &mut AppState,
+    name: &str,
+    arguments: &str,
+) {
+    let Some(pending) = state.session.pending_reply.as_mut() else {
+        return;
+    };
+    pending.push_canonical_tool_call(name, arguments);
+    sync_pending_reply_history(state);
+}
+
+pub(crate) fn push_pending_reply_history_tool_result(
+    state: &mut AppState,
+    name: &str,
+    output: &str,
+) {
+    let Some(pending) = state.session.pending_reply.as_mut() else {
+        return;
+    };
+    pending.push_canonical_tool_result(name, output);
+    sync_pending_reply_history(state);
+}
+
+pub(crate) fn sync_pending_reply_history(state: &mut AppState) {
+    let Some(seed) = state.session.active_main_request_seed.as_ref() else {
+        return;
+    };
+    let Some(pending) = state.session.pending_reply.as_ref() else {
+        return;
+    };
+
+    match llm::history_from_rig(pending.canonical_turn_messages().to_vec()) {
+        Ok(mut turn_history) => {
+            let mut history = seed.history.clone();
+            history.append(&mut turn_history);
+            state.session.replace_session_history(history);
+            state.session.last_history_model_name = Some(state.session.model_name.clone());
+        }
+        Err(error) => {
+            log_debug(
+                "session",
+                format!("sync_pending_reply_history_failed error={error}"),
+            );
+        }
+    }
 }
 
 pub(crate) fn clear_active_main_request_seed(state: &mut AppState) {

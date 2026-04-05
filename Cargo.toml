@@ -30,3 +30,6 @@ toml = "1.0.7"
 tui-markdown = { version = "0.3.7", default-features = false, features = ["highlight-code"] }
 urlencoding = "2.1.3"
 uuid = { version = "1.18.1", features = ["v7"] }
+
+[patch.crates-io]
+rig-core = { path = "vendor/rig-core" }

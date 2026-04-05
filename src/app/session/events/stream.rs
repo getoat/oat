@@ -23,6 +23,7 @@ pub(crate) fn on_stream_event(
         StreamEvent::TextDelta(delta) => {
             ops::session::set_pending_reply_activity(state, PendingReplyActivity::Responding);
             ops::transcript::append_pending_stream_message(state, &delta, MessageStyle::Plain);
+            ops::session::append_pending_reply_history_text(state, &delta);
             None
         }
         StreamEvent::Commentary(message) => {
@@ -43,7 +44,8 @@ pub(crate) fn on_stream_event(
         }
         StreamEvent::ToolCall { name, arguments } => {
             ops::session::set_pending_reply_activity(state, PendingReplyActivity::WaitingForTool);
-            ops::transcript::push_tool_call(state, name, arguments);
+            ops::transcript::push_tool_call(state, name.clone(), arguments.clone());
+            ops::session::push_pending_reply_history_tool_call(state, &name, &arguments);
             None
         }
         StreamEvent::HostedToolStarted { id, kind, detail } => {
@@ -70,13 +72,21 @@ pub(crate) fn on_stream_event(
         }
         StreamEvent::ToolResult { name, output } => {
             ops::session::set_pending_reply_activity(state, PendingReplyActivity::Responding);
-            ops::transcript::push_tool_result(state, name, output);
+            ops::transcript::push_tool_result(state, name.clone(), output.clone());
+            ops::session::push_pending_reply_history_tool_result(state, &name, &output);
             None
         }
         StreamEvent::TodoSnapshot(snapshot) => {
             ops::session::set_pending_reply_activity(state, PendingReplyActivity::Responding);
             ops::session::set_current_todo(state, snapshot.has_list.then_some(snapshot.clone()));
+            let serialized_snapshot = serde_json::to_string(&snapshot)
+                .unwrap_or_else(|_| "{\"has_list\":false,\"tasks\":[]}".into());
             ops::transcript::push_todo_snapshot(state, snapshot);
+            ops::session::push_pending_reply_history_tool_result(
+                state,
+                "Todo",
+                &serialized_snapshot,
+            );
             None
         }
         StreamEvent::AskUserRequested {
@@ -244,7 +254,12 @@ mod tests {
         },
         ask_user::{AskUserAnswer, AskUserQuestion, AskUserRequest},
         features::planning::PlanningStage,
+        llm::history_into_rig,
         todo::{TodoSnapshot, TodoStatus, TodoTask},
+    };
+    use rig::completion::{
+        Message as RigMessage,
+        message::{AssistantContent, ToolResultContent, UserContent},
     };
 
     fn ask_user_request() -> AskUserRequest {
@@ -1033,6 +1048,116 @@ mod tests {
             app.session_history(),
             &[SessionHistoryMessage::assistant("stable")]
         );
+    }
+
+    #[test]
+    fn failed_stream_preserves_incremental_history_for_continue() {
+        let mut app = new_app(true);
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(2, PendingReplyKind::Normal));
+        app.state_mut().session.active_main_request_seed = Some(MainRequestSeed {
+            history: vec![SessionHistoryMessage::assistant("old")],
+            visible_prompt: "I accept this plan. Begin implementation now.".into(),
+            model_prompt: "You are no longer in Plan Mode. Begin implementation now.".into(),
+            history_model_name: None,
+            transcript_len_before: 0,
+        });
+        crate::app::ops::session::initialize_pending_reply_history(app.state_mut());
+
+        app.apply(Action::StreamEvent {
+            reply_id: 2,
+            event: StreamEvent::TextDelta("implemented part".into()),
+        });
+        app.apply(Action::StreamEvent {
+            reply_id: 2,
+            event: StreamEvent::Failed("boom".into()),
+        });
+
+        let rig_history = history_into_rig(app.session_history().to_vec()).expect("rig history");
+        assert_eq!(rig_history[0], RigMessage::assistant("old"));
+        assert_eq!(
+            rig_history[1],
+            RigMessage::user("I accept this plan. Begin implementation now.")
+        );
+        assert_eq!(rig_history[2], RigMessage::assistant("implemented part"));
+
+        app.composer_mut().insert_str("continue");
+        let effect = app.apply(Action::SubmitMessage);
+        let Some(Effect::PromptModel {
+            prompt, history, ..
+        }) = effect
+        else {
+            panic!("expected prompt model effect");
+        };
+        assert_eq!(prompt, "continue");
+        let rig_history = history_into_rig(history).expect("rig history");
+        assert_eq!(
+            rig_history,
+            vec![
+                RigMessage::assistant("old"),
+                RigMessage::user("I accept this plan. Begin implementation now."),
+                RigMessage::assistant("implemented part"),
+            ]
+        );
+    }
+
+    #[test]
+    fn tool_results_are_preserved_in_incremental_history() {
+        let mut app = new_app(true);
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(2, PendingReplyKind::Normal));
+        app.state_mut().session.active_main_request_seed = Some(MainRequestSeed {
+            history: vec![SessionHistoryMessage::assistant("old")],
+            visible_prompt: "continue".into(),
+            model_prompt: "continue".into(),
+            history_model_name: None,
+            transcript_len_before: 0,
+        });
+        crate::app::ops::session::initialize_pending_reply_history(app.state_mut());
+
+        app.apply(Action::StreamEvent {
+            reply_id: 2,
+            event: StreamEvent::ToolCall {
+                name: "ReadFile".into(),
+                arguments: r#"{"path":"src/main.rs"}"#.into(),
+            },
+        });
+        app.apply(Action::StreamEvent {
+            reply_id: 2,
+            event: StreamEvent::ToolResult {
+                name: "ReadFile".into(),
+                output: "1 | hello".into(),
+            },
+        });
+
+        let rig_history = history_into_rig(app.session_history().to_vec()).expect("rig history");
+        assert_eq!(rig_history[0], RigMessage::assistant("old"));
+        assert_eq!(rig_history[1], RigMessage::user("continue"));
+        assert!(matches!(
+            &rig_history[2],
+            RigMessage::Assistant { content, .. }
+                if matches!(
+                    content.first_ref(),
+                    AssistantContent::ToolCall(tool_call)
+                        if tool_call.function.name == "ReadFile"
+                            && tool_call.function.arguments == serde_json::json!({"path": "src/main.rs"})
+                            && tool_call.call_id.is_some()
+                )
+        ));
+        assert!(matches!(
+            &rig_history[3],
+            RigMessage::User { content }
+                if matches!(
+                    content.first_ref(),
+                    UserContent::ToolResult(tool_result)
+                        if tool_result.id.starts_with("oat_tool_call_")
+                            && tool_result.call_id.is_some()
+                            && matches!(
+                                tool_result.content.first_ref(),
+                                ToolResultContent::Text(text) if text.text == "1 | hello"
+                            )
+                )
+        ));
     }
 
     #[test]
