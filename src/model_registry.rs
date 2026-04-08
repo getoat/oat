@@ -181,7 +181,7 @@ impl ParseReasoningSettingError {
     }
 }
 
-const BASE_MODELS: [ModelInfo; 18] = [
+const BASE_MODELS: [ModelInfo; 19] = [
     ModelInfo {
         name: "gpt-5.4",
         provider: ModelProvider::AzureOpenAi,
@@ -455,11 +455,27 @@ const BASE_MODELS: [ModelInfo; 18] = [
         supports_search: false,
     },
     ModelInfo {
-        name: "qwen/qwen3.6-plus:free",
+        name: "z-ai/glm-5.1",
         provider: ModelProvider::OpenRouter,
         api_family: ModelApiFamily::Completions,
-        context_length: 1_000_000,
-        context_length_display: Some("1M"),
+        context_length: 202_752,
+        context_length_display: Some("202K"),
+        compaction_trigger_percent_used: 90,
+        pricing: ModelPricing {
+            input_per_million_tokens: 1.26,
+            cache_read_per_million_tokens: 0.0,
+            output_per_million_tokens: 3.96,
+        },
+        long_context_pricing: None,
+        supported_reasoning_settings: &OPENROUTER_REASONING_SETTINGS,
+        supports_search: false,
+    },
+    ModelInfo {
+        name: "google/gemma-4-31b-it:free",
+        provider: ModelProvider::OpenRouter,
+        api_family: ModelApiFamily::Completions,
+        context_length: 262_144,
+        context_length_display: Some("256K"),
         compaction_trigger_percent_used: 90,
         pricing: ModelPricing {
             input_per_million_tokens: 0.0,
@@ -714,7 +730,8 @@ mod tests {
         assert!(find_model("xiaomi/mimo-v2-omni").is_some());
         assert!(find_model("xiaomi/mimo-v2-pro").is_some());
         assert!(find_model("xiaomi/mimo-v2-flash").is_some());
-        assert!(find_model("qwen/qwen3.6-plus:free").is_some());
+        assert!(find_model("z-ai/glm-5.1").is_some());
+        assert!(find_model("google/gemma-4-31b-it:free").is_some());
     }
 
     #[test]
@@ -872,7 +889,8 @@ mod tests {
         let mimo_omni = find_model("xiaomi/mimo-v2-omni").expect("registry model");
         let mimo_pro = find_model("xiaomi/mimo-v2-pro").expect("registry model");
         let mimo_flash = find_model("xiaomi/mimo-v2-flash").expect("registry model");
-        let qwen_preview = find_model("qwen/qwen3.6-plus:free").expect("registry model");
+        let glm_51 = find_model("z-ai/glm-5.1").expect("registry model");
+        let gemma_31b = find_model("google/gemma-4-31b-it:free").expect("registry model");
 
         assert_eq!(gpt_54.recommended_prompt_token_budget(), 104_000);
         assert_eq!(gpt_54_mini.recommended_prompt_token_budget(), 104_000);
@@ -902,7 +920,8 @@ mod tests {
         assert_eq!(mimo_omni.recommended_prompt_token_budget(), 99_072);
         assert_eq!(mimo_pro.recommended_prompt_token_budget(), 492_288);
         assert_eq!(mimo_flash.recommended_prompt_token_budget(), 99_072);
-        assert_eq!(qwen_preview.recommended_prompt_token_budget(), 468_000);
+        assert_eq!(glm_51.recommended_prompt_token_budget(), 69_376);
+        assert_eq!(gemma_31b.recommended_prompt_token_budget(), 99_072);
     }
 
     #[test]
@@ -916,7 +935,8 @@ mod tests {
         let mimo_omni = find_model("xiaomi/mimo-v2-omni").expect("registry model");
         let mimo_pro = find_model("xiaomi/mimo-v2-pro").expect("registry model");
         let mimo_flash = find_model("xiaomi/mimo-v2-flash").expect("registry model");
-        let qwen_preview = find_model("qwen/qwen3.6-plus:free").expect("registry model");
+        let glm_51 = find_model("z-ai/glm-5.1").expect("registry model");
+        let gemma_31b = find_model("google/gemma-4-31b-it:free").expect("registry model");
 
         assert_eq!(gpt_54.provider, ModelProvider::OpenRouter);
         assert_eq!(gpt_54_mini.provider, ModelProvider::OpenRouter);
@@ -927,7 +947,8 @@ mod tests {
         assert_eq!(mimo_omni.provider, ModelProvider::OpenRouter);
         assert_eq!(mimo_pro.provider, ModelProvider::OpenRouter);
         assert_eq!(mimo_flash.provider, ModelProvider::OpenRouter);
-        assert_eq!(qwen_preview.provider, ModelProvider::OpenRouter);
+        assert_eq!(glm_51.provider, ModelProvider::OpenRouter);
+        assert_eq!(gemma_31b.provider, ModelProvider::OpenRouter);
         assert_eq!(
             gpt_54.supported_reasoning_settings,
             &OPENROUTER_REASONING_SETTINGS
@@ -947,14 +968,22 @@ mod tests {
         assert_eq!(mimo_flash.pricing.input_per_million_tokens, 0.09);
         assert_eq!(mimo_flash.pricing.cache_read_per_million_tokens, 0.045);
         assert_eq!(mimo_flash.pricing.output_per_million_tokens, 0.29);
-        assert_eq!(qwen_preview.context_length, 1_000_000);
-        assert_eq!(qwen_preview.display_context_length(), Some("1M"));
+        assert_eq!(glm_51.context_length, 202_752);
+        assert_eq!(glm_51.display_context_length(), Some("202K"));
         assert_eq!(
-            qwen_preview.supported_reasoning_settings,
+            glm_51.supported_reasoning_settings,
             &OPENROUTER_REASONING_SETTINGS
         );
-        assert_eq!(qwen_preview.pricing.input_per_million_tokens, 0.0);
-        assert_eq!(qwen_preview.pricing.output_per_million_tokens, 0.0);
+        assert_eq!(glm_51.pricing.input_per_million_tokens, 1.26);
+        assert_eq!(glm_51.pricing.output_per_million_tokens, 3.96);
+        assert_eq!(gemma_31b.context_length, 262_144);
+        assert_eq!(gemma_31b.display_context_length(), Some("256K"));
+        assert_eq!(
+            gemma_31b.supported_reasoning_settings,
+            &OPENROUTER_REASONING_SETTINGS
+        );
+        assert_eq!(gemma_31b.pricing.input_per_million_tokens, 0.0);
+        assert_eq!(gemma_31b.pricing.output_per_million_tokens, 0.0);
     }
 
     #[test]

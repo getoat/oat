@@ -429,6 +429,268 @@ fn unknown_model_parse_rejects_config_immediately() {
 }
 
 #[test]
+fn load_from_path_replaces_unknown_main_model_with_default_selection() {
+    let path = unique_temp_path("stale-main-model");
+
+    fs::write(
+        &path,
+        r#"
+            [azure]
+            resource_name = "demo-resource"
+            api_key = "secret"
+
+            [model]
+            model_name = "qwen/qwen3.6-plus:free"
+            reasoning = "medium"
+            "#,
+    )
+    .expect("write temp config");
+
+    let config = AppConfig::load_from_path(&path).expect("load sanitized config");
+
+    assert_eq!(config.model.model_name, "gpt-5.4-mini");
+    assert_eq!(
+        config.model.reasoning,
+        ReasoningSetting::Gpt(ReasoningEffort::Medium)
+    );
+    assert_eq!(config.safety.model_name, "gpt-5.4-mini");
+    assert_eq!(
+        config.safety.reasoning,
+        ReasoningSetting::Gpt(ReasoningEffort::Medium)
+    );
+
+    fs::remove_file(path).expect("remove temp config");
+}
+
+#[test]
+fn load_from_path_replaces_unknown_openrouter_model_with_openrouter_default() {
+    let path = unique_temp_path("stale-openrouter-main-model");
+
+    fs::write(
+        &path,
+        r#"
+            [openrouter]
+            api_key = "or-secret"
+
+            [model]
+            model_name = "qwen/qwen3.6-plus:free"
+            reasoning = "medium"
+            "#,
+    )
+    .expect("write temp config");
+
+    let config = AppConfig::load_from_path(&path).expect("load sanitized config");
+
+    assert_eq!(config.model.model_name, "openai/gpt-5.4-mini");
+    assert_eq!(
+        config.model.reasoning,
+        ReasoningSetting::Gpt(ReasoningEffort::Medium)
+    );
+    assert_eq!(config.safety.model_name, "openai/gpt-5.4-mini");
+    assert_eq!(
+        config.safety.reasoning,
+        ReasoningSetting::Gpt(ReasoningEffort::Medium)
+    );
+
+    fs::remove_file(path).expect("remove temp config");
+}
+
+#[test]
+fn load_from_path_normalizes_invalid_main_model_reasoning() {
+    let path = unique_temp_path("invalid-main-reasoning");
+
+    fs::write(
+        &path,
+        r#"
+            [azure]
+            resource_name = "demo-resource"
+            api_key = "secret"
+
+            [model]
+            model_name = "gpt-5.4-mini"
+            reasoning = "xhigh"
+            "#,
+    )
+    .expect("write temp config");
+
+    let config = AppConfig::load_from_path(&path).expect("load sanitized config");
+
+    assert_eq!(config.model.model_name, "gpt-5.4-mini");
+    assert_eq!(
+        config.model.reasoning,
+        ReasoningSetting::Gpt(ReasoningEffort::Medium)
+    );
+
+    fs::remove_file(path).expect("remove temp config");
+}
+
+#[test]
+fn load_from_path_rebases_unknown_safety_and_memory_models_to_current_main_selection() {
+    let path = unique_temp_path("stale-secondary-models");
+
+    fs::write(
+        &path,
+        r#"
+            [azure]
+            resource_name = "demo-resource"
+            api_key = "secret"
+
+            [model]
+            model_name = "kimi-k2.5"
+            reasoning = "on"
+
+            [safety]
+            model_name = "qwen/qwen3.6-plus:free"
+            reasoning = "medium"
+
+            [memory.extraction]
+            enabled = true
+            model_name = "qwen/qwen3.6-plus:free"
+            reasoning = "medium"
+            "#,
+    )
+    .expect("write temp config");
+
+    let config = AppConfig::load_from_path(&path).expect("load sanitized config");
+
+    assert_eq!(config.safety.model_name, "kimi-k2.5");
+    assert_eq!(
+        config.safety.reasoning,
+        ReasoningSetting::Kimi(KimiThinkingMode::On)
+    );
+    assert_eq!(config.memory.extraction.model_name, "kimi-k2.5");
+    assert_eq!(
+        config.memory.extraction.reasoning,
+        ReasoningSetting::Kimi(KimiThinkingMode::On)
+    );
+    assert!(config.memory.extraction.enabled);
+
+    fs::remove_file(path).expect("remove temp config");
+}
+
+#[test]
+fn load_from_path_sanitizes_planning_agents() {
+    let path = unique_temp_path("stale-planning-models");
+
+    fs::write(
+        &path,
+        r#"
+            [azure]
+            resource_name = "demo-resource"
+            api_key = "secret"
+
+            [model]
+            model_name = "gpt-5.4-mini"
+            reasoning = "medium"
+
+            [[planning.agents]]
+            model_name = "qwen/qwen3.6-plus:free"
+            reasoning = "medium"
+
+            [[planning.agents]]
+            model_name = "gpt-5.4-mini"
+            reasoning = "high"
+
+            [[planning.agents]]
+            model_name = "gpt-5.4"
+            reasoning = "high"
+
+            [[planning.agents]]
+            model_name = "gpt-5.4"
+            reasoning = "low"
+
+            [[planning.agents]]
+            model_name = "kimi-k2.5"
+            reasoning = "medium"
+
+            [[planning.agents]]
+            model_name = "gpt-5.2"
+            reasoning = "on"
+            "#,
+    )
+    .expect("write temp config");
+
+    let config = AppConfig::load_from_path(&path).expect("load sanitized config");
+
+    assert_eq!(
+        config.planning.agents,
+        vec![
+            PlanningAgentConfig {
+                model_name: "gpt-5.4".into(),
+                reasoning: ReasoningEffort::High.into(),
+            },
+            PlanningAgentConfig {
+                model_name: "kimi-k2.5".into(),
+                reasoning: KimiThinkingMode::On.into(),
+            },
+            PlanningAgentConfig {
+                model_name: "gpt-5.2".into(),
+                reasoning: ReasoningEffort::Medium.into(),
+            },
+        ]
+    );
+
+    fs::remove_file(path).expect("remove temp config");
+}
+
+#[test]
+fn load_from_paths_uses_merged_main_selection_for_stale_override_sections() {
+    let home_path = unique_temp_path("home-stale-main-fallback");
+    let cwd_path = unique_temp_path("cwd-stale-main-fallback");
+
+    fs::write(
+        &home_path,
+        r#"
+            [azure]
+            resource_name = "demo-resource"
+            api_key = "secret"
+
+            [model]
+            model_name = "kimi-k2.5"
+            reasoning = "on"
+            "#,
+    )
+    .expect("write home config");
+
+    fs::write(
+        &cwd_path,
+        r#"
+            [safety]
+            model_name = "qwen/qwen3.6-plus:free"
+            reasoning = "medium"
+
+            [memory.extraction]
+            enabled = true
+            model_name = "qwen/qwen3.6-plus:free"
+            reasoning = "medium"
+            "#,
+    )
+    .expect("write cwd config");
+
+    let config =
+        AppConfig::load_from_paths(Some(&home_path), Some(&cwd_path)).expect("load merged config");
+
+    assert_eq!(config.model.model_name, "kimi-k2.5");
+    assert_eq!(
+        config.model.reasoning,
+        ReasoningSetting::Kimi(KimiThinkingMode::On)
+    );
+    assert_eq!(config.safety.model_name, "kimi-k2.5");
+    assert_eq!(
+        config.safety.reasoning,
+        ReasoningSetting::Kimi(KimiThinkingMode::On)
+    );
+    assert_eq!(config.memory.extraction.model_name, "kimi-k2.5");
+    assert_eq!(
+        config.memory.extraction.reasoning,
+        ReasoningSetting::Kimi(KimiThinkingMode::On)
+    );
+
+    fs::remove_file(home_path).expect("remove home config");
+    fs::remove_file(cwd_path).expect("remove cwd config");
+}
+
+#[test]
 fn validation_requires_chutes_credentials_for_selected_chutes_model() {
     let config = AppConfig {
         azure: None,

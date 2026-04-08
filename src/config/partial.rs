@@ -99,6 +99,36 @@ impl PartialAppConfig {
         }
     }
 
+    pub(super) fn model_selection_hint(&self) -> Option<(String, String)> {
+        if let Some(model) = self.model.as_ref() {
+            let model_name = model.model_name.clone()?;
+            let reasoning = match model.reasoning.as_deref() {
+                Some(value)
+                    if model_registry::parse_reasoning_setting_for_model(&model_name, value)
+                        .is_ok() =>
+                {
+                    value.to_string()
+                }
+                _ => super::preferred_reasoning_string(&model_name),
+            };
+            return Some((model_name, reasoning));
+        }
+
+        self.azure.as_ref().and_then(|azure| {
+            let model_name = azure.legacy_model_name.clone()?;
+            let reasoning = match azure.legacy_reasoning.as_deref() {
+                Some(value)
+                    if model_registry::parse_reasoning_setting_for_model(&model_name, value)
+                        .is_ok() =>
+                {
+                    value.to_string()
+                }
+                _ => super::preferred_reasoning_string(&model_name),
+            };
+            Some((model_name, reasoning))
+        })
+    }
+
     pub(super) fn finalize(self) -> Result<AppConfig> {
         let Self {
             azure,
