@@ -52,6 +52,7 @@ pub enum ModelProvider {
     AzureOpenAi,
     ChutesAi,
     Codex,
+    Ollama,
     OpenRouter,
 }
 
@@ -67,6 +68,7 @@ impl ModelProvider {
             Self::AzureOpenAi => "Azure OpenAI",
             Self::ChutesAi => "Chutes AI",
             Self::Codex => "Codex",
+            Self::Ollama => "Ollama Cloud",
             Self::OpenRouter => "OpenRouter",
         }
     }
@@ -181,7 +183,7 @@ impl ParseReasoningSettingError {
     }
 }
 
-const BASE_MODELS: [ModelInfo; 19] = [
+const BASE_MODELS: [ModelInfo; 20] = [
     ModelInfo {
         name: "gpt-5.4",
         provider: ModelProvider::AzureOpenAi,
@@ -300,6 +302,22 @@ const BASE_MODELS: [ModelInfo; 19] = [
         api_family: ModelApiFamily::Completions,
         context_length: 200_000,
         context_length_display: Some("200K"),
+        compaction_trigger_percent_used: 90,
+        pricing: ModelPricing {
+            input_per_million_tokens: 0.0,
+            cache_read_per_million_tokens: 0.0,
+            output_per_million_tokens: 0.0,
+        },
+        long_context_pricing: None,
+        supported_reasoning_settings: &DEFAULT_REASONING_SETTINGS,
+        supports_search: false,
+    },
+    ModelInfo {
+        name: "glm-5.1:cloud",
+        provider: ModelProvider::Ollama,
+        api_family: ModelApiFamily::Completions,
+        context_length: 198_000,
+        context_length_display: Some("198K"),
         compaction_trigger_percent_used: 90,
         pricing: ModelPricing {
             input_per_million_tokens: 0.0,
@@ -714,6 +732,7 @@ mod tests {
         assert!(find_model("kimi-k2.5").is_some());
         assert!(find_model("zai-org/GLM-5-TEE").is_some());
         assert!(find_model("MiniMaxAI/MiniMax-M2.5-TEE").is_some());
+        assert!(find_model("glm-5.1:cloud").is_some());
         assert!(find_model("codex/gpt-5.3-codex").is_some());
         assert!(find_model("codex/gpt-5.4").is_some());
         assert!(find_model("codex/gpt-5.4-mini").is_some());
@@ -818,6 +837,24 @@ mod tests {
     }
 
     #[test]
+    fn ollama_cloud_models_use_default_reasoning() {
+        let model = find_model("glm-5.1:cloud").expect("registry model");
+
+        assert_eq!(model.provider, ModelProvider::Ollama);
+        assert_eq!(model.context_length, 198_000);
+        assert_eq!(model.display_context_length(), Some("198K"));
+        assert_eq!(
+            model.supported_reasoning_settings,
+            &DEFAULT_REASONING_SETTINGS
+        );
+        assert_eq!(model.pricing.input_per_million_tokens, 0.0);
+        assert_eq!(
+            parse_reasoning_setting_for_model("glm-5.1:cloud", "default"),
+            Ok(ReasoningSetting::Default)
+        );
+    }
+
+    #[test]
     fn kimi_exposes_on_off_reasoning_and_display_context() {
         let model = find_model("kimi-k2.5").expect("registry model");
 
@@ -880,6 +917,7 @@ mod tests {
         let gpt_5_3_codex = find_model("gpt-5.3-codex").expect("registry model");
         let kimi = find_model("kimi-k2.5").expect("registry model");
         let glm = find_model("zai-org/GLM-5-TEE").expect("registry model");
+        let ollama_glm = find_model("glm-5.1:cloud").expect("registry model");
         let openrouter_gpt_54 = find_model("openai/gpt-5.4").expect("registry model");
         let openrouter_gpt_54_mini = find_model("openai/gpt-5.4-mini").expect("registry model");
         let openrouter_gpt_54_nano = find_model("openai/gpt-5.4-nano").expect("registry model");
@@ -899,6 +937,7 @@ mod tests {
         assert_eq!(gpt_5_3_codex.recommended_prompt_token_budget(), 104_000);
         assert_eq!(kimi.recommended_prompt_token_budget(), 99_072);
         assert_eq!(glm.recommended_prompt_token_budget(), 68_000);
+        assert_eq!(ollama_glm.recommended_prompt_token_budget(), 67_000);
         assert_eq!(openrouter_gpt_54.recommended_prompt_token_budget(), 104_000);
         assert_eq!(
             openrouter_gpt_54_mini.recommended_prompt_token_budget(),

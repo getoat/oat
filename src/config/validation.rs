@@ -223,6 +223,14 @@ fn validate_provider_credentials(
                 }
             }
         }
+        ModelProvider::Ollama => {
+            let Some(ollama) = config.ollama.as_ref() else {
+                bail!("config is missing the [ollama] table required for model `{model_name}`");
+            };
+            if ollama.api_key.trim().is_empty() {
+                bail!("ollama.api_key must not be empty");
+            }
+        }
         ModelProvider::OpenRouter => {
             let Some(openrouter) = config.openrouter.as_ref() else {
                 bail!("config is missing the [openrouter] table required for model `{model_name}`");

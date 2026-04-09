@@ -29,6 +29,7 @@ fn sample_config() -> AppConfig {
         }),
         chutes: None,
         codex: None,
+        ollama: None,
         openrouter: None,
         model: ModelSelectionConfig {
             model_name: "gpt-5.4-mini".into(),
@@ -391,6 +392,31 @@ fn parses_chutes_model_and_defaults_safety_from_model() {
 }
 
 #[test]
+fn parses_ollama_model_and_defaults_safety_from_model() {
+    let config: AppConfig = toml::from_str(
+        r#"
+            [ollama]
+            api_key = "ollama-secret"
+
+            [model]
+            model_name = "glm-5.1:cloud"
+            reasoning = "default"
+            "#,
+    )
+    .expect("config parses");
+
+    assert!(config.azure.is_none());
+    assert_eq!(
+        config.ollama.as_ref().expect("ollama").api_key,
+        "ollama-secret"
+    );
+    assert_eq!(config.model.model_name, "glm-5.1:cloud");
+    assert_eq!(config.model.reasoning, ReasoningSetting::Default);
+    assert_eq!(config.safety.model_name, "glm-5.1:cloud");
+    assert_eq!(config.safety.reasoning, ReasoningSetting::Default);
+}
+
+#[test]
 fn known_model_parse_rejects_cross_family_reasoning_value() {
     let error = toml::from_str::<AppConfig>(
         r#"
@@ -491,6 +517,33 @@ fn load_from_path_replaces_unknown_openrouter_model_with_openrouter_default() {
         config.safety.reasoning,
         ReasoningSetting::Gpt(ReasoningEffort::Medium)
     );
+
+    fs::remove_file(path).expect("remove temp config");
+}
+
+#[test]
+fn load_from_path_replaces_unknown_ollama_model_with_ollama_default() {
+    let path = unique_temp_path("stale-ollama-main-model");
+
+    fs::write(
+        &path,
+        r#"
+            [ollama]
+            api_key = "ollama-secret"
+
+            [model]
+            model_name = "glm-4.9:cloud"
+            reasoning = "default"
+            "#,
+    )
+    .expect("write temp config");
+
+    let config = AppConfig::load_from_path(&path).expect("load sanitized config");
+
+    assert_eq!(config.model.model_name, "glm-5.1:cloud");
+    assert_eq!(config.model.reasoning, ReasoningSetting::Default);
+    assert_eq!(config.safety.model_name, "glm-5.1:cloud");
+    assert_eq!(config.safety.reasoning, ReasoningSetting::Default);
 
     fs::remove_file(path).expect("remove temp config");
 }
@@ -696,6 +749,7 @@ fn validation_requires_chutes_credentials_for_selected_chutes_model() {
         azure: None,
         chutes: None,
         codex: None,
+        ollama: None,
         openrouter: None,
         model: ModelSelectionConfig {
             model_name: "zai-org/GLM-5-TEE".into(),
@@ -717,11 +771,64 @@ fn validation_requires_chutes_credentials_for_selected_chutes_model() {
 }
 
 #[test]
+fn validation_requires_ollama_credentials_for_selected_ollama_model() {
+    let config = AppConfig {
+        azure: None,
+        chutes: None,
+        codex: None,
+        ollama: None,
+        openrouter: None,
+        model: ModelSelectionConfig {
+            model_name: "glm-5.1:cloud".into(),
+            reasoning: ReasoningSetting::Default,
+        },
+        safety: SafetyConfig {
+            model_name: "glm-5.1:cloud".into(),
+            reasoning: ReasoningSetting::Default,
+        },
+        memory: MemoryConfig::default(),
+        ui: UiConfig::default(),
+        subagents: SubagentConfig::default(),
+        planning: PlanningConfig::default(),
+        tools: ToolConfig::default(),
+    };
+
+    let error = config.validate().expect_err("validation should fail");
+    assert!(error.to_string().contains("missing the [ollama] table"));
+}
+
+#[test]
+fn validation_rejects_blank_ollama_api_key() {
+    let config = toml::from_str::<AppConfig>(
+        r#"
+            [ollama]
+            api_key = "   "
+
+            [model]
+            model_name = "glm-5.1:cloud"
+            reasoning = "default"
+            "#,
+    )
+    .expect("config parses");
+
+    let error = config
+        .validate()
+        .expect_err("config should fail validation");
+
+    assert!(
+        error
+            .to_string()
+            .contains("ollama.api_key must not be empty")
+    );
+}
+
+#[test]
 fn validation_requires_openrouter_credentials_for_selected_openrouter_model() {
     let config = AppConfig {
         azure: None,
         chutes: None,
         codex: None,
+        ollama: None,
         openrouter: None,
         model: ModelSelectionConfig {
             model_name: "minimax/minimax-m2.7".into(),

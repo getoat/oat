@@ -9,6 +9,10 @@ api_version = "2025-01-01-preview"
 # Optional. Required only when selecting a Chutes-hosted model.
 api_key = "paste-your-chutes-api-key-here"
 
+[ollama]
+# Optional. Required only when selecting an Ollama Cloud model.
+api_key = "paste-your-ollama-api-key-here"
+
 [openrouter]
 # Optional. Required only when selecting an OpenRouter-hosted model.
 api_key = "paste-your-openrouter-api-key-here"
@@ -40,7 +44,7 @@ model_name = "gpt-5.4-mini"
 # none, minimal, low, medium, high, xhigh
 # kimi-k2.5: on, off
 # OpenRouter reasoning support is also model-specific
-# Chutes models in this registry: default
+# Chutes and Ollama Cloud models in this registry: default
 reasoning = "medium"
 
 [ui]
@@ -70,6 +74,10 @@ agents = []
 #
 # [[planning.agents]]
 # model_name = "zai-org/GLM-5-TEE"
+# reasoning = "default"
+#
+# [[planning.agents]]
+# model_name = "glm-5.1:cloud"
 # reasoning = "default"
 #
 # [[planning.agents]]

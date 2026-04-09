@@ -14,6 +14,7 @@ pub struct AppConfig {
     pub azure: Option<AzureConfig>,
     pub chutes: Option<ChutesConfig>,
     pub codex: Option<CodexConfig>,
+    pub ollama: Option<OllamaConfig>,
     pub openrouter: Option<OpenRouterConfig>,
     pub model: ModelSelectionConfig,
     pub safety: SafetyConfig,
@@ -53,6 +54,15 @@ impl AppConfig {
             model_registry::ModelProvider::Codex => Ok(ProviderConfigRef::Codex(
                 self.codex.as_ref().unwrap_or(&EMPTY_CODEX_CONFIG),
             )),
+            model_registry::ModelProvider::Ollama => self
+                .ollama
+                .as_ref()
+                .map(ProviderConfigRef::Ollama)
+                .ok_or_else(|| {
+                    anyhow!(
+                        "config is missing the [ollama] table required for model `{model_name}`"
+                    )
+                }),
             model_registry::ModelProvider::OpenRouter => self
                 .openrouter
                 .as_ref()
@@ -179,6 +189,17 @@ impl OpenRouterConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct OllamaConfig {
+    pub api_key: String,
+}
+
+impl OllamaConfig {
+    pub fn base_url(&self) -> &'static str {
+        "https://ollama.com/v1"
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct ModelSelectionConfig {
     pub model_name: String,
     pub reasoning: ReasoningSetting,
@@ -189,6 +210,7 @@ pub enum ProviderConfigRef<'a> {
     Azure(&'a AzureConfig),
     Chutes(&'a ChutesConfig),
     Codex(&'a CodexConfig),
+    Ollama(&'a OllamaConfig),
     OpenRouter(&'a OpenRouterConfig),
 }
 
@@ -198,6 +220,7 @@ impl ProviderConfigRef<'_> {
             Self::Azure(config) => Some(&config.api_key),
             Self::Chutes(config) => Some(&config.api_key),
             Self::Codex(config) => config.auth_token(),
+            Self::Ollama(config) => Some(&config.api_key),
             Self::OpenRouter(config) => Some(&config.api_key),
         }
     }
@@ -207,6 +230,7 @@ impl ProviderConfigRef<'_> {
             Self::Azure(config) => format!("{}/openai/v1", config.endpoint().trim_end_matches('/')),
             Self::Chutes(config) => config.base_url().to_string(),
             Self::Codex(config) => config.base_url().to_string(),
+            Self::Ollama(config) => config.base_url().to_string(),
             Self::OpenRouter(config) => config.base_url().to_string(),
         }
     }
@@ -214,7 +238,7 @@ impl ProviderConfigRef<'_> {
     pub fn account_id(&self) -> Option<&str> {
         match self {
             Self::Codex(config) => config.account_id(),
-            Self::Azure(_) | Self::Chutes(_) | Self::OpenRouter(_) => None,
+            Self::Azure(_) | Self::Chutes(_) | Self::Ollama(_) | Self::OpenRouter(_) => None,
         }
     }
 }

@@ -9,10 +9,11 @@ use crate::{
 
 use super::types::{
     AppConfig, AzureConfig, ChutesConfig, CodexConfig, MemoryConfig, MemoryExtractionConfig,
-    MemoryRetrievalConfig, MemoryRetrievalModeConfig, ModelSelectionConfig, OpenRouterConfig,
-    RawReasoningSetting, SafetyConfig, SubagentConfig, ToolConfig, ToolWebSearchConfig, UiConfig,
-    WebSearchMode, default_api_version, default_command_history_limit,
-    default_max_concurrent_subagents, default_show_thinking, default_web_search_mode,
+    MemoryRetrievalConfig, MemoryRetrievalModeConfig, ModelSelectionConfig, OllamaConfig,
+    OpenRouterConfig, RawReasoningSetting, SafetyConfig, SubagentConfig, ToolConfig,
+    ToolWebSearchConfig, UiConfig, WebSearchMode, default_api_version,
+    default_command_history_limit, default_max_concurrent_subagents, default_show_thinking,
+    default_web_search_mode,
 };
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -20,6 +21,7 @@ pub(super) struct PartialAppConfig {
     azure: Option<PartialAzureConfig>,
     chutes: Option<PartialChutesConfig>,
     codex: Option<PartialCodexConfig>,
+    ollama: Option<PartialOllamaConfig>,
     openrouter: Option<PartialOpenRouterConfig>,
     model: Option<PartialModelSelectionConfig>,
     safety: Option<PartialSafetyConfig>,
@@ -48,6 +50,12 @@ impl PartialAppConfig {
             self.codex
                 .get_or_insert_with(PartialCodexConfig::default)
                 .merge(codex);
+        }
+
+        if let Some(ollama) = other.ollama {
+            self.ollama
+                .get_or_insert_with(PartialOllamaConfig::default)
+                .merge(ollama);
         }
 
         if let Some(openrouter) = other.openrouter {
@@ -134,6 +142,7 @@ impl PartialAppConfig {
             azure,
             chutes,
             codex,
+            ollama,
             openrouter,
             model,
             safety,
@@ -158,6 +167,7 @@ impl PartialAppConfig {
             azure: azure.map(PartialAzureConfig::finalize).transpose()?,
             chutes: chutes.map(PartialChutesConfig::finalize).transpose()?,
             codex: codex.map(PartialCodexConfig::finalize).transpose()?,
+            ollama: ollama.map(PartialOllamaConfig::finalize).transpose()?,
             openrouter: openrouter
                 .map(PartialOpenRouterConfig::finalize)
                 .transpose()?,
@@ -319,6 +329,25 @@ impl PartialCodexConfig {
             id_token: self.id_token.filter(|value| !value.trim().is_empty()),
             account_id: self.account_id.filter(|value| !value.trim().is_empty()),
             last_refresh: self.last_refresh,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct PartialOllamaConfig {
+    api_key: Option<String>,
+}
+
+impl PartialOllamaConfig {
+    fn merge(&mut self, other: Self) {
+        if other.api_key.is_some() {
+            self.api_key = other.api_key;
+        }
+    }
+
+    fn finalize(self) -> Result<OllamaConfig> {
+        Ok(OllamaConfig {
+            api_key: self.api_key.unwrap_or_default(),
         })
     }
 }

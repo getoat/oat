@@ -38,8 +38,8 @@ use crate::{
     completion_request::CompletionRequestSnapshot,
     config::{
         AppConfig, AzureConfig, CodexAuthMode, CodexConfig, KimiThinkingMode, MemoryConfig,
-        ModelSelectionConfig, OpenRouterConfig, ReasoningEffort, ReasoningSetting, SafetyConfig,
-        SubagentConfig, ToolConfig, UiConfig, WebSearchMode,
+        ModelSelectionConfig, OllamaConfig, OpenRouterConfig, ReasoningEffort, ReasoningSetting,
+        SafetyConfig, SubagentConfig, ToolConfig, UiConfig, WebSearchMode,
     },
     features::planning::PlanningConfig,
     web::WebService,
@@ -54,6 +54,7 @@ fn sample_config() -> AppConfig {
         }),
         chutes: None,
         codex: None,
+        ollama: None,
         openrouter: None,
         model: ModelSelectionConfig {
             model_name: "gpt-5.4-mini".into(),
@@ -200,6 +201,23 @@ fn request_params_skip_hosted_search_for_non_responses_models() {
     );
 
     assert!(params.get("tools").is_none());
+}
+
+#[test]
+fn ollama_base_url_targets_ollama_cloud() {
+    let mut config = sample_config();
+    config.ollama = Some(OllamaConfig {
+        api_key: "ollama-secret".into(),
+    });
+
+    assert_eq!(
+        openai_base_url_for_model(&config, "glm-5.1:cloud").expect("base url"),
+        "https://ollama.com/v1"
+    );
+
+    let headers = http_headers_for_model(&config, "glm-5.1:cloud").expect("headers");
+    assert!(headers.get("HTTP-Referer").is_none());
+    assert!(headers.get("X-OpenRouter-Title").is_none());
 }
 
 #[test]
