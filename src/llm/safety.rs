@@ -1,5 +1,8 @@
 use globset::Glob;
-use rig::{client::CompletionClient, completion::TypedPrompt, providers::openai};
+use rig::{
+    completion::TypedPrompt,
+    providers::{anthropic, openai},
+};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
@@ -9,7 +12,7 @@ use crate::{
     tools::{ShellCommandRequest, display_requested_shell_cwd, display_shell_command},
 };
 
-use super::agent_builder::reasoning_params;
+use super::agent_builder::{RequestFeatures, build_agent, build_anthropic_agent};
 
 #[derive(Clone)]
 pub(crate) struct SafetyClassifier {
@@ -18,12 +21,14 @@ pub(crate) struct SafetyClassifier {
 
 #[derive(Clone)]
 enum SafetyAgent {
+    Anthropic(super::AnthropicCompletionsAgent),
     Completions(super::OpenAiCompletionsAgent),
     Responses(super::ResponsesAgent),
 }
 
 #[derive(Clone)]
 pub(crate) enum SafetyClient {
+    Anthropic(anthropic::Client),
     Completions(openai::CompletionsClient),
     Responses(super::ResponsesClient),
 }
@@ -62,26 +67,30 @@ struct SafetyClassifierOutput {
 impl SafetyClassifier {
     pub(crate) fn from_client(client: &SafetyClient, config: &AppConfig) -> Self {
         let agent = match client {
-            SafetyClient::Completions(client) => SafetyAgent::Completions(
-                client
-                    .agent(config.safety.model_name.clone())
-                    .preamble(safety_classifier_preamble())
-                    .additional_params(reasoning_params(
-                        &config.safety.model_name,
-                        config.safety.reasoning,
-                    ))
-                    .build(),
-            ),
-            SafetyClient::Responses(client) => SafetyAgent::Responses(
-                client
-                    .agent(crate::codex::api_model_name(&config.safety.model_name).to_string())
-                    .preamble(safety_classifier_preamble())
-                    .additional_params(reasoning_params(
-                        &config.safety.model_name,
-                        config.safety.reasoning,
-                    ))
-                    .build(),
-            ),
+            SafetyClient::Anthropic(client) => SafetyAgent::Anthropic(build_anthropic_agent(
+                client,
+                &config.safety.model_name,
+                safety_classifier_preamble(),
+                config.safety.reasoning,
+                RequestFeatures::default(),
+                None,
+            )),
+            SafetyClient::Completions(client) => SafetyAgent::Completions(build_agent(
+                client,
+                &config.safety.model_name,
+                safety_classifier_preamble(),
+                config.safety.reasoning,
+                RequestFeatures::default(),
+                None,
+            )),
+            SafetyClient::Responses(client) => SafetyAgent::Responses(build_agent(
+                client,
+                &config.safety.model_name,
+                safety_classifier_preamble(),
+                config.safety.reasoning,
+                RequestFeatures::default(),
+                None,
+            )),
         };
         Self { agent }
     }
@@ -98,6 +107,10 @@ impl SafetyClassifier {
         let prompt =
             safety_classifier_prompt(access_mode, &command, &working_directory, args, heuristic);
         let model_output = match &self.agent {
+            SafetyAgent::Anthropic(agent) => agent
+                .prompt_typed::<SafetyClassifierOutput>(prompt.clone())
+                .await
+                .ok(),
             SafetyAgent::Completions(agent) => agent
                 .prompt_typed::<SafetyClassifierOutput>(prompt.clone())
                 .await

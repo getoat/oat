@@ -8,6 +8,8 @@ mod service;
 mod streaming;
 mod types;
 
+pub(crate) type AnthropicCompletionsAgent =
+    rig::agent::Agent<rig::providers::anthropic::completion::CompletionModel>;
 pub(crate) type OpenAiCompletionsAgent =
     rig::agent::Agent<rig::providers::openai::completion::CompletionModel>;
 pub(crate) type ResponsesClient = rig::providers::openai::Client<crate::codex::ResponsesHttpClient>;

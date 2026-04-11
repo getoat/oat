@@ -15,6 +15,7 @@ pub struct AppConfig {
     pub chutes: Option<ChutesConfig>,
     pub codex: Option<CodexConfig>,
     pub ollama: Option<OllamaConfig>,
+    pub opencode: Option<OpencodeConfig>,
     pub openrouter: Option<OpenRouterConfig>,
     pub model: ModelSelectionConfig,
     pub safety: SafetyConfig,
@@ -63,6 +64,15 @@ impl AppConfig {
                         "config is missing the [ollama] table required for model `{model_name}`"
                     )
                 }),
+            model_registry::ModelProvider::OpencodeGo => self
+                .opencode
+                .as_ref()
+                .map(ProviderConfigRef::Opencode)
+                .ok_or_else(|| {
+                    anyhow!(
+                        "config is missing the [opencode] table required for model `{model_name}`"
+                    )
+                }),
             model_registry::ModelProvider::OpenRouter => self
                 .openrouter
                 .as_ref()
@@ -73,6 +83,18 @@ impl AppConfig {
                     )
                 }),
         }
+    }
+
+    pub fn base_url_for_model(&self, model_name: &str) -> Result<String> {
+        let model = model_registry::find_model(model_name).ok_or_else(|| {
+            anyhow!(model_registry::unknown_model_message(
+                "model.model_name",
+                model_name
+            ))
+        })?;
+        Ok(self
+            .provider_config_for_model(model_name)?
+            .base_url(model.api_family))
     }
 }
 
@@ -189,6 +211,21 @@ impl OpenRouterConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct OpencodeConfig {
+    pub api_key: String,
+}
+
+impl OpencodeConfig {
+    pub fn base_url(&self, api_family: model_registry::ModelApiFamily) -> &'static str {
+        match api_family {
+            model_registry::ModelApiFamily::Anthropic => "https://opencode.ai/zen/go",
+            model_registry::ModelApiFamily::Completions
+            | model_registry::ModelApiFamily::Responses => "https://opencode.ai/zen/go/v1",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct OllamaConfig {
     pub api_key: String,
 }
@@ -211,6 +248,7 @@ pub enum ProviderConfigRef<'a> {
     Chutes(&'a ChutesConfig),
     Codex(&'a CodexConfig),
     Ollama(&'a OllamaConfig),
+    Opencode(&'a OpencodeConfig),
     OpenRouter(&'a OpenRouterConfig),
 }
 
@@ -221,16 +259,18 @@ impl ProviderConfigRef<'_> {
             Self::Chutes(config) => Some(&config.api_key),
             Self::Codex(config) => config.auth_token(),
             Self::Ollama(config) => Some(&config.api_key),
+            Self::Opencode(config) => Some(&config.api_key),
             Self::OpenRouter(config) => Some(&config.api_key),
         }
     }
 
-    pub fn base_url(&self) -> String {
+    pub fn base_url(&self, api_family: model_registry::ModelApiFamily) -> String {
         match self {
             Self::Azure(config) => format!("{}/openai/v1", config.endpoint().trim_end_matches('/')),
             Self::Chutes(config) => config.base_url().to_string(),
             Self::Codex(config) => config.base_url().to_string(),
             Self::Ollama(config) => config.base_url().to_string(),
+            Self::Opencode(config) => config.base_url(api_family).to_string(),
             Self::OpenRouter(config) => config.base_url().to_string(),
         }
     }
@@ -238,7 +278,11 @@ impl ProviderConfigRef<'_> {
     pub fn account_id(&self) -> Option<&str> {
         match self {
             Self::Codex(config) => config.account_id(),
-            Self::Azure(_) | Self::Chutes(_) | Self::Ollama(_) | Self::OpenRouter(_) => None,
+            Self::Azure(_)
+            | Self::Chutes(_)
+            | Self::Ollama(_)
+            | Self::Opencode(_)
+            | Self::OpenRouter(_) => None,
         }
     }
 }

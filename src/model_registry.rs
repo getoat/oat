@@ -53,11 +53,13 @@ pub enum ModelProvider {
     ChutesAi,
     Codex,
     Ollama,
+    OpencodeGo,
     OpenRouter,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelApiFamily {
+    Anthropic,
     Completions,
     Responses,
 }
@@ -69,6 +71,7 @@ impl ModelProvider {
             Self::ChutesAi => "Chutes AI",
             Self::Codex => "Codex",
             Self::Ollama => "Ollama Cloud",
+            Self::OpencodeGo => "OpenCode Go",
             Self::OpenRouter => "OpenRouter",
         }
     }
@@ -183,7 +186,7 @@ impl ParseReasoningSettingError {
     }
 }
 
-const BASE_MODELS: [ModelInfo; 20] = [
+const BASE_MODELS: [ModelInfo; 27] = [
     ModelInfo {
         name: "gpt-5.4",
         provider: ModelProvider::AzureOpenAi,
@@ -318,6 +321,118 @@ const BASE_MODELS: [ModelInfo; 20] = [
         api_family: ModelApiFamily::Completions,
         context_length: 198_000,
         context_length_display: Some("198K"),
+        compaction_trigger_percent_used: 90,
+        pricing: ModelPricing {
+            input_per_million_tokens: 0.0,
+            cache_read_per_million_tokens: 0.0,
+            output_per_million_tokens: 0.0,
+        },
+        long_context_pricing: None,
+        supported_reasoning_settings: &DEFAULT_REASONING_SETTINGS,
+        supports_search: false,
+    },
+    ModelInfo {
+        name: "opencode-go/glm-5.1",
+        provider: ModelProvider::OpencodeGo,
+        api_family: ModelApiFamily::Completions,
+        context_length: 128_000,
+        context_length_display: Some("128K"),
+        compaction_trigger_percent_used: 90,
+        pricing: ModelPricing {
+            input_per_million_tokens: 0.0,
+            cache_read_per_million_tokens: 0.0,
+            output_per_million_tokens: 0.0,
+        },
+        long_context_pricing: None,
+        supported_reasoning_settings: &DEFAULT_REASONING_SETTINGS,
+        supports_search: false,
+    },
+    ModelInfo {
+        name: "opencode-go/glm-5",
+        provider: ModelProvider::OpencodeGo,
+        api_family: ModelApiFamily::Completions,
+        context_length: 128_000,
+        context_length_display: Some("128K"),
+        compaction_trigger_percent_used: 90,
+        pricing: ModelPricing {
+            input_per_million_tokens: 0.0,
+            cache_read_per_million_tokens: 0.0,
+            output_per_million_tokens: 0.0,
+        },
+        long_context_pricing: None,
+        supported_reasoning_settings: &DEFAULT_REASONING_SETTINGS,
+        supports_search: false,
+    },
+    ModelInfo {
+        name: "opencode-go/kimi-k2.5",
+        provider: ModelProvider::OpencodeGo,
+        api_family: ModelApiFamily::Completions,
+        context_length: 128_000,
+        context_length_display: Some("128K"),
+        compaction_trigger_percent_used: 90,
+        pricing: ModelPricing {
+            input_per_million_tokens: 0.0,
+            cache_read_per_million_tokens: 0.0,
+            output_per_million_tokens: 0.0,
+        },
+        long_context_pricing: None,
+        supported_reasoning_settings: &DEFAULT_REASONING_SETTINGS,
+        supports_search: false,
+    },
+    ModelInfo {
+        name: "opencode-go/mimo-v2-pro",
+        provider: ModelProvider::OpencodeGo,
+        api_family: ModelApiFamily::Completions,
+        context_length: 128_000,
+        context_length_display: Some("128K"),
+        compaction_trigger_percent_used: 90,
+        pricing: ModelPricing {
+            input_per_million_tokens: 0.0,
+            cache_read_per_million_tokens: 0.0,
+            output_per_million_tokens: 0.0,
+        },
+        long_context_pricing: None,
+        supported_reasoning_settings: &DEFAULT_REASONING_SETTINGS,
+        supports_search: false,
+    },
+    ModelInfo {
+        name: "opencode-go/mimo-v2-omni",
+        provider: ModelProvider::OpencodeGo,
+        api_family: ModelApiFamily::Completions,
+        context_length: 128_000,
+        context_length_display: Some("128K"),
+        compaction_trigger_percent_used: 90,
+        pricing: ModelPricing {
+            input_per_million_tokens: 0.0,
+            cache_read_per_million_tokens: 0.0,
+            output_per_million_tokens: 0.0,
+        },
+        long_context_pricing: None,
+        supported_reasoning_settings: &DEFAULT_REASONING_SETTINGS,
+        supports_search: false,
+    },
+    ModelInfo {
+        name: "opencode-go/minimax-m2.5",
+        provider: ModelProvider::OpencodeGo,
+        api_family: ModelApiFamily::Anthropic,
+        context_length: 1_000_000,
+        context_length_display: Some("1M"),
+        compaction_trigger_percent_used: 90,
+        pricing: ModelPricing {
+            input_per_million_tokens: 0.0,
+            cache_read_per_million_tokens: 0.0,
+            output_per_million_tokens: 0.0,
+        },
+        long_context_pricing: None,
+        supported_reasoning_settings: &DEFAULT_REASONING_SETTINGS,
+        supports_search: false,
+    },
+    ModelInfo {
+        name: "opencode-go/minimax-m2.7",
+        provider: ModelProvider::OpencodeGo,
+        api_family: ModelApiFamily::Anthropic,
+        context_length: 1_000_000,
+        context_length_display: Some("1M"),
         compaction_trigger_percent_used: 90,
         pricing: ModelPricing {
             input_per_million_tokens: 0.0,
@@ -684,8 +799,18 @@ pub fn reasoning_settings_for_model(name: &str) -> Option<&'static [ReasoningSet
     find_model(name).map(|model| model.supported_reasoning_settings)
 }
 
+pub fn api_family_for_model(name: &str) -> Option<ModelApiFamily> {
+    find_model(name).map(|model| model.api_family)
+}
+
+pub fn api_model_name(name: &str) -> &str {
+    name.strip_prefix("codex/")
+        .or_else(|| name.strip_prefix("opencode-go/"))
+        .unwrap_or(name)
+}
+
 pub fn uses_responses_api(name: &str) -> bool {
-    find_model(name).is_some_and(|model| model.api_family == ModelApiFamily::Responses)
+    api_family_for_model(name) == Some(ModelApiFamily::Responses)
 }
 
 pub fn supports_search(name: &str) -> bool {
@@ -723,7 +848,7 @@ mod tests {
 
     #[test]
     fn seeded_models_are_available() {
-        assert!(models().len() >= 23);
+        assert!(models().len() >= 34);
         assert!(find_model("gpt-5.4").is_some());
         assert!(find_model("gpt-5.4-mini").is_some());
         assert!(find_model("gpt-5.4-nano").is_some());
@@ -733,6 +858,13 @@ mod tests {
         assert!(find_model("zai-org/GLM-5-TEE").is_some());
         assert!(find_model("MiniMaxAI/MiniMax-M2.5-TEE").is_some());
         assert!(find_model("glm-5.1:cloud").is_some());
+        assert!(find_model("opencode-go/glm-5.1").is_some());
+        assert!(find_model("opencode-go/glm-5").is_some());
+        assert!(find_model("opencode-go/kimi-k2.5").is_some());
+        assert!(find_model("opencode-go/mimo-v2-pro").is_some());
+        assert!(find_model("opencode-go/mimo-v2-omni").is_some());
+        assert!(find_model("opencode-go/minimax-m2.5").is_some());
+        assert!(find_model("opencode-go/minimax-m2.7").is_some());
         assert!(find_model("codex/gpt-5.3-codex").is_some());
         assert!(find_model("codex/gpt-5.4").is_some());
         assert!(find_model("codex/gpt-5.4-mini").is_some());
@@ -816,6 +948,13 @@ mod tests {
     }
 
     #[test]
+    fn api_model_name_strips_provider_namespace_when_needed() {
+        assert_eq!(api_model_name("codex/gpt-5.3-codex"), "gpt-5.3-codex");
+        assert_eq!(api_model_name("opencode-go/glm-5.1"), "glm-5.1");
+        assert_eq!(api_model_name("gpt-5.4"), "gpt-5.4");
+    }
+
+    #[test]
     fn chutes_models_use_default_reasoning() {
         let glm = find_model("zai-org/GLM-5-TEE").expect("registry model");
         let minimax = find_model("MiniMaxAI/MiniMax-M2.5-TEE").expect("registry model");
@@ -850,6 +989,30 @@ mod tests {
         assert_eq!(model.pricing.input_per_million_tokens, 0.0);
         assert_eq!(
             parse_reasoning_setting_for_model("glm-5.1:cloud", "default"),
+            Ok(ReasoningSetting::Default)
+        );
+    }
+
+    #[test]
+    fn opencode_go_models_use_default_reasoning_across_both_api_families() {
+        let glm = find_model("opencode-go/glm-5.1").expect("registry model");
+        let minimax = find_model("opencode-go/minimax-m2.7").expect("registry model");
+
+        assert_eq!(glm.provider, ModelProvider::OpencodeGo);
+        assert_eq!(glm.api_family, ModelApiFamily::Completions);
+        assert_eq!(glm.context_length, 128_000);
+        assert_eq!(glm.display_context_length(), Some("128K"));
+        assert_eq!(
+            glm.supported_reasoning_settings,
+            &DEFAULT_REASONING_SETTINGS
+        );
+
+        assert_eq!(minimax.provider, ModelProvider::OpencodeGo);
+        assert_eq!(minimax.api_family, ModelApiFamily::Anthropic);
+        assert_eq!(minimax.context_length, 1_000_000);
+        assert_eq!(minimax.display_context_length(), Some("1M"));
+        assert_eq!(
+            parse_reasoning_setting_for_model("opencode-go/minimax-m2.7", "default"),
             Ok(ReasoningSetting::Default)
         );
     }
@@ -918,6 +1081,13 @@ mod tests {
         let kimi = find_model("kimi-k2.5").expect("registry model");
         let glm = find_model("zai-org/GLM-5-TEE").expect("registry model");
         let ollama_glm = find_model("glm-5.1:cloud").expect("registry model");
+        let opencode_glm = find_model("opencode-go/glm-5.1").expect("registry model");
+        let opencode_glm_5 = find_model("opencode-go/glm-5").expect("registry model");
+        let opencode_kimi = find_model("opencode-go/kimi-k2.5").expect("registry model");
+        let opencode_mimo_pro = find_model("opencode-go/mimo-v2-pro").expect("registry model");
+        let opencode_mimo_omni = find_model("opencode-go/mimo-v2-omni").expect("registry model");
+        let opencode_m2_5 = find_model("opencode-go/minimax-m2.5").expect("registry model");
+        let opencode_m2_7 = find_model("opencode-go/minimax-m2.7").expect("registry model");
         let openrouter_gpt_54 = find_model("openai/gpt-5.4").expect("registry model");
         let openrouter_gpt_54_mini = find_model("openai/gpt-5.4-mini").expect("registry model");
         let openrouter_gpt_54_nano = find_model("openai/gpt-5.4-nano").expect("registry model");
@@ -938,6 +1108,13 @@ mod tests {
         assert_eq!(kimi.recommended_prompt_token_budget(), 99_072);
         assert_eq!(glm.recommended_prompt_token_budget(), 68_000);
         assert_eq!(ollama_glm.recommended_prompt_token_budget(), 67_000);
+        assert_eq!(opencode_glm.recommended_prompt_token_budget(), 32_000);
+        assert_eq!(opencode_glm_5.recommended_prompt_token_budget(), 32_000);
+        assert_eq!(opencode_kimi.recommended_prompt_token_budget(), 32_000);
+        assert_eq!(opencode_mimo_pro.recommended_prompt_token_budget(), 32_000);
+        assert_eq!(opencode_mimo_omni.recommended_prompt_token_budget(), 32_000);
+        assert_eq!(opencode_m2_5.recommended_prompt_token_budget(), 468_000);
+        assert_eq!(opencode_m2_7.recommended_prompt_token_budget(), 468_000);
         assert_eq!(openrouter_gpt_54.recommended_prompt_token_budget(), 104_000);
         assert_eq!(
             openrouter_gpt_54_mini.recommended_prompt_token_budget(),

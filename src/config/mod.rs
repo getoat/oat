@@ -27,8 +27,8 @@ pub(crate) use types::{
 };
 #[cfg(test)]
 pub(crate) use types::{
-    AzureConfig, ModelSelectionConfig, OllamaConfig, OpenRouterConfig, SafetyConfig,
-    SubagentConfig, ToolConfig, UiConfig,
+    AzureConfig, ModelSelectionConfig, OllamaConfig, OpenRouterConfig, OpencodeConfig,
+    SafetyConfig, SubagentConfig, ToolConfig, UiConfig,
 };
 use updates::{write_codex_auth_updates_at_path, write_config_updates_at_path};
 
@@ -37,6 +37,7 @@ const HOME_CONFIG_RELATIVE_PATH: &str = ".config/oat/config.toml";
 const DEFAULT_API_VERSION: &str = "2025-01-01-preview";
 const DEFAULT_MODEL_NAME: &str = "gpt-5.4-mini";
 const DEFAULT_OLLAMA_MODEL_NAME: &str = "glm-5.1:cloud";
+const DEFAULT_OPENCODE_MODEL_NAME: &str = "opencode-go/glm-5.1";
 const DEFAULT_OPENROUTER_MODEL_NAME: &str = "openai/gpt-5.4-mini";
 const DEFAULT_CHUTES_MODEL_NAME: &str = "zai-org/GLM-5-TEE";
 const DEFAULT_CODEX_MODEL_NAME: &str = "codex/gpt-5.4-mini";
@@ -386,6 +387,7 @@ fn resolve_unknown_model_fallback(
         model_registry::ModelProvider::AzureOpenAi,
         model_registry::ModelProvider::Codex,
         model_registry::ModelProvider::Ollama,
+        model_registry::ModelProvider::OpencodeGo,
         model_registry::ModelProvider::OpenRouter,
         model_registry::ModelProvider::ChutesAi,
     ] {
@@ -409,6 +411,8 @@ fn infer_provider_from_model_name(model_name: &str) -> Option<model_registry::Mo
         Some(model_registry::ModelProvider::Codex)
     } else if model_name.ends_with(":cloud") {
         Some(model_registry::ModelProvider::Ollama)
+    } else if model_name.starts_with("opencode-go/") {
+        Some(model_registry::ModelProvider::OpencodeGo)
     } else if model_name.starts_with("gpt-") || model_name.starts_with("kimi-") {
         Some(model_registry::ModelProvider::AzureOpenAi)
     } else if model_name.starts_with("zai-org/") || model_name.starts_with("MiniMaxAI/") {
@@ -429,6 +433,7 @@ fn provider_table_present(
         model_registry::ModelProvider::ChutesAi => "chutes",
         model_registry::ModelProvider::Codex => "codex",
         model_registry::ModelProvider::Ollama => "ollama",
+        model_registry::ModelProvider::OpencodeGo => "opencode",
         model_registry::ModelProvider::OpenRouter => "openrouter",
     };
     root.get(key).and_then(toml::Value::as_table).is_some()
@@ -440,6 +445,7 @@ fn default_selection_for_provider(provider: model_registry::ModelProvider) -> (S
         model_registry::ModelProvider::ChutesAi => DEFAULT_CHUTES_MODEL_NAME,
         model_registry::ModelProvider::Codex => DEFAULT_CODEX_MODEL_NAME,
         model_registry::ModelProvider::Ollama => DEFAULT_OLLAMA_MODEL_NAME,
+        model_registry::ModelProvider::OpencodeGo => DEFAULT_OPENCODE_MODEL_NAME,
         model_registry::ModelProvider::OpenRouter => DEFAULT_OPENROUTER_MODEL_NAME,
     };
     (

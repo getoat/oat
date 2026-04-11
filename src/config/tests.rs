@@ -30,6 +30,7 @@ fn sample_config() -> AppConfig {
         chutes: None,
         codex: None,
         ollama: None,
+        opencode: None,
         openrouter: None,
         model: ModelSelectionConfig {
             model_name: "gpt-5.4-mini".into(),
@@ -750,6 +751,7 @@ fn validation_requires_chutes_credentials_for_selected_chutes_model() {
         chutes: None,
         codex: None,
         ollama: None,
+        opencode: None,
         openrouter: None,
         model: ModelSelectionConfig {
             model_name: "zai-org/GLM-5-TEE".into(),
@@ -777,6 +779,7 @@ fn validation_requires_ollama_credentials_for_selected_ollama_model() {
         chutes: None,
         codex: None,
         ollama: None,
+        opencode: None,
         openrouter: None,
         model: ModelSelectionConfig {
             model_name: "glm-5.1:cloud".into(),
@@ -823,12 +826,115 @@ fn validation_rejects_blank_ollama_api_key() {
 }
 
 #[test]
+fn validation_requires_opencode_credentials_for_selected_opencode_model() {
+    let config = AppConfig {
+        azure: None,
+        chutes: None,
+        codex: None,
+        ollama: None,
+        opencode: None,
+        openrouter: None,
+        model: ModelSelectionConfig {
+            model_name: "opencode-go/glm-5.1".into(),
+            reasoning: ReasoningSetting::Default,
+        },
+        safety: SafetyConfig {
+            model_name: "opencode-go/glm-5.1".into(),
+            reasoning: ReasoningSetting::Default,
+        },
+        memory: MemoryConfig::default(),
+        ui: UiConfig::default(),
+        subagents: SubagentConfig::default(),
+        planning: PlanningConfig::default(),
+        tools: ToolConfig::default(),
+    };
+
+    let error = config.validate().expect_err("validation should fail");
+    assert!(error.to_string().contains("missing the [opencode] table"));
+}
+
+#[test]
+fn validation_rejects_blank_opencode_api_key() {
+    let config = toml::from_str::<AppConfig>(
+        r#"
+            [opencode]
+            api_key = "   "
+
+            [model]
+            model_name = "opencode-go/glm-5.1"
+            reasoning = "default"
+            "#,
+    )
+    .expect("config parses");
+
+    let error = config
+        .validate()
+        .expect_err("config should fail validation");
+
+    assert!(
+        error
+            .to_string()
+            .contains("opencode.api_key must not be empty")
+    );
+}
+
+#[test]
+fn parses_opencode_model_and_validates_api_key() {
+    let config: AppConfig = toml::from_str(
+        r#"
+            [opencode]
+            api_key = "opencode-secret"
+
+            [model]
+            model_name = "opencode-go/glm-5.1"
+            reasoning = "default"
+            "#,
+    )
+    .expect("config parses");
+
+    let opencode = config.opencode.as_ref().expect("opencode config");
+    assert_eq!(opencode.api_key, "opencode-secret");
+    assert_eq!(config.model.model_name, "opencode-go/glm-5.1");
+    assert_eq!(config.model.reasoning, ReasoningSetting::Default);
+    assert_eq!(config.safety.model_name, "opencode-go/glm-5.1");
+    assert_eq!(config.safety.reasoning, ReasoningSetting::Default);
+}
+
+#[test]
+fn load_from_path_replaces_unknown_opencode_model_with_opencode_default() {
+    let path = unique_temp_path("stale-opencode-main-model");
+
+    fs::write(
+        &path,
+        r#"
+            [opencode]
+            api_key = "opencode-secret"
+
+            [model]
+            model_name = "opencode-go/minimax-m2.8"
+            reasoning = "default"
+            "#,
+    )
+    .expect("write temp config");
+
+    let config = AppConfig::load_from_path(&path).expect("load sanitized config");
+
+    assert_eq!(config.model.model_name, DEFAULT_OPENCODE_MODEL_NAME);
+    assert_eq!(config.model.reasoning, ReasoningSetting::Default);
+    assert_eq!(config.safety.model_name, DEFAULT_OPENCODE_MODEL_NAME);
+    assert_eq!(config.safety.reasoning, ReasoningSetting::Default);
+
+    fs::remove_file(path).expect("remove temp config");
+}
+
+#[test]
 fn validation_requires_openrouter_credentials_for_selected_openrouter_model() {
     let config = AppConfig {
         azure: None,
         chutes: None,
         codex: None,
         ollama: None,
+        opencode: None,
         openrouter: None,
         model: ModelSelectionConfig {
             model_name: "minimax/minimax-m2.7".into(),

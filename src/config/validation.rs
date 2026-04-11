@@ -231,6 +231,14 @@ fn validate_provider_credentials(
                 bail!("ollama.api_key must not be empty");
             }
         }
+        ModelProvider::OpencodeGo => {
+            let Some(opencode) = config.opencode.as_ref() else {
+                bail!("config is missing the [opencode] table required for model `{model_name}`");
+            };
+            if opencode.api_key.trim().is_empty() {
+                bail!("opencode.api_key must not be empty");
+            }
+        }
         ModelProvider::OpenRouter => {
             let Some(openrouter) = config.openrouter.as_ref() else {
                 bail!("config is missing the [openrouter] table required for model `{model_name}`");

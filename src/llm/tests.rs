@@ -38,8 +38,8 @@ use crate::{
     completion_request::CompletionRequestSnapshot,
     config::{
         AppConfig, AzureConfig, CodexAuthMode, CodexConfig, KimiThinkingMode, MemoryConfig,
-        ModelSelectionConfig, OllamaConfig, OpenRouterConfig, ReasoningEffort, ReasoningSetting,
-        SafetyConfig, SubagentConfig, ToolConfig, UiConfig, WebSearchMode,
+        ModelSelectionConfig, OllamaConfig, OpenRouterConfig, OpencodeConfig, ReasoningEffort,
+        ReasoningSetting, SafetyConfig, SubagentConfig, ToolConfig, UiConfig, WebSearchMode,
     },
     features::planning::PlanningConfig,
     web::WebService,
@@ -55,6 +55,7 @@ fn sample_config() -> AppConfig {
         chutes: None,
         codex: None,
         ollama: None,
+        opencode: None,
         openrouter: None,
         model: ModelSelectionConfig {
             model_name: "gpt-5.4-mini".into(),
@@ -218,6 +219,36 @@ fn ollama_base_url_targets_ollama_cloud() {
     let headers = http_headers_for_model(&config, "glm-5.1:cloud").expect("headers");
     assert!(headers.get("HTTP-Referer").is_none());
     assert!(headers.get("X-OpenRouter-Title").is_none());
+}
+
+#[test]
+fn opencode_openai_compatible_models_use_go_v1_base_url() {
+    let mut config = sample_config();
+    config.opencode = Some(OpencodeConfig {
+        api_key: "opencode-secret".into(),
+    });
+
+    assert_eq!(
+        openai_base_url_for_model(&config, "opencode-go/glm-5.1").expect("base url"),
+        "https://opencode.ai/zen/go/v1"
+    );
+
+    let headers = http_headers_for_model(&config, "opencode-go/glm-5.1").expect("headers");
+    assert!(headers.get("HTTP-Referer").is_none());
+    assert!(headers.get("X-OpenRouter-Title").is_none());
+}
+
+#[test]
+fn opencode_anthropic_models_use_go_base_url() {
+    let mut config = sample_config();
+    config.opencode = Some(OpencodeConfig {
+        api_key: "opencode-secret".into(),
+    });
+
+    assert_eq!(
+        openai_base_url_for_model(&config, "opencode-go/minimax-m2.7").expect("base url"),
+        "https://opencode.ai/zen/go"
+    );
 }
 
 #[test]
