@@ -225,8 +225,12 @@ pub fn active_background_terminal_count(state: &AppState) -> usize {
     state.session.active_background_terminal_count
 }
 
-pub fn transcript_revision(state: &AppState) -> u64 {
-    state.session.transcript_revision
+pub fn transcript_structure_revision(state: &AppState) -> u64 {
+    state.session.transcript_structure_revision
+}
+
+pub fn transcript_tail_revision(state: &AppState) -> u64 {
+    state.session.transcript_tail_revision
 }
 
 pub fn next_request_context_percent_state(state: &AppState) -> u64 {

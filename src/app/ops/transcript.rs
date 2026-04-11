@@ -357,7 +357,11 @@ pub(crate) fn append_pending_stream_message(
         {
             pending.plain_text.push_str(delta);
         }
-        bump_transcript_revision(state);
+        if existing_index + 1 == state.session.entries.len() {
+            bump_transcript_tail_revision(state);
+        } else {
+            bump_transcript_revision(state);
+        }
     }
 }
 
@@ -398,5 +402,12 @@ fn push_message(
 
 pub(crate) fn bump_transcript_revision(state: &mut AppState) {
     state.session.transcript_revision = state.session.transcript_revision.wrapping_add(1);
+    state.session.transcript_structure_revision =
+        state.session.transcript_structure_revision.wrapping_add(1);
     state.ui.history_render_cache = None;
+}
+
+pub(crate) fn bump_transcript_tail_revision(state: &mut AppState) {
+    state.session.transcript_revision = state.session.transcript_revision.wrapping_add(1);
+    state.session.transcript_tail_revision = state.session.transcript_tail_revision.wrapping_add(1);
 }

@@ -65,7 +65,9 @@ pub(crate) fn run_headless(
                         | crate::app::StreamEvent::ShellApprovalRequested { .. } => {}
                     }
                 }
-                RuntimeEvent::SideChannel { .. } => {}
+                RuntimeEvent::SideChannel { .. }
+                | RuntimeEvent::CodexLoginStarted { .. }
+                | RuntimeEvent::CodexLoginCompleted { .. } => {}
             }
         }
 
@@ -245,7 +247,9 @@ mod tests {
                                 }
                                 _ => {}
                             },
-                            Some(_) => {}
+                            Some(RuntimeEvent::CodexLoginStarted { .. })
+                            | Some(RuntimeEvent::CodexLoginCompleted { .. })
+                            | Some(_) => {}
                             None => {
                                 break Err(anyhow!(
                                     "event stream ended before completion. partial response: {final_text}"

@@ -33,6 +33,7 @@ use super::{
     resume::{ReplayProbe, ResumeOverrideController, reconcile_stream_text},
 };
 
+const NORMAL_STREAM_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(60);
 const POST_TOOL_RESULT_PROGRESS_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Default)]
@@ -141,7 +142,11 @@ where
     while let Some(chunk) = next_stream_item_with_timeout(
         &mut stream,
         awaiting_post_tool_progress,
-        POST_TOOL_RESULT_PROGRESS_TIMEOUT,
+        if awaiting_post_tool_progress {
+            POST_TOOL_RESULT_PROGRESS_TIMEOUT
+        } else {
+            NORMAL_STREAM_INACTIVITY_TIMEOUT
+        },
     )
     .await?
     {
@@ -376,18 +381,23 @@ async fn next_stream_item_with_timeout<S, T>(
 where
     S: futures_util::Stream<Item = T> + Unpin,
 {
-    if awaiting_post_tool_progress {
-        match tokio::time::timeout(timeout, stream.next()).await {
-            Ok(item) => Ok(item),
-            Err(_) => {
-                log_debug("llm_stream", "post_tool_progress_timeout");
-                Err(anyhow::anyhow!(
-                    "Request stalled after tool execution without further model output."
-                ))
-            }
+    match tokio::time::timeout(timeout, stream.next()).await {
+        Ok(item) => Ok(item),
+        Err(_) => {
+            let (log_label, message) = if awaiting_post_tool_progress {
+                (
+                    "post_tool_progress_timeout",
+                    "Request stalled after tool execution without further model output.",
+                )
+            } else {
+                (
+                    "stream_inactivity_timeout",
+                    "Request stalled without provider output before the turn completed.",
+                )
+            };
+            log_debug("llm_stream", log_label);
+            Err(anyhow::anyhow!(message))
         }
-    } else {
-        Ok(stream.next().await)
     }
 }
 
@@ -415,6 +425,22 @@ mod tests {
                 .expect("stream item");
 
         assert_eq!(item, Some(1));
+    }
+
+    #[tokio::test]
+    async fn normal_timeout_fails_when_stream_stops_without_closing() {
+        let mut stream = stream::pending::<i32>();
+
+        let error =
+            next_stream_item_with_timeout(&mut stream, false, std::time::Duration::from_millis(10))
+                .await
+                .expect_err("timeout error");
+
+        assert!(
+            error
+                .to_string()
+                .contains("stalled without provider output")
+        );
     }
 
     #[tokio::test]

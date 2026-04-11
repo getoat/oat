@@ -14,7 +14,7 @@ pub use composer::{
     ComposerUiState, new_composer_with_text, normalize_pasted_line_endings, picker_height,
     split_command_query, textarea_input,
 };
-pub use history::{HistoryRenderCache, HistoryViewState};
+pub use history::{HistoryRenderCache, HistoryTailRenderCache, HistoryViewState};
 pub use picker::{
     ModelPickerEntry, ModelPickerTab, PickerSelection, ReasoningPickerTarget, SelectionPicker,
     SessionPickerEntry, display_entries_for_tab, selectable_models_for_tab,

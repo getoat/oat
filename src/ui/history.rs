@@ -64,6 +64,13 @@ impl VisibleEntry<'_> {
     }
 }
 
+#[derive(Clone, Copy)]
+enum CacheAction {
+    Rebuild,
+    RefreshTail,
+    Reuse,
+}
+
 pub(super) fn render_history(
     frame: &mut Frame,
     app: &mut App,
@@ -89,27 +96,47 @@ pub(super) fn render_history(
         && !query::should_show_history_busy_indicator_state(app.state());
     let mut owned_lines = None;
     let total_lines = if use_cache {
-        let transcript_revision = query::transcript_revision(app.state());
-        let cache_missing = query::history_render_cache(app.state()).is_none_or(|cache| {
-            cache.width != content_width
-                || cache.accent != accent
-                || cache.transcript_revision != transcript_revision
-        });
-        if cache_missing {
-            let lines = build_history_lines(app, content_width, accent, loading_frame);
-            crate::app::ops::history::set_history_render_cache(
-                app.state_mut(),
-                content_width,
-                accent,
-                transcript_revision,
-                lines,
-            );
-        }
-        query::history_render_cache(app.state())
-            .as_ref()
-            .expect("history cache should be populated")
-            .lines
-            .len()
+        let structure_revision = query::transcript_structure_revision(app.state());
+        let tail_revision = query::transcript_tail_revision(app.state());
+        let cache_action = query::history_render_cache(app.state())
+            .map(|cache| {
+                if cache.width != content_width
+                    || cache.accent != accent
+                    || cache.structure_revision != structure_revision
+                {
+                    CacheAction::Rebuild
+                } else if cache.tail_revision != tail_revision {
+                    CacheAction::RefreshTail
+                } else {
+                    CacheAction::Reuse
+                }
+            })
+            .unwrap_or(CacheAction::Rebuild);
+
+        let cache = match cache_action {
+            CacheAction::Rebuild => build_history_render_cache(app, content_width, accent),
+            CacheAction::RefreshTail => {
+                let mut cache = app
+                    .state_mut()
+                    .ui
+                    .history_render_cache
+                    .take()
+                    .expect("history cache should be populated");
+                if !refresh_history_tail_cache(app, &mut cache, content_width, accent) {
+                    cache = build_history_render_cache(app, content_width, accent);
+                }
+                cache
+            }
+            CacheAction::Reuse => app
+                .state_mut()
+                .ui
+                .history_render_cache
+                .take()
+                .expect("history cache should be populated"),
+        };
+        let total_lines = cache.lines.len();
+        crate::app::ops::history::set_history_render_cache(app.state_mut(), cache);
+        total_lines
     } else {
         crate::app::ops::history::clear_history_render_cache(app.state_mut());
         owned_lines = Some(build_history_lines(
@@ -177,14 +204,14 @@ fn build_history_lines(
     let mut index = 0;
 
     while index < visible_entries.len() {
-        if visible_entries[index].is_tool_activity() {
+        if visible_entries[index].1.is_tool_activity() {
             let run_end = tool_activity_run_end(&visible_entries, index);
             push_tool_activity_run_lines(&mut lines, &visible_entries[index..run_end], width);
             index = run_end;
             continue;
         }
 
-        push_visible_entry_lines(&mut lines, visible_entries[index], width, accent);
+        push_visible_entry_lines(&mut lines, visible_entries[index].1, width, accent);
         lines.push(Line::default());
         index += 1;
     }
@@ -200,6 +227,77 @@ fn build_history_lines(
     }
 
     lines
+}
+
+fn build_history_render_cache(
+    app: &App,
+    width: usize,
+    accent: Color,
+) -> crate::app::ui::HistoryRenderCache {
+    let visible_entries = visible_entries(app);
+    let mut lines = Vec::new();
+    let mut tail = None;
+    let mut index = 0;
+
+    while index < visible_entries.len() {
+        if visible_entries[index].1.is_tool_activity() {
+            let run_end = tool_activity_run_end(&visible_entries, index);
+            push_tool_activity_run_lines(&mut lines, &visible_entries[index..run_end], width);
+            index = run_end;
+            continue;
+        }
+
+        let start = lines.len();
+        push_visible_entry_lines(&mut lines, visible_entries[index].1, width, accent);
+        lines.push(Line::default());
+        if index + 1 == visible_entries.len() {
+            tail = Some(crate::app::ui::HistoryTailRenderCache {
+                transcript_index: visible_entries[index].0,
+                start,
+                end: lines.len(),
+            });
+        }
+        index += 1;
+    }
+
+    crate::app::ui::HistoryRenderCache {
+        width,
+        accent,
+        structure_revision: query::transcript_structure_revision(app.state()),
+        tail_revision: query::transcript_tail_revision(app.state()),
+        lines,
+        tail,
+    }
+}
+
+fn refresh_history_tail_cache(
+    app: &App,
+    cache: &mut crate::app::ui::HistoryRenderCache,
+    width: usize,
+    accent: Color,
+) -> bool {
+    let Some(tail) = cache.tail.clone() else {
+        return false;
+    };
+    let Some((transcript_index, entry)) = visible_entries(app).last().copied() else {
+        return false;
+    };
+    if transcript_index != tail.transcript_index || entry.is_tool_activity() {
+        return false;
+    }
+
+    let mut replacement = Vec::new();
+    push_visible_entry_lines(&mut replacement, entry, width, accent);
+    replacement.push(Line::default());
+    let replacement_len = replacement.len();
+    cache.lines.splice(tail.start..tail.end, replacement);
+    cache.tail = Some(crate::app::ui::HistoryTailRenderCache {
+        transcript_index,
+        start: tail.start,
+        end: tail.start + replacement_len,
+    });
+    cache.tail_revision = query::transcript_tail_revision(app.state());
+    true
 }
 
 fn history_viewport_lines(
@@ -298,30 +396,37 @@ fn render_history_scrollbar(frame: &mut Frame, area: Rect, app: &App, accent: Co
     );
 }
 
-fn visible_entries(app: &App) -> Vec<VisibleEntry<'_>> {
+fn visible_entries(app: &App) -> Vec<(usize, VisibleEntry<'_>)> {
     query::entries(app.state())
         .iter()
-        .filter_map(|entry| match entry {
-            TranscriptEntry::Message(message) => Some(VisibleEntry::Message(message)),
-            TranscriptEntry::ProposedPlan(plan) => Some(VisibleEntry::ProposedPlan(plan)),
-            TranscriptEntry::ToolCall(tool_call) => Some(VisibleEntry::ToolCall(tool_call)),
-            TranscriptEntry::ToolResult(tool_result) => query::show_tool_output(app.state())
-                .then_some(VisibleEntry::ToolResult(tool_result)),
-            TranscriptEntry::HostedToolStatus(status) => {
-                Some(VisibleEntry::HostedToolStatus(status))
+        .enumerate()
+        .filter_map(|(index, entry)| match entry {
+            TranscriptEntry::Message(message) => Some((index, VisibleEntry::Message(message))),
+            TranscriptEntry::ProposedPlan(plan) => Some((index, VisibleEntry::ProposedPlan(plan))),
+            TranscriptEntry::ToolCall(tool_call) => {
+                Some((index, VisibleEntry::ToolCall(tool_call)))
             }
-            TranscriptEntry::TodoSnapshot(snapshot) => Some(VisibleEntry::TodoSnapshot(snapshot)),
-            TranscriptEntry::SubagentStatus(status) => Some(VisibleEntry::SubagentStatus(status)),
+            TranscriptEntry::ToolResult(tool_result) => query::show_tool_output(app.state())
+                .then_some((index, VisibleEntry::ToolResult(tool_result))),
+            TranscriptEntry::HostedToolStatus(status) => {
+                Some((index, VisibleEntry::HostedToolStatus(status)))
+            }
+            TranscriptEntry::TodoSnapshot(snapshot) => {
+                Some((index, VisibleEntry::TodoSnapshot(snapshot)))
+            }
+            TranscriptEntry::SubagentStatus(status) => {
+                Some((index, VisibleEntry::SubagentStatus(status)))
+            }
             TranscriptEntry::BackgroundTerminalStatus(status) => {
-                Some(VisibleEntry::BackgroundTerminalStatus(status))
+                Some((index, VisibleEntry::BackgroundTerminalStatus(status)))
             }
         })
         .collect()
 }
 
-fn tool_activity_run_end(entries: &[VisibleEntry<'_>], start: usize) -> usize {
+fn tool_activity_run_end(entries: &[(usize, VisibleEntry<'_>)], start: usize) -> usize {
     let mut end = start;
-    while end < entries.len() && entries[end].is_tool_activity() {
+    while end < entries.len() && entries[end].1.is_tool_activity() {
         end += 1;
     }
     end
@@ -373,7 +478,7 @@ fn commentary_separator_line(width: usize) -> Line<'static> {
 
 fn push_tool_activity_run_lines(
     lines: &mut Vec<Line<'static>>,
-    entries: &[VisibleEntry<'_>],
+    entries: &[(usize, VisibleEntry<'_>)],
     width: usize,
 ) {
     let hidden_count = entries.len().saturating_sub(MAX_VISIBLE_TOOL_ACTIVITY);
@@ -386,7 +491,7 @@ fn push_tool_activity_run_lines(
         )));
     }
 
-    for entry in entries.iter().skip(hidden_count).copied() {
+    for (_, entry) in entries.iter().skip(hidden_count).copied() {
         match entry {
             VisibleEntry::ToolCall(tool_call) => push_tool_call_lines(lines, tool_call, width),
             VisibleEntry::ToolResult(tool_result) => {

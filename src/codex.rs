@@ -30,13 +30,13 @@ const REFRESH_INTERVAL_DAYS: i64 = 8;
 static MODEL_CACHE: LazyLock<Mutex<Option<Vec<CachedCodexModel>>>> =
     LazyLock::new(|| Mutex::new(None));
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DeviceCodePrompt {
     pub(crate) verification_url: String,
     pub(crate) user_code: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DeviceCodeSession {
     prompt: DeviceCodePrompt,
     device_auth_id: String,
