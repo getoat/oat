@@ -24,6 +24,7 @@ pub(crate) fn submit_message(state: &mut AppState) -> Option<Effect> {
             return submit_ask_user(state);
         }
         InputContext::Picker => return submit_picker_selection(state),
+        InputContext::Stats => return None,
         InputContext::Composer | InputContext::CommandPalette => {}
     }
 

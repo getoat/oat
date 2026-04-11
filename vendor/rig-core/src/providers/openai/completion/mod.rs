@@ -839,13 +839,17 @@ impl TryFrom<CompletionResponse> for completion::CompletionResponse<CompletionRe
             .as_ref()
             .map(|usage| completion::Usage {
                 input_tokens: usage.prompt_tokens as u64,
-                output_tokens: (usage.total_tokens - usage.prompt_tokens) as u64,
+                output_tokens: usage.output_tokens() as u64,
                 total_tokens: usage.total_tokens as u64,
                 cached_input_tokens: usage
                     .prompt_tokens_details
                     .as_ref()
                     .map(|d| d.cached_tokens as u64)
                     .unwrap_or(0),
+                thinking_tokens: usage
+                    .completion_tokens_details
+                    .as_ref()
+                    .and_then(|details| details.reasoning_tokens.map(|tokens| tokens as u64)),
             })
             .unwrap_or_default();
 
@@ -906,21 +910,39 @@ pub struct PromptTokensDetails {
     pub cached_tokens: usize,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, Default)]
+pub struct CompletionTokensDetails {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_tokens: Option<usize>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Usage {
     pub prompt_tokens: usize,
+    #[serde(default)]
+    pub completion_tokens: usize,
     pub total_tokens: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_tokens_details: Option<PromptTokensDetails>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completion_tokens_details: Option<CompletionTokensDetails>,
 }
 
 impl Usage {
     pub fn new() -> Self {
         Self {
             prompt_tokens: 0,
+            completion_tokens: 0,
             total_tokens: 0,
             prompt_tokens_details: None,
+            completion_tokens_details: None,
         }
+    }
+
+    pub fn output_tokens(&self) -> usize {
+        self.total_tokens
+            .checked_sub(self.prompt_tokens)
+            .unwrap_or(self.completion_tokens)
     }
 }
 
@@ -948,13 +970,17 @@ impl GetTokenUsage for Usage {
     fn token_usage(&self) -> Option<crate::completion::Usage> {
         let mut usage = crate::completion::Usage::new();
         usage.input_tokens = self.prompt_tokens as u64;
-        usage.output_tokens = (self.total_tokens - self.prompt_tokens) as u64;
+        usage.output_tokens = self.output_tokens() as u64;
         usage.total_tokens = self.total_tokens as u64;
         usage.cached_input_tokens = self
             .prompt_tokens_details
             .as_ref()
             .map(|d| d.cached_tokens as u64)
             .unwrap_or(0);
+        usage.thinking_tokens = self
+            .completion_tokens_details
+            .as_ref()
+            .and_then(|details| details.reasoning_tokens.map(|tokens| tokens as u64));
 
         Some(usage)
     }
@@ -1519,5 +1545,29 @@ mod tests {
         });
 
         assert!(matches!(result, Err(CompletionError::RequestError(_))));
+    }
+
+    #[test]
+    fn usage_token_usage_includes_reasoning_tokens() {
+        let usage: Usage = serde_json::from_value(serde_json::json!({
+            "prompt_tokens": 100,
+            "completion_tokens": 40,
+            "total_tokens": 140,
+            "prompt_tokens_details": {
+                "cached_tokens": 25
+            },
+            "completion_tokens_details": {
+                "reasoning_tokens": 17
+            }
+        }))
+        .expect("usage deserializes");
+
+        let core_usage = usage.token_usage().expect("token usage");
+
+        assert_eq!(core_usage.input_tokens, 100);
+        assert_eq!(core_usage.output_tokens, 40);
+        assert_eq!(core_usage.total_tokens, 140);
+        assert_eq!(core_usage.cached_input_tokens, 25);
+        assert_eq!(core_usage.thinking_tokens, Some(17));
     }
 }

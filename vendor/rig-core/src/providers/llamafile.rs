@@ -429,8 +429,10 @@ where
         let span = tracing::Span::current();
         let mut final_usage = openai::Usage {
             prompt_tokens: 0,
+            completion_tokens: 0,
             total_tokens: 0,
             prompt_tokens_details: None,
+            completion_tokens_details: None,
         };
         let mut text_response = String::new();
         let mut calls: HashMap<usize, (String, String, String)> = HashMap::new();

@@ -13,6 +13,7 @@ pub(super) fn handle(state: &mut AppState, action: Action) -> Option<Effect> {
                     ops::ask_user::move_ask_user_answer_up(state);
                 }
                 InputContext::PlanReview => ops::planning::move_plan_review_selection(state, -1),
+                InputContext::Stats => ops::stats::move_stats_selection(state, -1),
                 InputContext::Picker => ops::picker::move_picker_selection_up(state),
                 InputContext::CommandPalette => ops::composer::move_command_selection_up(state),
                 InputContext::Composer => {
@@ -35,6 +36,7 @@ pub(super) fn handle(state: &mut AppState, action: Action) -> Option<Effect> {
                     ops::ask_user::move_ask_user_answer_down(state);
                 }
                 InputContext::PlanReview => ops::planning::move_plan_review_selection(state, 1),
+                InputContext::Stats => ops::stats::move_stats_selection(state, 1),
                 InputContext::Picker => ops::picker::move_picker_selection_down(state),
                 InputContext::CommandPalette => ops::composer::move_command_selection_down(state),
                 InputContext::Composer => {
@@ -53,6 +55,7 @@ pub(super) fn handle(state: &mut AppState, action: Action) -> Option<Effect> {
                 InputContext::WriteApproval
                     | InputContext::ShellApproval { .. }
                     | InputContext::PlanReview
+                    | InputContext::Stats
             ) {
                 return None;
             }
@@ -92,7 +95,9 @@ pub(super) fn handle(state: &mut AppState, action: Action) -> Option<Effect> {
                 InputContext::ShellApproval { editing: true, .. } => {
                     ops::approvals::apply_shell_approval_input(state, input)
                 }
-                InputContext::ShellApproval { .. } | InputContext::PlanReview => {}
+                InputContext::ShellApproval { .. }
+                | InputContext::PlanReview
+                | InputContext::Stats => {}
                 InputContext::AskUser { editing: true } => {
                     ops::ask_user::apply_ask_user_input(state, input)
                 }
@@ -109,7 +114,9 @@ pub(super) fn handle(state: &mut AppState, action: Action) -> Option<Effect> {
                 InputContext::ShellApproval { editing: true, .. } => {
                     ops::approvals::paste_into_shell_approval_detail(state, &text)
                 }
-                InputContext::ShellApproval { .. } | InputContext::PlanReview => {}
+                InputContext::ShellApproval { .. }
+                | InputContext::PlanReview
+                | InputContext::Stats => {}
                 InputContext::AskUser { editing: true } => {
                     ops::ask_user::paste_into_ask_user_detail(state, &text)
                 }

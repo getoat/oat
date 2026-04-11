@@ -438,6 +438,7 @@ impl TryFrom<CompletionResponse> for completion::CompletionResponse<CompletionRe
                 .and_then(|d| d.cached_tokens)
                 .map(|c| c as u64)
                 .unwrap_or(0),
+            thinking_tokens: None,
         };
 
         Ok(completion::CompletionResponse {

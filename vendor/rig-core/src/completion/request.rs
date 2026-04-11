@@ -411,6 +411,8 @@ pub struct Usage {
     pub total_tokens: u64,
     /// The number of cached input tokens (from prompt caching). 0 if not reported by provider.
     pub cached_input_tokens: u64,
+    /// The number of reasoning/thinking tokens when reported by the provider.
+    pub thinking_tokens: Option<u64>,
 }
 
 impl Usage {
@@ -421,6 +423,7 @@ impl Usage {
             output_tokens: 0,
             total_tokens: 0,
             cached_input_tokens: 0,
+            thinking_tokens: None,
         }
     }
 }
@@ -440,6 +443,10 @@ impl Add for Usage {
             output_tokens: self.output_tokens + other.output_tokens,
             total_tokens: self.total_tokens + other.total_tokens,
             cached_input_tokens: self.cached_input_tokens + other.cached_input_tokens,
+            thinking_tokens: match (self.thinking_tokens, other.thinking_tokens) {
+                (Some(lhs), Some(rhs)) => Some(lhs + rhs),
+                _ => None,
+            },
         }
     }
 }
@@ -450,6 +457,10 @@ impl AddAssign for Usage {
         self.output_tokens += other.output_tokens;
         self.total_tokens += other.total_tokens;
         self.cached_input_tokens += other.cached_input_tokens;
+        self.thinking_tokens = match (self.thinking_tokens, other.thinking_tokens) {
+            (Some(lhs), Some(rhs)) => Some(lhs + rhs),
+            _ => None,
+        };
     }
 }
 

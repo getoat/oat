@@ -350,6 +350,7 @@ impl TryFrom<CompletionResponse> for completion::CompletionResponse<CompletionRe
                         output_tokens: completion_tokens,
                         total_tokens: prompt_tokens + completion_tokens,
                         cached_input_tokens: 0,
+                        thinking_tokens: None,
                     },
                     raw_response,
                     message_id: None,

@@ -1,22 +1,23 @@
 use std::{
+    collections::BTreeMap,
     env, fs,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result};
 use rig::{
-    agent::{HookAction, PromptHook},
+    agent::{HookAction, PromptHook, ToolCallHookAction},
     completion::{CompletionModel, GetTokenUsage, Message, Usage},
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::model_registry;
+use crate::{model_registry, token_counting::count_text_tokens};
 
 const STATS_DIR_RELATIVE_PATH: &str = ".config/oat/stats";
-const SCHEMA_VERSION: u32 = 2;
+const SCHEMA_VERSION: u32 = 5;
 const TOOL_CALL_ERROR_PREFIX: &str = "ToolCallError:";
 const NANOS_PER_USD: u64 = 1_000_000_000;
 const TOKENS_PER_MILLION: u64 = 1_000_000;
@@ -27,48 +28,248 @@ struct StatsState {
     current: SessionStats,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThinkingTokenTotals {
+    #[serde(default)]
+    pub tokens: u64,
+    #[serde(default)]
+    pub available_request_count: u64,
+    #[serde(default)]
+    pub unavailable_request_count: u64,
+    #[serde(default)]
+    pub estimated_request_count: u64,
+}
+
+impl ThinkingTokenTotals {
+    fn add(self, other: Self) -> Self {
+        Self {
+            tokens: self.tokens + other.tokens,
+            available_request_count: self.available_request_count + other.available_request_count,
+            unavailable_request_count: self.unavailable_request_count
+                + other.unavailable_request_count,
+            estimated_request_count: self.estimated_request_count + other.estimated_request_count,
+        }
+    }
+
+    fn record(&mut self, thinking_tokens: Option<u64>, estimated: bool) {
+        match thinking_tokens {
+            Some(tokens) => {
+                self.tokens += tokens;
+                self.available_request_count += 1;
+                if estimated {
+                    self.estimated_request_count += 1;
+                }
+            }
+            None => {
+                self.unavailable_request_count += 1;
+            }
+        }
+    }
+
+    fn value_for_requests(self, request_count: u64) -> Option<u64> {
+        if request_count == 0 {
+            Some(0)
+        } else if self.available_request_count == 0 {
+            None
+        } else {
+            Some(self.tokens)
+        }
+    }
+
+    fn is_partial_for_requests(self, request_count: u64) -> bool {
+        request_count > 0 && self.available_request_count > 0 && self.unavailable_request_count > 0
+    }
+
+    fn is_estimated_for_requests(self, request_count: u64) -> bool {
+        request_count > 0 && self.estimated_request_count > 0
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StatsTotals {
     pub input_tokens: u64,
     pub cached_input_tokens: u64,
     pub output_tokens: u64,
+    #[serde(default)]
+    pub thinking_tokens: ThinkingTokenTotals,
+    #[serde(default)]
     pub estimated_cost_nanos_usd: u64,
     pub request_count: u64,
     pub tool_call_count: u64,
     pub tool_success_count: u64,
     pub tool_failure_count: u64,
+    #[serde(default)]
+    pub ttfb_total_millis: u64,
+    #[serde(default)]
+    pub ttfb_recorded_request_count: u64,
+    #[serde(default)]
+    pub total_request_millis: u64,
+    #[serde(default)]
+    pub timed_request_count: u64,
+    #[serde(default)]
+    pub completed_request_count: u64,
+    #[serde(default)]
+    pub failed_request_count: u64,
+    #[serde(default)]
+    pub interrupted_request_count: u64,
+    #[serde(default)]
+    pub usage_recorded_request_count: u64,
+    #[serde(default)]
+    pub throughput_output_tokens: u64,
+    #[serde(default)]
+    pub usage_recorded_request_millis: u64,
 }
 
 impl StatsTotals {
-    fn add_session(&mut self, session: &SessionStats) {
-        self.input_tokens += session.input_tokens;
-        self.cached_input_tokens += session.cached_input_tokens;
-        self.output_tokens += session.output_tokens;
-        self.estimated_cost_nanos_usd += session.estimated_cost_nanos_usd;
-        self.request_count += session.request_count;
-        self.tool_call_count += session.tool_call_count;
-        self.tool_success_count += session.tool_success_count;
-        self.tool_failure_count += session.tool_failure_count;
+    fn add_totals(&mut self, other: Self) {
+        self.input_tokens += other.input_tokens;
+        self.cached_input_tokens += other.cached_input_tokens;
+        self.output_tokens += other.output_tokens;
+        self.thinking_tokens = self.thinking_tokens.add(other.thinking_tokens);
+        self.estimated_cost_nanos_usd += other.estimated_cost_nanos_usd;
+        self.request_count += other.request_count;
+        self.tool_call_count += other.tool_call_count;
+        self.tool_success_count += other.tool_success_count;
+        self.tool_failure_count += other.tool_failure_count;
+        self.ttfb_total_millis += other.ttfb_total_millis;
+        self.ttfb_recorded_request_count += other.ttfb_recorded_request_count;
+        self.total_request_millis += other.total_request_millis;
+        self.timed_request_count += other.timed_request_count;
+        self.completed_request_count += other.completed_request_count;
+        self.failed_request_count += other.failed_request_count;
+        self.interrupted_request_count += other.interrupted_request_count;
+        self.usage_recorded_request_count += other.usage_recorded_request_count;
+        self.throughput_output_tokens += other.throughput_output_tokens;
+        self.usage_recorded_request_millis += other.usage_recorded_request_millis;
     }
 
-    fn cached_input_percent(self) -> f64 {
-        if self.input_tokens == 0 {
-            0.0
+    fn record_request(&mut self) {
+        self.request_count += 1;
+    }
+
+    fn record_tool_result(&mut self, is_failure: bool) {
+        self.tool_call_count += 1;
+        if is_failure {
+            self.tool_failure_count += 1;
         } else {
-            (self.cached_input_tokens as f64 / self.input_tokens as f64) * 100.0
+            self.tool_success_count += 1;
         }
     }
 
-    fn tool_success_rate(self) -> f64 {
-        if self.tool_call_count == 0 {
-            0.0
+    fn record_usage(
+        &mut self,
+        usage: Usage,
+        thinking_tokens_estimated: bool,
+        estimated_cost_nanos_usd: u64,
+        request_millis: u64,
+    ) {
+        self.input_tokens += usage.input_tokens;
+        self.cached_input_tokens += usage.cached_input_tokens;
+        self.output_tokens += usage.output_tokens;
+        self.thinking_tokens
+            .record(usage.thinking_tokens, thinking_tokens_estimated);
+        self.estimated_cost_nanos_usd += estimated_cost_nanos_usd;
+        self.usage_recorded_request_count += 1;
+        self.throughput_output_tokens += usage.output_tokens;
+        self.usage_recorded_request_millis += request_millis;
+    }
+
+    fn record_usage_missing(&mut self, estimated_thinking_tokens: Option<u64>) {
+        self.thinking_tokens.record(
+            estimated_thinking_tokens,
+            estimated_thinking_tokens.is_some(),
+        );
+    }
+
+    fn record_timing(&mut self, ttfb_millis: Option<u64>, total_request_millis: u64) {
+        if let Some(ttfb_millis) = ttfb_millis {
+            self.ttfb_total_millis += ttfb_millis;
+            self.ttfb_recorded_request_count += 1;
+        }
+        self.total_request_millis += total_request_millis;
+        self.timed_request_count += 1;
+    }
+
+    fn record_request_outcome(&mut self, outcome: RequestOutcome) {
+        match outcome {
+            RequestOutcome::Completed => {
+                self.completed_request_count += 1;
+            }
+            RequestOutcome::Failed => {
+                self.failed_request_count += 1;
+            }
+            RequestOutcome::Interrupted => {
+                self.interrupted_request_count += 1;
+            }
+        }
+    }
+
+    pub fn thinking_tokens_value(self) -> Option<u64> {
+        if self.open_request_count() > 0 {
+            return None;
+        }
+        self.thinking_tokens.value_for_requests(self.request_count)
+    }
+
+    pub fn thinking_tokens_partial(self) -> bool {
+        if self.open_request_count() > 0 {
+            return false;
+        }
+        self.thinking_tokens
+            .is_partial_for_requests(self.request_count)
+    }
+
+    pub fn thinking_tokens_estimated(self) -> bool {
+        if self.open_request_count() > 0 {
+            return false;
+        }
+        self.thinking_tokens
+            .is_estimated_for_requests(self.request_count)
+    }
+
+    pub fn average_ttfb_millis(self) -> Option<f64> {
+        if self.ttfb_recorded_request_count == 0 {
+            None
         } else {
-            (self.tool_success_count as f64 / self.tool_call_count as f64) * 100.0
+            Some(self.ttfb_total_millis as f64 / self.ttfb_recorded_request_count as f64)
+        }
+    }
+
+    pub fn average_total_request_millis(self) -> Option<f64> {
+        if self.timed_request_count == 0 {
+            None
+        } else {
+            Some(self.total_request_millis as f64 / self.timed_request_count as f64)
+        }
+    }
+
+    pub fn tokens_per_second(self) -> Option<f64> {
+        if self.usage_recorded_request_count == 0 || self.usage_recorded_request_millis == 0 {
+            None
+        } else {
+            Some(
+                self.throughput_output_tokens as f64
+                    / (self.usage_recorded_request_millis as f64 / 1_000.0),
+            )
         }
     }
 
     pub fn estimated_cost_usd(self) -> f64 {
         self.estimated_cost_nanos_usd as f64 / NANOS_PER_USD as f64
+    }
+
+    pub fn closed_request_count(self) -> u64 {
+        self.completed_request_count + self.failed_request_count + self.interrupted_request_count
+    }
+
+    pub fn open_request_count(self) -> u64 {
+        self.request_count
+            .saturating_sub(self.closed_request_count())
+    }
+
+    pub fn requests_without_usage(self) -> u64 {
+        self.closed_request_count()
+            .saturating_sub(self.usage_recorded_request_count)
     }
 }
 
@@ -76,18 +277,9 @@ impl StatsTotals {
 pub struct StatsReport {
     pub current: StatsTotals,
     pub historical: StatsTotals,
+    pub current_models: BTreeMap<String, StatsTotals>,
+    pub historical_models: BTreeMap<String, StatsTotals>,
     pub historical_session_count: usize,
-}
-
-impl StatsReport {
-    pub fn render(&self) -> String {
-        format!(
-            "Current session\n\n{}\n\nHistorical sessions ({})\n\n{}",
-            render_totals(self.current),
-            self.historical_session_count,
-            render_totals(self.historical),
-        )
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -96,15 +288,10 @@ pub struct SessionStats {
     pub session_id: String,
     pub started_at_unix_ms: u64,
     pub finished_at_unix_ms: Option<u64>,
-    pub input_tokens: u64,
-    pub cached_input_tokens: u64,
-    pub output_tokens: u64,
+    #[serde(flatten)]
+    pub totals: StatsTotals,
     #[serde(default)]
-    pub estimated_cost_nanos_usd: u64,
-    pub request_count: u64,
-    pub tool_call_count: u64,
-    pub tool_success_count: u64,
-    pub tool_failure_count: u64,
+    pub per_model: BTreeMap<String, StatsTotals>,
 }
 
 impl SessionStats {
@@ -114,36 +301,28 @@ impl SessionStats {
             session_id: Uuid::now_v7().to_string(),
             started_at_unix_ms: unix_timestamp_ms(),
             finished_at_unix_ms: None,
-            input_tokens: 0,
-            cached_input_tokens: 0,
-            output_tokens: 0,
-            estimated_cost_nanos_usd: 0,
-            request_count: 0,
-            tool_call_count: 0,
-            tool_success_count: 0,
-            tool_failure_count: 0,
+            totals: StatsTotals::default(),
+            per_model: BTreeMap::new(),
         }
     }
 
     fn is_empty(&self) -> bool {
-        self.input_tokens == 0
-            && self.cached_input_tokens == 0
-            && self.output_tokens == 0
-            && self.estimated_cost_nanos_usd == 0
-            && self.request_count == 0
-            && self.tool_call_count == 0
-            && self.tool_success_count == 0
-            && self.tool_failure_count == 0
+        self.totals == StatsTotals::default() && self.per_model.is_empty()
     }
 
     fn finalize(&mut self) {
         self.finished_at_unix_ms = Some(unix_timestamp_ms());
     }
 
-    fn totals(&self) -> StatsTotals {
-        let mut totals = StatsTotals::default();
-        totals.add_session(self);
-        totals
+    fn apply_to_model_and_total(
+        &mut self,
+        model_name: Option<&str>,
+        mut apply: impl FnMut(&mut StatsTotals),
+    ) {
+        apply(&mut self.totals);
+        if let Some(model_name) = model_name {
+            apply(self.per_model.entry(model_name.to_string()).or_default());
+        }
     }
 }
 
@@ -174,17 +353,11 @@ impl StatsStore {
 
     #[cfg(test)]
     pub fn hook(&self) -> StatsHook {
-        StatsHook {
-            state: Arc::clone(&self.state),
-            model_name: None,
-        }
+        StatsHook::new(Arc::clone(&self.state), None)
     }
 
     pub fn hook_for_model(&self, model_name: impl Into<String>) -> StatsHook {
-        StatsHook {
-            state: Arc::clone(&self.state),
-            model_name: Some(model_name.into()),
-        }
+        StatsHook::new(Arc::clone(&self.state), Some(model_name.into()))
     }
 
     pub fn rotate_session(&self) -> Result<()> {
@@ -216,19 +389,21 @@ impl StatsStore {
             (state.current.clone(), state.stats_dir.clone())
         };
 
-        let (historical, historical_session_count) =
-            load_historical_totals(stats_dir.as_deref(), &current.session_id)?;
+        let (historical, historical_models, historical_session_count) =
+            load_historical_report(stats_dir.as_deref(), &current.session_id)?;
 
         Ok(StatsReport {
-            current: current.totals(),
+            current: current.totals,
             historical,
+            current_models: current.per_model,
+            historical_models,
             historical_session_count,
         })
     }
 
     pub fn current_totals(&self) -> StatsTotals {
         let state = self.state.lock().expect("stats state lock");
-        state.current.totals()
+        state.current.totals
     }
 }
 
@@ -238,51 +413,197 @@ impl Drop for StatsStore {
     }
 }
 
+#[derive(Debug, Default)]
+struct RequestLifecycle {
+    active: Option<ActiveRequest>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ActiveRequest {
+    started_at: Instant,
+    first_response_elapsed_millis: Option<u64>,
+    model_wait_millis: Option<u64>,
+    estimated_thinking_tokens: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RequestOutcome {
+    Completed,
+    Failed,
+    Interrupted,
+}
+
 #[derive(Clone)]
 pub struct StatsHook {
     state: Arc<Mutex<StatsState>>,
     model_name: Option<String>,
+    request: Arc<Mutex<RequestLifecycle>>,
 }
 
 impl StatsHook {
-    pub fn with_model(&self, model_name: impl Into<String>) -> Self {
+    fn new(state: Arc<Mutex<StatsState>>, model_name: Option<String>) -> Self {
         Self {
-            state: Arc::clone(&self.state),
-            model_name: Some(model_name.into()),
+            state,
+            model_name,
+            request: Arc::new(Mutex::new(RequestLifecycle::default())),
         }
     }
 
+    pub fn with_model(&self, model_name: impl Into<String>) -> Self {
+        Self::new(Arc::clone(&self.state), Some(model_name.into()))
+    }
+
     fn record_request(&self) {
+        let model_name = self.model_name.as_deref();
         let _ = update_and_persist(&self.state, |current| {
-            current.request_count += 1;
+            current.apply_to_model_and_total(model_name, StatsTotals::record_request);
         });
+
+        let mut request = self.request.lock().expect("stats request lock");
+        request.active = Some(ActiveRequest {
+            started_at: Instant::now(),
+            first_response_elapsed_millis: None,
+            model_wait_millis: None,
+            estimated_thinking_tokens: 0,
+        });
+    }
+
+    pub fn record_response_progress(&self) {
+        let mut request = self.request.lock().expect("stats request lock");
+        let Some(active) = request.active.as_mut() else {
+            return;
+        };
+
+        if active.first_response_elapsed_millis.is_none() {
+            active.first_response_elapsed_millis =
+                Some(active.started_at.elapsed().as_millis() as u64);
+        }
+    }
+
+    pub fn record_reasoning_progress(&self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+
+        let mut request = self.request.lock().expect("stats request lock");
+        let Some(active) = request.active.as_mut() else {
+            return;
+        };
+        active.estimated_thinking_tokens += count_text_tokens(text);
     }
 
     fn record_tool_result(&self, result: &str) {
         let normalized = normalize_tool_result(result);
         let is_failure = normalized.starts_with(TOOL_CALL_ERROR_PREFIX);
+        let model_name = self.model_name.as_deref();
         let _ = update_and_persist(&self.state, |current| {
-            current.tool_call_count += 1;
-            if is_failure {
-                current.tool_failure_count += 1;
-            } else {
-                current.tool_success_count += 1;
-            }
+            current.apply_to_model_and_total(model_name, |totals| {
+                totals.record_tool_result(is_failure);
+            });
         });
     }
 
-    fn record_usage(&self, usage: Usage) {
-        let estimated_cost_nanos_usd = self
-            .model_name
-            .as_deref()
-            .map(|model_name| estimate_request_cost_nanos_usd(model_name, usage))
-            .unwrap_or(0);
+    fn persist_timing_if_needed(&self) {
+        let timing = {
+            let mut request = self.request.lock().expect("stats request lock");
+            let Some(active) = request.active.as_mut() else {
+                return;
+            };
+            if active.model_wait_millis.is_some() {
+                return;
+            }
+
+            let total_request_millis = active.started_at.elapsed().as_millis() as u64;
+            active.model_wait_millis = Some(total_request_millis);
+            Some((active.first_response_elapsed_millis, total_request_millis))
+        };
+
+        let Some((ttfb_millis, total_request_millis)) = timing else {
+            return;
+        };
+
+        let model_name = self.model_name.as_deref();
         let _ = update_and_persist(&self.state, |current| {
-            current.input_tokens += usage.input_tokens;
-            current.cached_input_tokens += usage.cached_input_tokens;
-            current.output_tokens += usage.output_tokens;
-            current.estimated_cost_nanos_usd += estimated_cost_nanos_usd;
+            current.apply_to_model_and_total(model_name, |totals| {
+                totals.record_timing(ttfb_millis, total_request_millis);
+            });
         });
+    }
+
+    fn pause_request_timing(&self) {
+        self.persist_timing_if_needed();
+    }
+
+    fn complete_request_with_outcome(&self, usage: Option<Usage>, outcome: RequestOutcome) {
+        self.persist_timing_if_needed();
+
+        let active = {
+            let mut request = self.request.lock().expect("stats request lock");
+            request.active.take()
+        };
+        let Some(active) = active else {
+            return;
+        };
+
+        let request_millis = active
+            .model_wait_millis
+            .unwrap_or_else(|| active.started_at.elapsed().as_millis() as u64);
+        let estimated_thinking_tokens = active.estimated_thinking_tokens;
+        let model_name = self.model_name.as_deref();
+        let (usage, thinking_tokens_estimated, estimated_cost_nanos_usd) = match usage {
+            Some(mut usage) => {
+                let thinking_tokens_estimated =
+                    usage.thinking_tokens.is_none() && estimated_thinking_tokens > 0;
+                if thinking_tokens_estimated {
+                    usage.thinking_tokens = Some(estimated_thinking_tokens);
+                }
+                let estimated_cost_nanos_usd = self
+                    .model_name
+                    .as_deref()
+                    .map(|model_name| estimate_request_cost_nanos_usd(model_name, usage))
+                    .unwrap_or(0);
+                (
+                    Some(usage),
+                    thinking_tokens_estimated,
+                    estimated_cost_nanos_usd,
+                )
+            }
+            None => (None, false, 0),
+        };
+
+        let _ = update_and_persist(&self.state, |current| {
+            current.apply_to_model_and_total(model_name, |totals| {
+                totals.record_request_outcome(outcome);
+                if let Some(usage) = usage {
+                    totals.record_usage(
+                        usage,
+                        thinking_tokens_estimated,
+                        estimated_cost_nanos_usd,
+                        request_millis,
+                    );
+                } else {
+                    totals.record_usage_missing(
+                        (estimated_thinking_tokens > 0).then_some(estimated_thinking_tokens),
+                    );
+                }
+            });
+        });
+    }
+
+    fn complete_request(&self, usage: Option<Usage>) {
+        self.complete_request_with_outcome(usage, RequestOutcome::Completed);
+    }
+
+    pub fn finish_request_without_usage(&self) {
+        self.complete_request_with_outcome(None, RequestOutcome::Completed);
+    }
+
+    pub fn fail_request(&self) {
+        self.complete_request_with_outcome(None, RequestOutcome::Failed);
+    }
+
+    fn interrupt_request(&self) {
+        self.complete_request_with_outcome(None, RequestOutcome::Interrupted);
     }
 }
 
@@ -294,6 +615,34 @@ where
     async fn on_completion_call(&self, _prompt: &Message, _history: &[Message]) -> HookAction {
         self.record_request();
         HookAction::cont()
+    }
+
+    async fn on_text_delta(&self, _text_delta: &str, _aggregated_text: &str) -> HookAction {
+        self.record_response_progress();
+        HookAction::cont()
+    }
+
+    async fn on_tool_call_delta(
+        &self,
+        _tool_call_id: &str,
+        _internal_call_id: &str,
+        _tool_name: Option<&str>,
+        _tool_call_delta: &str,
+    ) -> HookAction {
+        self.record_response_progress();
+        HookAction::cont()
+    }
+
+    async fn on_tool_call(
+        &self,
+        _tool_name: &str,
+        _tool_call_id: Option<String>,
+        _internal_call_id: &str,
+        _args: &str,
+    ) -> ToolCallHookAction {
+        self.record_response_progress();
+        self.pause_request_timing();
+        ToolCallHookAction::Continue
     }
 
     async fn on_tool_result(
@@ -313,8 +662,17 @@ where
         _prompt: &Message,
         response: &M::StreamingResponse,
     ) -> HookAction {
-        self.record_usage(response.token_usage().unwrap_or_default());
+        self.record_response_progress();
+        self.complete_request(response.token_usage());
         HookAction::cont()
+    }
+}
+
+impl Drop for StatsHook {
+    fn drop(&mut self) {
+        if Arc::strong_count(&self.request) == 1 {
+            self.interrupt_request();
+        }
     }
 }
 
@@ -368,19 +726,20 @@ fn persist_session(stats_dir: Option<&Path>, session: &SessionStats) -> Result<(
     Ok(())
 }
 
-fn load_historical_totals(
+fn load_historical_report(
     stats_dir: Option<&Path>,
     current_session_id: &str,
-) -> Result<(StatsTotals, usize)> {
+) -> Result<(StatsTotals, BTreeMap<String, StatsTotals>, usize)> {
     let Some(stats_dir) = stats_dir else {
-        return Ok((StatsTotals::default(), 0));
+        return Ok((StatsTotals::default(), BTreeMap::new(), 0));
     };
 
     if !stats_dir.exists() {
-        return Ok((StatsTotals::default(), 0));
+        return Ok((StatsTotals::default(), BTreeMap::new(), 0));
     }
 
     let mut totals = StatsTotals::default();
+    let mut models = BTreeMap::new();
     let mut session_count = 0;
 
     for entry in fs::read_dir(stats_dir)
@@ -396,15 +755,88 @@ fn load_historical_totals(
             .with_context(|| format!("failed to read {}", path.display()))?;
         let session: SessionStats = serde_json::from_str(&raw)
             .with_context(|| format!("failed to parse {}", path.display()))?;
+        let session = normalize_legacy_session(session);
         if session.session_id == current_session_id || session.is_empty() {
             continue;
         }
 
-        totals.add_session(&session);
+        totals.add_totals(session.totals);
+        for (model_name, model_totals) in session.per_model {
+            models
+                .entry(model_name)
+                .or_insert_with(StatsTotals::default)
+                .add_totals(model_totals);
+        }
         session_count += 1;
     }
 
-    Ok((totals, session_count))
+    Ok((totals, models, session_count))
+}
+
+fn normalize_legacy_session(mut session: SessionStats) -> SessionStats {
+    if session.schema_version < 3 {
+        if session.totals.request_count > 0
+            && session.totals.thinking_tokens.tokens == 0
+            && session.totals.thinking_tokens.unavailable_request_count == 0
+        {
+            session.totals.thinking_tokens.unavailable_request_count = session.totals.request_count;
+        }
+        for totals in session.per_model.values_mut() {
+            if totals.request_count > 0
+                && totals.thinking_tokens.tokens == 0
+                && totals.thinking_tokens.unavailable_request_count == 0
+            {
+                totals.thinking_tokens.unavailable_request_count = totals.request_count;
+            }
+        }
+    }
+
+    if session.schema_version < 5 {
+        normalize_legacy_thinking_coverage(&mut session.totals);
+        for totals in session.per_model.values_mut() {
+            normalize_legacy_thinking_coverage(totals);
+        }
+    }
+
+    if session.schema_version < 4 {
+        normalize_legacy_timing(&mut session.totals);
+        for totals in session.per_model.values_mut() {
+            normalize_legacy_timing(totals);
+        }
+    }
+
+    session.schema_version = SCHEMA_VERSION;
+
+    session
+}
+
+fn normalize_legacy_thinking_coverage(totals: &mut StatsTotals) {
+    totals.thinking_tokens.available_request_count = if totals.request_count == 0 {
+        0
+    } else if totals.thinking_tokens.unavailable_request_count == 0 {
+        totals.request_count
+    } else if totals.thinking_tokens.tokens > 0 {
+        1
+    } else {
+        0
+    };
+    totals.thinking_tokens.estimated_request_count = totals
+        .thinking_tokens
+        .estimated_request_count
+        .min(totals.thinking_tokens.available_request_count);
+}
+
+fn normalize_legacy_timing(totals: &mut StatsTotals) {
+    totals.ttfb_total_millis = 0;
+    totals.ttfb_recorded_request_count = 0;
+    totals.total_request_millis = 0;
+    totals.timed_request_count = 0;
+    totals.completed_request_count = totals.request_count;
+    totals.failed_request_count = 0;
+    totals.interrupted_request_count = 0;
+    totals.usage_recorded_request_count = totals.request_count;
+    totals.throughput_output_tokens = 0;
+    totals.usage_recorded_request_millis = 0;
 }
 
 fn session_path(stats_dir: &Path, session_id: &str) -> PathBuf {
@@ -413,22 +845,6 @@ fn session_path(stats_dir: &Path, session_id: &str) -> PathBuf {
 
 fn normalize_tool_result(result: &str) -> String {
     serde_json::from_str::<String>(result).unwrap_or_else(|_| result.to_string())
-}
-
-fn render_totals(totals: StatsTotals) -> String {
-    format!(
-        "- Input tokens: {}\n- Cached input tokens: {} ({:.1}%)\n- Output tokens: {}\n- Estimated cost: ${:.6}\n- Requests: {}\n- Tool calls: {} ({} success, {} fail, {:.1}% success)",
-        totals.input_tokens,
-        totals.cached_input_tokens,
-        totals.cached_input_percent(),
-        totals.output_tokens,
-        totals.estimated_cost_usd(),
-        totals.request_count,
-        totals.tool_call_count,
-        totals.tool_success_count,
-        totals.tool_failure_count,
-        totals.tool_success_rate(),
-    )
 }
 
 fn estimate_request_cost_nanos_usd(model_name: &str, usage: Usage) -> u64 {
@@ -471,7 +887,7 @@ mod tests {
             Arc,
             atomic::{AtomicUsize, Ordering},
         },
-        time::{SystemTime, UNIX_EPOCH},
+        time::{Duration, SystemTime, UNIX_EPOCH},
     };
 
     use futures_util::StreamExt;
@@ -506,32 +922,6 @@ mod tests {
     }
 
     #[test]
-    fn report_formats_expected_labels() {
-        let report = StatsReport {
-            current: StatsTotals {
-                input_tokens: 10,
-                cached_input_tokens: 2,
-                output_tokens: 4,
-                estimated_cost_nanos_usd: 12_345_678,
-                request_count: 3,
-                tool_call_count: 5,
-                tool_success_count: 4,
-                tool_failure_count: 1,
-            },
-            historical: StatsTotals::default(),
-            historical_session_count: 0,
-        };
-
-        let rendered = report.render();
-
-        assert!(rendered.contains("Current session"));
-        assert!(rendered.contains("Historical sessions (0)"));
-        assert!(rendered.contains("- Cached input tokens: 2 (20.0%)"));
-        assert!(rendered.contains("- Estimated cost: $0.012346"));
-        assert!(rendered.contains("- Tool calls: 5 (4 success, 1 fail, 80.0% success)"));
-    }
-
-    #[test]
     fn persist_session_skips_empty_sessions() {
         let dir = unique_temp_dir("empty");
         let session = SessionStats::new();
@@ -547,7 +937,9 @@ mod tests {
         let store = StatsStore::with_stats_dir(Some(dir.clone()));
         let hook = store.hook();
 
+        hook.record_request();
         hook.record_tool_result(r#""ToolCallError: missing field `filename`""#);
+        hook.finish_request_without_usage();
 
         let report = store.report().expect("load stats report");
         assert_eq!(report.current.tool_call_count, 1);
@@ -566,12 +958,14 @@ mod tests {
         let hook = store.hook_for_model("gpt-5.4-mini");
 
         hook.record_request();
-        hook.record_usage(Usage {
+        hook.record_response_progress();
+        hook.complete_request(Some(Usage {
             input_tokens: 12,
             cached_input_tokens: 3,
             output_tokens: 6,
             total_tokens: 18,
-        });
+            thinking_tokens: Some(2),
+        }));
         hook.record_tool_result("ok");
         store.rotate_session().expect("rotate session");
 
@@ -581,11 +975,18 @@ mod tests {
         assert_eq!(report.historical.input_tokens, 12);
         assert_eq!(report.historical.cached_input_tokens, 3);
         assert_eq!(report.historical.output_tokens, 6);
-        assert_eq!(report.historical.estimated_cost_nanos_usd, 33_975);
+        assert_eq!(report.historical.thinking_tokens_value(), Some(2));
         assert_eq!(report.historical.request_count, 1);
         assert_eq!(report.historical.tool_call_count, 1);
         assert_eq!(report.historical.tool_success_count, 1);
-        assert_eq!(report.historical.tool_failure_count, 0);
+        assert_eq!(
+            report
+                .historical_models
+                .get("gpt-5.4-mini")
+                .expect("historical model")
+                .thinking_tokens_value(),
+            Some(2)
+        );
 
         fs::remove_dir_all(dir).expect("remove temp dir");
     }
@@ -613,51 +1014,107 @@ mod tests {
     }
 
     #[test]
-    fn historical_totals_sum_multiple_sessions() {
+    fn historical_report_sums_multiple_sessions_and_models() {
         let dir = unique_temp_dir("aggregate");
         fs::create_dir_all(&dir).expect("create stats dir");
 
         let mut first = SessionStats::new();
-        first.request_count = 1;
-        first.input_tokens = 10;
-        first.cached_input_tokens = 2;
-        first.output_tokens = 5;
-        first.estimated_cost_nanos_usd = 10_000;
-        first.tool_call_count = 1;
-        first.tool_success_count = 1;
+        first.totals.request_count = 1;
+        first.totals.completed_request_count = 1;
+        first.totals.usage_recorded_request_count = 1;
+        first.totals.input_tokens = 10;
+        first.totals.cached_input_tokens = 2;
+        first.totals.output_tokens = 5;
+        first.totals.thinking_tokens.tokens = 1;
+        first.totals.thinking_tokens.available_request_count = 1;
+        first.totals.estimated_cost_nanos_usd = 10_000;
+        first.per_model.insert(
+            "gpt-5.4-mini".into(),
+            StatsTotals {
+                request_count: 1,
+                completed_request_count: 1,
+                usage_recorded_request_count: 1,
+                input_tokens: 10,
+                cached_input_tokens: 2,
+                output_tokens: 5,
+                thinking_tokens: ThinkingTokenTotals {
+                    tokens: 1,
+                    available_request_count: 1,
+                    unavailable_request_count: 0,
+                    estimated_request_count: 0,
+                },
+                estimated_cost_nanos_usd: 10_000,
+                ..StatsTotals::default()
+            },
+        );
         first.finalize();
 
         let mut second = SessionStats::new();
-        second.request_count = 2;
-        second.input_tokens = 20;
-        second.cached_input_tokens = 4;
-        second.output_tokens = 8;
-        second.estimated_cost_nanos_usd = 20_000;
-        second.tool_call_count = 3;
-        second.tool_success_count = 2;
-        second.tool_failure_count = 1;
+        second.totals.request_count = 2;
+        second.totals.completed_request_count = 2;
+        second.totals.usage_recorded_request_count = 2;
+        second.totals.input_tokens = 20;
+        second.totals.cached_input_tokens = 4;
+        second.totals.output_tokens = 8;
+        second.totals.thinking_tokens.unavailable_request_count = 2;
+        second.totals.estimated_cost_nanos_usd = 20_000;
+        second.totals.tool_call_count = 3;
+        second.totals.tool_success_count = 2;
+        second.totals.tool_failure_count = 1;
+        second.per_model.insert(
+            "gpt-5.4".into(),
+            StatsTotals {
+                request_count: 2,
+                completed_request_count: 2,
+                usage_recorded_request_count: 2,
+                input_tokens: 20,
+                cached_input_tokens: 4,
+                output_tokens: 8,
+                thinking_tokens: ThinkingTokenTotals {
+                    tokens: 0,
+                    available_request_count: 0,
+                    unavailable_request_count: 2,
+                    estimated_request_count: 0,
+                },
+                estimated_cost_nanos_usd: 20_000,
+                tool_call_count: 3,
+                tool_success_count: 2,
+                tool_failure_count: 1,
+                ..StatsTotals::default()
+            },
+        );
         second.finalize();
 
         persist_session(Some(&dir), &first).expect("persist first");
         persist_session(Some(&dir), &second).expect("persist second");
 
-        let (totals, count) =
-            load_historical_totals(Some(&dir), "current-session").expect("load historical stats");
+        let (totals, models, count) =
+            load_historical_report(Some(&dir), "current-session").expect("load historical stats");
         assert_eq!(count, 2);
         assert_eq!(totals.input_tokens, 30);
         assert_eq!(totals.cached_input_tokens, 6);
         assert_eq!(totals.output_tokens, 13);
         assert_eq!(totals.estimated_cost_nanos_usd, 30_000);
         assert_eq!(totals.request_count, 3);
-        assert_eq!(totals.tool_call_count, 4);
-        assert_eq!(totals.tool_success_count, 3);
+        assert_eq!(totals.tool_call_count, 3);
+        assert_eq!(totals.tool_success_count, 2);
         assert_eq!(totals.tool_failure_count, 1);
+        assert_eq!(totals.thinking_tokens_value(), Some(1));
+        assert!(totals.thinking_tokens_partial());
+        assert_eq!(models.len(), 2);
+        assert_eq!(
+            models
+                .get("gpt-5.4-mini")
+                .expect("mini model")
+                .thinking_tokens_value(),
+            Some(1)
+        );
 
         fs::remove_dir_all(dir).expect("remove temp dir");
     }
 
     #[test]
-    fn historical_totals_accept_legacy_sessions_without_cost_field() {
+    fn historical_report_marks_legacy_sessions_as_thinking_unavailable() {
         let dir = unique_temp_dir("legacy-historical");
         fs::create_dir_all(&dir).expect("create stats dir");
 
@@ -665,13 +1122,14 @@ mod tests {
         fs::write(
             &path,
             r#"{
-  "schema_version": 1,
+  "schema_version": 2,
   "session_id": "legacy-session",
   "started_at_unix_ms": 1,
   "finished_at_unix_ms": 2,
   "input_tokens": 100,
   "cached_input_tokens": 20,
   "output_tokens": 10,
+  "estimated_cost_nanos_usd": 0,
   "request_count": 1,
   "tool_call_count": 0,
   "tool_success_count": 0,
@@ -680,14 +1138,206 @@ mod tests {
         )
         .expect("write legacy stats");
 
-        let (totals, count) =
-            load_historical_totals(Some(&dir), "current-session").expect("load historical stats");
+        let (totals, _, count) =
+            load_historical_report(Some(&dir), "current-session").expect("load historical stats");
 
         assert_eq!(count, 1);
         assert_eq!(totals.input_tokens, 100);
         assert_eq!(totals.cached_input_tokens, 20);
         assert_eq!(totals.output_tokens, 10);
-        assert_eq!(totals.estimated_cost_nanos_usd, 0);
+        assert_eq!(totals.open_request_count(), 0);
+        assert_eq!(totals.requests_without_usage(), 0);
+        assert_eq!(totals.thinking_tokens_value(), None);
+        assert_eq!(totals.average_ttfb_millis(), None);
+        assert_eq!(totals.average_total_request_millis(), None);
+        assert_eq!(totals.tokens_per_second(), None);
+        assert_eq!(totals.usage_recorded_request_count, 1);
+        assert_eq!(totals.throughput_output_tokens, 0);
+
+        fs::remove_dir_all(dir).expect("remove temp dir");
+    }
+
+    #[test]
+    fn average_timing_and_tokens_per_second_are_derived_from_aggregates() {
+        let totals = StatsTotals {
+            output_tokens: 500,
+            throughput_output_tokens: 500,
+            ttfb_total_millis: 100,
+            ttfb_recorded_request_count: 2,
+            total_request_millis: 2_000,
+            timed_request_count: 2,
+            usage_recorded_request_count: 2,
+            usage_recorded_request_millis: 2_000,
+            ..StatsTotals::default()
+        };
+
+        assert_eq!(totals.average_ttfb_millis(), Some(50.0));
+        assert_eq!(totals.average_total_request_millis(), Some(1_000.0));
+        assert_eq!(totals.tokens_per_second(), Some(250.0));
+    }
+
+    #[test]
+    fn pausing_request_timing_excludes_non_model_wait() {
+        let dir = unique_temp_dir("pause-timing");
+        let store = StatsStore::with_stats_dir(Some(dir.clone()));
+        let hook = store.hook_for_model("gpt-5.4-mini");
+
+        hook.record_request();
+        std::thread::sleep(Duration::from_millis(15));
+        hook.record_response_progress();
+        hook.pause_request_timing();
+        std::thread::sleep(Duration::from_millis(20));
+        hook.complete_request(Some(Usage {
+            input_tokens: 10,
+            cached_input_tokens: 0,
+            output_tokens: 5,
+            total_tokens: 15,
+            thinking_tokens: Some(1),
+        }));
+
+        let report = store.report().expect("load stats report");
+        assert_eq!(report.current.timed_request_count, 1);
+        assert_eq!(report.current.completed_request_count, 1);
+        assert_eq!(report.current.usage_recorded_request_count, 1);
+        assert!(report.current.total_request_millis < 35);
+        assert_eq!(
+            report.current.tokens_per_second(),
+            Some(
+                report.current.throughput_output_tokens as f64
+                    / (report.current.usage_recorded_request_millis as f64 / 1_000.0)
+            )
+        );
+
+        fs::remove_dir_all(dir).expect("remove temp dir");
+    }
+
+    #[test]
+    fn failed_requests_without_response_do_not_contribute_ttfb() {
+        let dir = unique_temp_dir("failed-no-ttfb");
+        let store = StatsStore::with_stats_dir(Some(dir.clone()));
+        let hook = store.hook();
+
+        hook.record_request();
+        std::thread::sleep(Duration::from_millis(1));
+        hook.fail_request();
+
+        let report = store.report().expect("load stats report");
+        assert_eq!(report.current.request_count, 1);
+        assert_eq!(report.current.failed_request_count, 1);
+        assert_eq!(report.current.average_ttfb_millis(), None);
+        assert_eq!(report.current.ttfb_recorded_request_count, 0);
+
+        fs::remove_dir_all(dir).expect("remove temp dir");
+    }
+
+    #[test]
+    fn completed_requests_without_usage_are_counted_explicitly() {
+        let dir = unique_temp_dir("missing-usage");
+        let store = StatsStore::with_stats_dir(Some(dir.clone()));
+        let hook = store.hook();
+
+        hook.record_request();
+        hook.record_response_progress();
+        hook.finish_request_without_usage();
+
+        let report = store.report().expect("load stats report");
+        assert_eq!(report.current.completed_request_count, 1);
+        assert_eq!(report.current.usage_recorded_request_count, 0);
+        assert_eq!(report.current.requests_without_usage(), 1);
+        assert_eq!(report.current.thinking_tokens_value(), None);
+        assert_eq!(report.current.tokens_per_second(), None);
+
+        fs::remove_dir_all(dir).expect("remove temp dir");
+    }
+
+    #[test]
+    fn reasoning_text_estimates_thinking_tokens_when_usage_omits_them() {
+        let dir = unique_temp_dir("estimated-thinking-usage");
+        let store = StatsStore::with_stats_dir(Some(dir.clone()));
+        let hook = store.hook_for_model("kimi-k2.5");
+
+        hook.record_request();
+        hook.record_response_progress();
+        hook.record_reasoning_progress("Working through the problem step by step.");
+        hook.complete_request(Some(Usage {
+            input_tokens: 10,
+            cached_input_tokens: 0,
+            output_tokens: 5,
+            total_tokens: 15,
+            thinking_tokens: None,
+        }));
+
+        let report = store.report().expect("load stats report");
+        assert!(report.current.thinking_tokens_value().unwrap_or(0) > 0);
+        assert!(report.current.thinking_tokens_estimated());
+        assert_eq!(report.current.usage_recorded_request_count, 1);
+
+        fs::remove_dir_all(dir).expect("remove temp dir");
+    }
+
+    #[test]
+    fn reasoning_text_estimates_thinking_tokens_without_usage() {
+        let dir = unique_temp_dir("estimated-thinking-no-usage");
+        let store = StatsStore::with_stats_dir(Some(dir.clone()));
+        let hook = store.hook();
+
+        hook.record_request();
+        hook.record_response_progress();
+        hook.record_reasoning_progress("Reasoning content that should still count.");
+        hook.finish_request_without_usage();
+
+        let report = store.report().expect("load stats report");
+        assert!(report.current.thinking_tokens_value().unwrap_or(0) > 0);
+        assert!(report.current.thinking_tokens_estimated());
+        assert_eq!(report.current.requests_without_usage(), 1);
+
+        fs::remove_dir_all(dir).expect("remove temp dir");
+    }
+
+    #[test]
+    fn thinking_tokens_stay_visible_when_coverage_is_partial() {
+        let mut totals = StatsTotals {
+            request_count: 2,
+            completed_request_count: 2,
+            usage_recorded_request_count: 2,
+            ..StatsTotals::default()
+        };
+        totals.thinking_tokens.record(Some(12), false);
+        totals.thinking_tokens.record(None, false);
+
+        assert_eq!(totals.thinking_tokens_value(), Some(12));
+        assert!(totals.thinking_tokens_partial());
+    }
+
+    #[test]
+    fn thinking_tokens_can_be_marked_estimated() {
+        let mut totals = StatsTotals {
+            request_count: 1,
+            completed_request_count: 1,
+            ..StatsTotals::default()
+        };
+        totals.thinking_tokens.record(Some(9), true);
+
+        assert_eq!(totals.thinking_tokens_value(), Some(9));
+        assert!(totals.thinking_tokens_estimated());
+    }
+
+    #[test]
+    fn dropping_last_hook_with_active_request_marks_it_interrupted() {
+        let dir = unique_temp_dir("interrupted-drop");
+        let store = StatsStore::with_stats_dir(Some(dir.clone()));
+
+        {
+            let hook = store.hook();
+            hook.record_request();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+
+        let report = store.report().expect("load stats report");
+        assert_eq!(report.current.request_count, 1);
+        assert_eq!(report.current.interrupted_request_count, 1);
+        assert_eq!(report.current.timed_request_count, 1);
+        assert_eq!(report.current.thinking_tokens_value(), None);
 
         fs::remove_dir_all(dir).expect("remove temp dir");
     }
@@ -701,6 +1351,7 @@ mod tests {
                 cached_input_tokens: 0,
                 output_tokens: 10,
                 total_tokens: 272_011,
+                thinking_tokens: Some(4),
             },
         );
 
@@ -714,21 +1365,26 @@ mod tests {
 
         let mini_hook = store.hook_for_model("gpt-5.4-mini");
         mini_hook.record_request();
-        mini_hook.record_usage(Usage {
+        mini_hook.record_response_progress();
+        mini_hook.complete_request(Some(Usage {
             input_tokens: 1_000,
             cached_input_tokens: 200,
             output_tokens: 500,
             total_tokens: 1_500,
-        });
+            thinking_tokens: Some(120),
+        }));
 
         let main_hook = store.hook_for_model("gpt-5.4");
         main_hook.record_request();
-        main_hook.record_usage(Usage {
+        std::thread::sleep(Duration::from_millis(1));
+        main_hook.record_response_progress();
+        main_hook.complete_request(Some(Usage {
             input_tokens: 300_000,
             cached_input_tokens: 50_000,
             output_tokens: 1_000,
             total_tokens: 301_000,
-        });
+            thinking_tokens: None,
+        }));
 
         let report = store.report().expect("load stats report");
         assert_eq!(report.current.request_count, 2);
@@ -736,6 +1392,17 @@ mod tests {
         assert_eq!(report.current.cached_input_tokens, 50_200);
         assert_eq!(report.current.output_tokens, 1_500);
         assert_eq!(report.current.estimated_cost_nanos_usd, 655_365_000);
+        assert_eq!(report.current_models.len(), 2);
+        assert_eq!(report.current.thinking_tokens_value(), Some(120));
+        assert!(report.current.thinking_tokens_partial());
+        assert_eq!(
+            report
+                .current_models
+                .get("gpt-5.4-mini")
+                .expect("mini")
+                .thinking_tokens_value(),
+            Some(120)
+        );
 
         drop(mini_hook);
         drop(main_hook);
@@ -756,6 +1423,7 @@ mod tests {
                     cached_input_tokens: 0,
                     output_tokens,
                     total_tokens: input_tokens + output_tokens,
+                    thinking_tokens: Some(output_tokens / 2),
                 },
             }
         }
@@ -857,10 +1525,17 @@ mod tests {
 
         let report = store.report().expect("load stats report");
         assert_eq!(report.current.request_count, 2);
+        assert_eq!(report.current.open_request_count(), 1);
+        assert_eq!(report.current.completed_request_count, 1);
         assert_eq!(report.current.tool_call_count, 1);
         assert_eq!(report.current.input_tokens, 12);
         assert_eq!(report.current.output_tokens, 4);
+        assert_eq!(report.current.thinking_tokens_value(), None);
         assert_eq!(report.current.estimated_cost_nanos_usd, 27_000);
+        // This test drives rig's raw multi-turn stream directly. The follow-up
+        // request increments request_count via the hook, but request closure is
+        // finalized by oat's streaming wrappers, not by the hook alone.
+        assert_eq!(report.current.timed_request_count, 1);
 
         fs::remove_dir_all(dir).expect("remove temp dir");
     }

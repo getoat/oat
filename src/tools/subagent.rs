@@ -269,6 +269,8 @@ mod tests {
             }),
             chutes: None,
             codex: None,
+            ollama: None,
+            opencode: None,
             openrouter: None,
             model: ModelSelectionConfig {
                 model_name: "gpt-5.4-mini".into(),

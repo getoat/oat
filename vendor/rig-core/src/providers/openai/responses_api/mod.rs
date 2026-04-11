@@ -1424,6 +1424,7 @@ impl TryFrom<CompletionResponse> for completion::CompletionResponse<CompletionRe
                     .as_ref()
                     .map(|d| d.cached_tokens)
                     .unwrap_or(0),
+                thinking_tokens: Some(usage.output_tokens_details.reasoning_tokens),
             })
             .unwrap_or_default();
 

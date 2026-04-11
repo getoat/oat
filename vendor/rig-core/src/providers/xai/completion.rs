@@ -155,6 +155,7 @@ impl TryFrom<CompletionResponse> for completion::CompletionResponse<CompletionRe
                     .clone()
                     .map(|x| x.cached_tokens)
                     .unwrap_or_default(),
+                thinking_tokens: None,
             })
             .unwrap_or_default();
 

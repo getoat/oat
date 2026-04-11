@@ -22,6 +22,8 @@ pub(super) fn handle(state: &mut AppState, action: Action) -> Option<Effect> {
                 ops::session::cancel_pending_reply(state);
                 ops::transcript::push_error_message(state, "Request cancelled.");
                 Some(Effect::CancelPendingReply)
+            } else if ops::stats::close_stats_screen(state) {
+                None
             } else if ops::picker::cancel_picker(state) {
                 None
             } else if ops::planning::cancel_planning_draft_mode(state) {
@@ -52,6 +54,7 @@ mod tests {
         MessageStyle, PendingReply, PendingReplyKind, TranscriptEntry,
         session::test_support::{new_app, registry_app},
     };
+    use crate::stats::StatsReport;
 
     #[test]
     fn clear_composer_or_quit_quits_when_composer_is_empty() {
@@ -119,5 +122,25 @@ mod tests {
 
         assert!(effect.is_none());
         assert!(!app.selection_picker_visible());
+    }
+
+    #[test]
+    fn escape_action_closes_active_stats_screen() {
+        let mut app = registry_app(true);
+        crate::app::ops::stats::open_stats_screen(
+            app.state_mut(),
+            StatsReport {
+                current: Default::default(),
+                historical: Default::default(),
+                current_models: Default::default(),
+                historical_models: Default::default(),
+                historical_session_count: 0,
+            },
+        );
+
+        let effect = app.apply(Action::CancelPendingReply);
+
+        assert!(effect.is_none());
+        assert!(!crate::app::query::stats_screen_visible(app.state()));
     }
 }

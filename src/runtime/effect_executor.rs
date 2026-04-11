@@ -168,7 +168,9 @@ impl EffectExecutor<'_> {
                     app::ops::session::begin_session_title_request(self.app.state_mut(), reply_id);
                     let title_llm = self.llm.clone();
                     let title_stream_tx = self.stream_tx.clone();
-                    let title_stats_hook = stats_hook.clone();
+                    let title_stats_hook = self
+                        .stats
+                        .hook_for_model(query::model_name(self.app.state()).to_string());
                     self.runtime.spawn(async move {
                         let title = title_llm
                             .generate_session_title(session_title_prompt, title_stats_hook)
@@ -333,10 +335,7 @@ impl EffectExecutor<'_> {
                 Ok(())
             }
             Effect::ShowStats => {
-                app::ops::transcript::push_agent_message(
-                    self.app.state_mut(),
-                    self.stats.report()?.render(),
-                );
+                app::ops::stats::open_stats_screen(self.app.state_mut(), self.stats.report()?);
                 Ok(())
             }
             Effect::OpenSessionPicker => {
@@ -1010,6 +1009,8 @@ mod tests {
             }),
             chutes: None,
             codex: None,
+            ollama: None,
+            opencode: None,
             openrouter: None,
             model: ModelSelectionConfig {
                 model_name: "gpt-5.4-mini".into(),

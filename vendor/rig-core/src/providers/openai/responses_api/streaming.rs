@@ -77,6 +77,11 @@ impl GetTokenUsage for StreamingCompletionResponse {
             .as_ref()
             .map(|d| d.cached_tokens)
             .unwrap_or(0);
+        usage.thinking_tokens = self
+            .usage
+            .output_tokens_details
+            .reasoning_tokens
+            .into();
         Some(usage)
     }
 }

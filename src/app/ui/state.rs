@@ -2,7 +2,7 @@ use crate::{app::session::SlashCommand, composer::ComposerLayout};
 
 use super::{
     AskUserUiState, CommandRecallState, ComposerUiState, HistoryRenderCache, HistoryViewState,
-    SelectionPicker, ShellApprovalUiState,
+    SelectionPicker, ShellApprovalUiState, StatsScreenState,
 };
 
 #[derive(Debug)]
@@ -10,6 +10,7 @@ pub struct UiState {
     pub composer: ComposerUiState,
     pub selected_command: SlashCommand,
     pub picker: Option<SelectionPicker>,
+    pub stats_screen: Option<StatsScreenState>,
     pub plan_review_selected_index: usize,
     pub pending_shell_approval: Option<ShellApprovalUiState>,
     pub pending_ask_user: Option<AskUserUiState>,
@@ -24,6 +25,7 @@ impl Default for UiState {
             composer: ComposerUiState::default(),
             selected_command: SlashCommand::NewSession,
             picker: None,
+            stats_screen: None,
             plan_review_selected_index: 0,
             pending_shell_approval: None,
             pending_ask_user: None,

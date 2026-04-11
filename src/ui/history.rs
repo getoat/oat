@@ -17,10 +17,14 @@ use super::{
     background_terminal_activity::push_background_terminal_status_lines,
     hosted_tool_activity::push_hosted_tool_status_lines,
     markdown::{push_message_lines, push_pending_lines, rendered_line_text},
+    scrollbar::render_vertical_scrollbar,
     subagent_activity::push_subagent_status_lines,
     todo_activity::push_todo_snapshot_lines,
     tool_activity::{push_tool_call_lines, push_tool_result_lines},
 };
+
+#[cfg(test)]
+use super::scrollbar::scrollbar_thumb_bounds;
 
 const MAX_VISIBLE_TOOL_ACTIVITY: usize = 5;
 const STARTUP_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -198,34 +202,6 @@ fn build_history_lines(
     lines
 }
 
-pub(super) fn scrollbar_thumb_bounds(
-    track_height: usize,
-    total_lines: usize,
-    viewport_rows: usize,
-    scroll_position: usize,
-) -> (usize, usize) {
-    if track_height == 0 {
-        return (0, 0);
-    }
-
-    let total_lines = total_lines.max(1);
-    let viewport_rows = viewport_rows.max(1).min(total_lines);
-    let thumb_len =
-        ((viewport_rows as f64 / total_lines as f64) * track_height as f64).round() as usize;
-    let thumb_len = thumb_len.clamp(1, track_height);
-
-    let max_scroll = total_lines.saturating_sub(viewport_rows);
-    let max_thumb_start = track_height.saturating_sub(thumb_len);
-    let thumb_start = if max_scroll == 0 || max_thumb_start == 0 {
-        0
-    } else {
-        ((scroll_position.min(max_scroll) as f64 / max_scroll as f64) * max_thumb_start as f64)
-            .round() as usize
-    };
-
-    (thumb_start, thumb_len)
-}
-
 fn history_viewport_lines(
     lines: &[Line<'static>],
     start: usize,
@@ -312,24 +288,14 @@ fn slice_chars(text: &str, start: usize, end: usize) -> String {
 }
 
 fn render_history_scrollbar(frame: &mut Frame, area: Rect, app: &App, accent: Color) {
-    let (thumb_start, thumb_len) = scrollbar_thumb_bounds(
-        area.height as usize,
+    render_vertical_scrollbar(
+        frame,
+        area,
         query::history_total_lines(app.state()),
         query::history_viewport_rows(app.state()),
         query::history_scroll_position(app.state()),
+        accent,
     );
-
-    let lines = (0..area.height as usize)
-        .map(|index| {
-            if index >= thumb_start && index < thumb_start + thumb_len {
-                Line::from(Span::styled(" ", Style::default().bg(accent)))
-            } else {
-                Line::from(Span::styled("│", Style::default().fg(Color::DarkGray)))
-            }
-        })
-        .collect::<Vec<_>>();
-
-    frame.render_widget(Paragraph::new(lines), area);
 }
 
 fn visible_entries(app: &App) -> Vec<VisibleEntry<'_>> {

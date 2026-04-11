@@ -34,6 +34,7 @@ pub(crate) enum InputContext {
         editing: bool,
     },
     PlanReview,
+    Stats,
     Picker,
     CommandPalette,
     Composer,
@@ -245,6 +246,11 @@ pub fn selection_picker(state: &AppState) -> Option<&SelectionPicker> {
 }
 
 #[cfg(test)]
+pub fn stats_screen_visible(state: &AppState) -> bool {
+    state.ui.stats_screen.is_some()
+}
+
+#[cfg(test)]
 pub fn selection_picker_visible(state: &AppState) -> bool {
     state.ui.picker.is_some()
 }
@@ -391,6 +397,8 @@ pub(crate) fn input_context_parts(session: &SessionState, ui: &UiState) -> Input
         && session.planning.review == Some(PlanReviewState::Selection)
     {
         InputContext::PlanReview
+    } else if ui.stats_screen.is_some() {
+        InputContext::Stats
     } else if ui.picker.is_some() {
         InputContext::Picker
     } else {

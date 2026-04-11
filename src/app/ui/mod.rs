@@ -5,6 +5,7 @@ mod composer;
 mod history;
 mod picker;
 mod state;
+mod stats;
 
 pub use approvals::{ShellApprovalEditMode, ShellApprovalUiState};
 pub use ask_user::AskUserUiState;
@@ -19,3 +20,4 @@ pub use picker::{
     SessionPickerEntry, display_entries_for_tab, selectable_models_for_tab,
 };
 pub use state::UiState;
+pub use stats::{StatsScreenState, StatsScreenTab, StatsTableRow};

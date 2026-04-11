@@ -100,7 +100,7 @@ where
             capture: step_boundary.clone(),
         },
         second: CombinedHook {
-            first: stats_hook,
+            first: stats_hook.clone(),
             second: CombinedHook {
                 first: CompletionCaptureHook { capture },
                 second: CombinedHook {
@@ -148,6 +148,7 @@ where
         awaiting_post_tool_progress = false;
         let event = match chunk {
             Ok(MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(text))) => {
+                stats_hook.record_response_progress();
                 let delta = reconcile_stream_text(&text.text, &mut plain_replay_probe);
                 if delta.is_empty() {
                     None
@@ -159,6 +160,7 @@ where
             Ok(MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Reasoning(
                 reasoning,
             ))) => {
+                stats_hook.record_response_progress();
                 plain_replay_probe = (!output.is_empty()).then(|| ReplayProbe::new(&output));
                 let delta = reconcile_completed_reasoning_text(
                     &reasoning.display_text(),
@@ -168,6 +170,7 @@ where
                 if delta.is_empty() {
                     None
                 } else {
+                    stats_hook.record_reasoning_progress(&delta);
                     reasoning_output.push_str(&delta);
                     Some(StreamEvent::ReasoningDelta(delta))
                 }
@@ -175,11 +178,13 @@ where
             Ok(MultiTurnStreamItem::StreamAssistantItem(
                 StreamedAssistantContent::ReasoningDelta { reasoning, .. },
             )) => {
+                stats_hook.record_response_progress();
                 plain_replay_probe = (!output.is_empty()).then(|| ReplayProbe::new(&output));
                 let delta = reconcile_stream_text(&reasoning, &mut reasoning_replay_probe);
                 if delta.is_empty() {
                     None
                 } else {
+                    stats_hook.record_reasoning_progress(&delta);
                     reasoning_output.push_str(&delta);
                     Some(StreamEvent::ReasoningDelta(delta))
                 }
@@ -191,6 +196,7 @@ where
                     ..
                 },
             )) => {
+                stats_hook.record_response_progress();
                 let partial = partial_tool_calls.entry(internal_call_id).or_default();
                 match content {
                     ToolCallDeltaContent::Name(name) => {
@@ -206,6 +212,7 @@ where
                 tool_call,
                 internal_call_id,
             })) => {
+                stats_hook.record_response_progress();
                 plain_replay_probe = (!output.is_empty()).then(|| ReplayProbe::new(&output));
                 reasoning_replay_probe =
                     (!reasoning_output.is_empty()).then(|| ReplayProbe::new(&reasoning_output));
@@ -301,6 +308,7 @@ where
                 }
             }
             Ok(MultiTurnStreamItem::FinalResponse(response)) => {
+                stats_hook.record_response_progress();
                 log_debug("llm_stream", format!("final_response reply_id={reply_id}"));
                 let history = response.history().map(ToOwned::to_owned);
                 let history = history.map(history_from_rig).transpose()?;
@@ -322,9 +330,11 @@ where
                 if let Some(boundary) = step_boundary.take()
                     && is_step_boundary_error(&error)
                 {
+                    stats_hook.finish_request_without_usage();
                     return Ok(PromptStepOutcome::Continue(boundary));
                 }
                 let message = error.to_string();
+                stats_hook.fail_request();
                 let _ = (emit)(reply_id, StreamEvent::Failed(message.clone()));
                 return Err(error.into());
             }
@@ -338,6 +348,7 @@ where
     }
 
     let message = "Request ended before response completed.".to_string();
+    stats_hook.fail_request();
     let _ = (emit)(reply_id, StreamEvent::Failed(message.clone()));
     Err(anyhow::anyhow!(message))
 }
