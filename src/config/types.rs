@@ -23,6 +23,7 @@ pub struct AppConfig {
     pub subagents: SubagentConfig,
     pub planning: PlanningConfig,
     pub memory: MemoryConfig,
+    pub history: HistoryConfig,
     pub tools: ToolConfig,
 }
 
@@ -240,6 +241,37 @@ impl OllamaConfig {
 pub struct ModelSelectionConfig {
     pub model_name: String,
     pub reasoning: ReasoningSetting,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct HistoryConfig {
+    #[serde(default = "default_history_mode")]
+    pub mode: HistoryMode,
+    #[serde(default = "default_history_retained_steps")]
+    pub retained_steps: usize,
+}
+
+impl Default for HistoryConfig {
+    fn default() -> Self {
+        Self {
+            mode: default_history_mode(),
+            retained_steps: default_history_retained_steps(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HistoryMode {
+    Full,
+    TurnSummary,
+    StepSummary,
+}
+
+impl Default for HistoryMode {
+    fn default() -> Self {
+        default_history_mode()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -633,6 +665,14 @@ pub(super) fn default_show_thinking() -> bool {
 
 pub(super) fn default_web_search_mode() -> WebSearchMode {
     WebSearchMode::Live
+}
+
+pub(super) fn default_history_mode() -> HistoryMode {
+    HistoryMode::StepSummary
+}
+
+pub(super) fn default_history_retained_steps() -> usize {
+    1
 }
 
 pub(super) fn default_command_history_limit() -> usize {

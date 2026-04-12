@@ -1,3 +1,4 @@
+use crate::app::session::PendingReplyActivity;
 use crate::app::{
     AppState, ApprovalMode, CommandRisk, EditorInput, PendingWriteApproval, ShellApprovalDecision,
     ShellApprovalEditMode, WriteApprovalDecision,
@@ -140,6 +141,7 @@ pub(crate) fn resolve_write_approval(
     decision: WriteApprovalDecision,
 ) -> Option<PendingWriteApproval> {
     let pending = state.session.pending_write_approvals.pop_front()?;
+    sync_pending_reply_activity_after_approval(state);
     let source_context = pending
         .source_label
         .as_ref()
@@ -250,6 +252,7 @@ pub(crate) fn submit_shell_approval(
         .unwrap_or(ShellApprovalDecision::Deny(None));
     state.ui.pending_shell_approval = None;
     sync_pending_shell_approval_ui(state);
+    sync_pending_reply_activity_after_approval(state);
 
     let source_context = pending
         .source_label
@@ -303,6 +306,17 @@ pub(crate) fn submit_shell_approval(
     Some((pending.request_id, decision, pending.risk))
 }
 
+fn sync_pending_reply_activity_after_approval(state: &mut AppState) {
+    let activity = if !state.session.pending_write_approvals.is_empty()
+        || !state.session.pending_shell_approvals.is_empty()
+    {
+        PendingReplyActivity::WaitingForApproval
+    } else {
+        PendingReplyActivity::WaitingForTool
+    };
+    crate::app::ops::session::set_pending_reply_activity(state, activity);
+}
+
 fn sync_pending_shell_approval_ui(state: &mut AppState) {
     let next_request_id = state
         .session
@@ -330,6 +344,7 @@ fn sync_pending_shell_approval_ui(state: &mut AppState) {
 mod tests {
     use super::*;
     use crate::app::session::test_support::new_app;
+    use crate::app::{PendingReply, PendingReplyKind};
 
     #[test]
     fn begin_write_approval_stores_summary_and_target() {
@@ -373,5 +388,113 @@ mod tests {
         assert_eq!(pending.summary, "remove stale notes");
         assert_eq!(pending.target.as_deref(), Some("notes.txt"));
         assert_eq!(pending.source_label.as_deref(), Some("planner-1"));
+    }
+
+    #[test]
+    fn submit_shell_approval_advances_pending_status_after_allow_all() {
+        let mut app = new_app(true);
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(1, PendingReplyKind::Normal));
+        crate::app::ops::session::set_pending_reply_activity(
+            app.state_mut(),
+            PendingReplyActivity::WaitingForApproval,
+        );
+
+        begin_shell_approval(
+            app.state_mut(),
+            "call-1".into(),
+            CommandRisk::Medium,
+            "writes to workspace".into(),
+            "cargo test".into(),
+            ".".into(),
+            "verify changes".into(),
+        );
+        app.state_mut()
+            .ui
+            .pending_shell_approval
+            .as_mut()
+            .expect("shell approval ui")
+            .selected_index = 2;
+
+        let (request_id, decision, risk) =
+            submit_shell_approval(app.state_mut()).expect("shell approval submitted");
+
+        assert_eq!(request_id, "call-1");
+        assert_eq!(decision, ShellApprovalDecision::AllowAllRisk);
+        assert_eq!(risk, CommandRisk::Medium);
+        assert!(app.state().session.pending_shell_approvals.is_empty());
+        assert_eq!(app.history_pending_status_label(), "Waiting for tool");
+    }
+
+    #[test]
+    fn submit_shell_approval_keeps_waiting_when_another_request_is_queued() {
+        let mut app = new_app(true);
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(1, PendingReplyKind::Normal));
+        crate::app::ops::session::set_pending_reply_activity(
+            app.state_mut(),
+            PendingReplyActivity::WaitingForApproval,
+        );
+
+        begin_shell_approval(
+            app.state_mut(),
+            "call-1".into(),
+            CommandRisk::Medium,
+            "writes to workspace".into(),
+            "cargo test".into(),
+            ".".into(),
+            "verify changes".into(),
+        );
+        begin_shell_approval(
+            app.state_mut(),
+            "call-2".into(),
+            CommandRisk::Medium,
+            "writes to workspace".into(),
+            "cargo check".into(),
+            ".".into(),
+            "verify changes".into(),
+        );
+
+        let (request_id, decision, risk) =
+            submit_shell_approval(app.state_mut()).expect("shell approval submitted");
+
+        assert_eq!(request_id, "call-1");
+        assert_eq!(decision, ShellApprovalDecision::AllowOnce);
+        assert_eq!(risk, CommandRisk::Medium);
+        assert_eq!(app.state().session.pending_shell_approvals.len(), 1);
+        assert_eq!(
+            app.state()
+                .ui
+                .pending_shell_approval
+                .as_ref()
+                .map(|pending| pending.request_id.as_str()),
+            Some("call-2")
+        );
+        assert_eq!(app.history_pending_status_label(), "Waiting for approval");
+    }
+
+    #[test]
+    fn resolve_write_approval_advances_pending_status_when_queue_is_empty() {
+        let mut app = new_app(true);
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(1, PendingReplyKind::Normal));
+        crate::app::ops::session::set_pending_reply_activity(
+            app.state_mut(),
+            PendingReplyActivity::WaitingForApproval,
+        );
+
+        begin_write_approval(
+            app.state_mut(),
+            "call-1".into(),
+            "WriteFile".into(),
+            r#"{"filename":"notes.txt","content":"hello"}"#.into(),
+        );
+
+        let pending = resolve_write_approval(app.state_mut(), WriteApprovalDecision::AllowOnce)
+            .expect("write approval resolved");
+
+        assert_eq!(pending.request_id, "call-1");
+        assert!(app.state().session.pending_write_approvals.is_empty());
+        assert_eq!(app.history_pending_status_label(), "Waiting for tool");
     }
 }

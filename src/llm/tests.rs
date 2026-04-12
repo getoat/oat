@@ -37,9 +37,10 @@ use crate::{
     },
     completion_request::CompletionRequestSnapshot,
     config::{
-        AppConfig, AzureConfig, CodexAuthMode, CodexConfig, KimiThinkingMode, MemoryConfig,
-        ModelSelectionConfig, OllamaConfig, OpenRouterConfig, OpencodeConfig, ReasoningEffort,
-        ReasoningSetting, SafetyConfig, SubagentConfig, ToolConfig, UiConfig, WebSearchMode,
+        AppConfig, AzureConfig, CodexAuthMode, CodexConfig, HistoryConfig, KimiThinkingMode,
+        MemoryConfig, ModelSelectionConfig, OllamaConfig, OpenRouterConfig, OpencodeConfig,
+        ReasoningEffort, ReasoningSetting, SafetyConfig, SubagentConfig, ToolConfig, UiConfig,
+        WebSearchMode,
     },
     features::planning::PlanningConfig,
     web::WebService,
@@ -73,6 +74,7 @@ fn sample_config() -> AppConfig {
         },
         subagents: SubagentConfig { max_concurrent: 4 },
         planning: PlanningConfig::default(),
+        history: HistoryConfig::default(),
         tools: ToolConfig::default(),
     }
 }

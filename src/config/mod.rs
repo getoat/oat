@@ -22,13 +22,13 @@ use paths::{default_config_update_path, default_home_config_path};
 #[cfg(test)]
 use types::default_api_version;
 pub(crate) use types::{
-    AppConfig, CodexAuthMode, CodexConfig, KimiThinkingMode, MemoryConfig, MemoryExtractionConfig,
-    RawReasoningSetting, ReasoningEffort, ReasoningSetting, WebSearchMode,
+    AppConfig, CodexAuthMode, CodexConfig, HistoryMode, KimiThinkingMode, MemoryConfig,
+    MemoryExtractionConfig, RawReasoningSetting, ReasoningEffort, ReasoningSetting, WebSearchMode,
 };
 #[cfg(test)]
 pub(crate) use types::{
-    AzureConfig, ModelSelectionConfig, OllamaConfig, OpenRouterConfig, OpencodeConfig,
-    SafetyConfig, SubagentConfig, ToolConfig, UiConfig,
+    AzureConfig, HistoryConfig, ModelSelectionConfig, OllamaConfig, OpenRouterConfig,
+    OpencodeConfig, SafetyConfig, SubagentConfig, ToolConfig, UiConfig,
 };
 use updates::{write_codex_auth_updates_at_path, write_config_updates_at_path};
 

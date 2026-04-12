@@ -87,19 +87,8 @@ pub(crate) fn run_with_options(
         terminal.draw(|frame| ui::render(frame, &mut state.app))?;
 
         let timeout = state.tick_rate.saturating_sub(state.last_tick.elapsed());
-        if crossterm::event::poll(timeout)?
-            && let Some(action) = input::map_event_with_context(
-                crossterm::event::read()?,
-                query::input_context(state.app.state()),
-            )
-        {
-            {
-                let mut controller = TurnController::from_bootstrap(terminal, &mut state);
-                controller.handle_action(action);
-            }
-            persist_command_history_if_needed(&mut state.app, &state.command_history);
-            persistence.mark_dirty(false);
-            flush_pending_persistence_if_needed(&mut state, &mut persistence, false);
+        if crossterm::event::poll(timeout)? {
+            drain_terminal_input_events(terminal, &mut state, &mut persistence)?;
         } else {
             flush_pending_persistence_if_needed(&mut state, &mut persistence, false);
         }
@@ -121,6 +110,40 @@ pub(crate) fn run_with_options(
     state.terminals.cancel_all_running();
     state.session_store.finalize_current_session()?;
     state.stats.finalize_current_session()?;
+    Ok(())
+}
+
+fn drain_terminal_input_events(
+    terminal: &mut Tui,
+    state: &mut super::bootstrap::TuiBootstrap,
+    persistence: &mut SessionPersistenceScheduler,
+) -> Result<(), Box<dyn Error>> {
+    let frame_start = Instant::now();
+    let mut processed = 0_usize;
+
+    loop {
+        if let Some(action) = input::map_event_with_context(
+            crossterm::event::read()?,
+            query::input_context(state.app.state()),
+        ) {
+            {
+                let mut controller = TurnController::from_bootstrap(terminal, state);
+                controller.handle_action(action);
+            }
+            persist_command_history_if_needed(&mut state.app, &state.command_history);
+            persistence.mark_dirty(false);
+            flush_pending_persistence_if_needed(state, persistence, false);
+        }
+
+        processed += 1;
+        if processed >= MAX_EVENTS_PER_FRAME || frame_start.elapsed() >= FRAME_EVENT_BUDGET {
+            break;
+        }
+        if !crossterm::event::poll(Duration::ZERO)? {
+            break;
+        }
+    }
+
     Ok(())
 }
 

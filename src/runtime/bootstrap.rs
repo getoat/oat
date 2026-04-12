@@ -58,6 +58,8 @@ pub(crate) fn bootstrap_tui(config: AppConfig, startup: StartupOptions) -> Resul
     app.set_safety_reasoning(config.safety.reasoning);
     app.set_memory_model_name(config.memory.extraction.model_name.clone());
     app.set_memory_reasoning(config.memory.extraction.reasoning);
+    app.state_mut().session.history_mode = config.history.mode;
+    app.state_mut().session.history_retained_steps = config.history.retained_steps;
     let stats = StatsStore::new();
     let (subagent_tx, subagent_rx) = mpsc::unbounded_channel();
     let subagents =

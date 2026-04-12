@@ -24,6 +24,7 @@ use crate::{
     completion_request::CompletionRequestSnapshot,
     config::{AppConfig, ReasoningSetting, WebSearchMode},
     debug_log::log_debug,
+    history_reduction::reduce_history,
     memory::MemoryService,
     model_registry,
     runtime::RuntimeEvent,
@@ -876,10 +877,17 @@ impl LlmService {
                     return Ok(result);
                 }
                 PromptStepOutcome::Continue(next) => {
+                    let reduced_history = reduce_history(
+                        &next.history,
+                        self.config.history.mode,
+                        self.config.history.retained_steps,
+                        false,
+                    );
                     if let Some(super::TurnInterruptRequest::AtStepBoundary) =
                         self.take_turn_interrupt_request()
                     {
-                        let history = history_with_prompt_from_rig(next.history, next.next_prompt)?;
+                        let history =
+                            history_with_prompt_from_rig(reduced_history, next.next_prompt)?;
                         if !(emit)(
                             reply_id,
                             StreamEvent::TurnEnded {
@@ -894,7 +902,7 @@ impl LlmService {
                         });
                     }
                     prompt = next.next_prompt;
-                    history = next.history;
+                    history = reduced_history;
                     if should_compact_before_follow_up(&self.model_name, &history, &prompt) {
                         let result = self
                             .compact_history(
@@ -940,7 +948,12 @@ impl LlmService {
         emit: EventCallback,
         emit_notice: bool,
     ) -> Result<HistoryCompactionResult> {
-        let mut candidate_history = history;
+        let mut candidate_history = reduce_history(
+            &history,
+            self.config.history.mode,
+            self.config.history.retained_steps,
+            true,
+        );
 
         loop {
             let request_tokens = super::compaction::estimated_request_tokens(

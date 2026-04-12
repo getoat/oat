@@ -1,7 +1,7 @@
 use crate::{
     features::planning::pending_plain_text_is_visible, todo::TodoSnapshot, tools::MutationPreview,
 };
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 
 use rig::{
     OneOrMany,
@@ -276,6 +276,40 @@ impl PendingReply {
         &self.canonical_turn_messages
     }
 
+    pub fn safe_canonical_turn_messages(&self) -> Vec<RigMessage> {
+        let pending_ids = self
+            .pending_tool_calls
+            .iter()
+            .map(|tool_call| tool_call.id.as_str())
+            .collect::<HashSet<_>>();
+        let pending_call_ids = self
+            .pending_tool_calls
+            .iter()
+            .map(|tool_call| tool_call.call_id.as_str())
+            .collect::<HashSet<_>>();
+
+        self.canonical_turn_messages
+            .iter()
+            .filter(|message| {
+                !matches!(
+                    message,
+                    RigMessage::Assistant { content, .. }
+                        if content.len() == 1
+                            && matches!(
+                                content.first_ref(),
+                                AssistantContent::ToolCall(tool_call)
+                                    if pending_ids.contains(tool_call.id.as_str())
+                                        || tool_call
+                                            .call_id
+                                            .as_deref()
+                                            .is_some_and(|call_id| pending_call_ids.contains(call_id))
+                            )
+                )
+            })
+            .cloned()
+            .collect()
+    }
+
     pub fn append_canonical_assistant_text(&mut self, delta: &str) {
         if delta.is_empty() {
             return;
@@ -318,22 +352,16 @@ impl PendingReply {
         });
     }
 
-    pub fn push_canonical_tool_result(&mut self, name: &str, output: &str) {
-        let tool_call = self
+    pub fn push_canonical_tool_result(&mut self, name: &str, output: &str) -> bool {
+        let Some(tool_call) = self
             .pending_tool_calls
             .iter()
             .position(|tool_call| tool_call.name == name)
             .and_then(|index| self.pending_tool_calls.remove(index))
             .or_else(|| self.pending_tool_calls.pop_front())
-            .unwrap_or_else(|| {
-                let sequence = self.next_tool_call_sequence;
-                self.next_tool_call_sequence += 1;
-                PendingToolCallLink {
-                    id: format!("oat_tool_call_{sequence}"),
-                    call_id: format!("oat_call_{sequence}"),
-                    name: name.to_string(),
-                }
-            });
+        else {
+            return false;
+        };
 
         self.canonical_turn_messages.push(RigMessage::User {
             content: OneOrMany::one(UserContent::tool_result_with_call_id(
@@ -342,6 +370,7 @@ impl PendingReply {
                 OneOrMany::one(ToolResultContent::text(output)),
             )),
         });
+        true
     }
 }
 

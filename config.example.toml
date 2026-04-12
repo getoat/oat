@@ -146,6 +146,18 @@ min_active_confidence = 85
 # Run extraction asynchronously after a completed main-agent turn.
 run_in_background = true
 
+[history]
+# Controls how much prior tool traffic is preserved in model-facing history.
+# "full" keeps raw history.
+# "turn_summary" keeps raw history during a turn and summarizes older tool
+# traffic when the turn finalizes.
+# "step_summary" keeps the active step raw and summarizes older completed steps
+# during long multi-step turns.
+mode = "step_summary"
+
+# Number of most-recent completed steps to keep raw in step_summary mode.
+retained_steps = 1
+
 [safety]
 # Optional dedicated model used to classify shell commands as low, medium, or
 # high risk before they can run. If omitted in an existing config, oat will

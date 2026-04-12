@@ -8,12 +8,12 @@ use crate::{
 };
 
 use super::types::{
-    AppConfig, AzureConfig, ChutesConfig, CodexConfig, MemoryConfig, MemoryExtractionConfig,
-    MemoryRetrievalConfig, MemoryRetrievalModeConfig, ModelSelectionConfig, OllamaConfig,
-    OpenRouterConfig, OpencodeConfig, RawReasoningSetting, SafetyConfig, SubagentConfig,
-    ToolConfig, ToolWebSearchConfig, UiConfig, WebSearchMode, default_api_version,
-    default_command_history_limit, default_max_concurrent_subagents, default_show_thinking,
-    default_web_search_mode,
+    AppConfig, AzureConfig, ChutesConfig, CodexConfig, HistoryConfig, HistoryMode, MemoryConfig,
+    MemoryExtractionConfig, MemoryRetrievalConfig, MemoryRetrievalModeConfig, ModelSelectionConfig,
+    OllamaConfig, OpenRouterConfig, OpencodeConfig, RawReasoningSetting, SafetyConfig,
+    SubagentConfig, ToolConfig, ToolWebSearchConfig, UiConfig, WebSearchMode, default_api_version,
+    default_command_history_limit, default_history_mode, default_history_retained_steps,
+    default_max_concurrent_subagents, default_show_thinking, default_web_search_mode,
 };
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -30,6 +30,7 @@ pub(super) struct PartialAppConfig {
     subagents: Option<PartialSubagentConfig>,
     planning: Option<PartialPlanningConfig>,
     memory: Option<PartialMemoryConfig>,
+    history: Option<PartialHistoryConfig>,
     tools: Option<PartialToolConfig>,
 }
 
@@ -107,6 +108,12 @@ impl PartialAppConfig {
                 .merge(memory);
         }
 
+        if let Some(history) = other.history {
+            self.history
+                .get_or_insert_with(PartialHistoryConfig::default)
+                .merge(history);
+        }
+
         if let Some(tools) = other.tools {
             self.tools
                 .get_or_insert_with(PartialToolConfig::default)
@@ -158,6 +165,7 @@ impl PartialAppConfig {
             subagents,
             planning,
             memory,
+            history,
             tools,
         } = self;
 
@@ -186,6 +194,7 @@ impl PartialAppConfig {
             subagents: subagents.unwrap_or_default().finalize(),
             planning: planning.unwrap_or_default().finalize(),
             memory: memory.unwrap_or_default().finalize(&model)?,
+            history: history.unwrap_or_default().finalize(),
             tools: tools.unwrap_or_default().finalize(),
         })
     }
@@ -781,6 +790,32 @@ struct PartialToolConfig {
     search_include_patterns: Option<Vec<String>>,
     max_output_tokens: Option<usize>,
     web_search: Option<PartialToolWebSearchConfig>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct PartialHistoryConfig {
+    mode: Option<HistoryMode>,
+    retained_steps: Option<usize>,
+}
+
+impl PartialHistoryConfig {
+    fn merge(&mut self, other: Self) {
+        if other.mode.is_some() {
+            self.mode = other.mode;
+        }
+        if other.retained_steps.is_some() {
+            self.retained_steps = other.retained_steps;
+        }
+    }
+
+    fn finalize(self) -> HistoryConfig {
+        HistoryConfig {
+            mode: self.mode.unwrap_or_else(default_history_mode),
+            retained_steps: self
+                .retained_steps
+                .unwrap_or_else(default_history_retained_steps),
+        }
+    }
 }
 
 impl PartialToolConfig {

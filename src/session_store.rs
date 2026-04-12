@@ -15,7 +15,7 @@ use crate::{
         AccessMode, AppState, ApprovalMode, SessionHistoryMessage, SessionState, TranscriptEntry,
         UiState,
     },
-    config::ReasoningSetting,
+    config::{HistoryMode, ReasoningSetting},
     features::planning::{PlanningAgentConfig, PlanningFeatureState},
     model_registry,
     todo::TodoSnapshot,
@@ -55,6 +55,8 @@ pub struct PersistedSessionRuntimeState {
     pub approval_mode: ApprovalMode,
     pub show_thinking: bool,
     pub show_tool_output: bool,
+    pub history_mode: HistoryMode,
+    pub history_retained_steps: usize,
     pub preamble_text: String,
     pub session_history: Vec<SessionHistoryMessage>,
     pub last_history_model_name: Option<String>,
@@ -87,6 +89,9 @@ impl PersistedSessionSnapshot {
         started_at_unix_ms: u64,
         preamble_text: String,
     ) -> Self {
+        let session_history = crate::app::ops::session::sanitize_session_history_messages(
+            state.session.session_history.clone(),
+        );
         Self {
             schema_version: SCHEMA_VERSION,
             session_id,
@@ -110,8 +115,10 @@ impl PersistedSessionSnapshot {
                 approval_mode: state.session.approval_mode,
                 show_thinking: state.session.show_thinking,
                 show_tool_output: state.session.show_tool_output,
+                history_mode: state.session.history_mode,
+                history_retained_steps: state.session.history_retained_steps,
                 preamble_text,
-                session_history: state.session.session_history.clone(),
+                session_history,
                 last_history_model_name: state.session.last_history_model_name.clone(),
                 planning: state.session.planning.clone(),
                 current_todo: state.session.current_todo.clone(),
@@ -127,6 +134,13 @@ impl PersistedSessionSnapshot {
         initial_mode: AccessMode,
         initial_approval_mode: ApprovalMode,
     ) -> AppState {
+        let current_todo = self.runtime.current_todo.clone();
+        let sanitized_history = crate::app::ops::session::apply_current_todo_to_history(
+            crate::app::ops::session::sanitize_session_history_messages(
+                self.runtime.session_history.clone(),
+            ),
+            current_todo.as_ref(),
+        );
         let mut session = SessionState::with_startup(
             self.runtime.show_thinking,
             self.runtime.show_tool_output,
@@ -139,9 +153,12 @@ impl PersistedSessionSnapshot {
         session.workspace_root = self.workspace_root;
         session.mode = self.runtime.access_mode;
         session.approval_mode = self.runtime.approval_mode;
+        session.history_mode = self.runtime.history_mode;
+        session.history_retained_steps = self.runtime.history_retained_steps;
         session.entries = self.transcript;
         session.transcript_revision = 0;
-        session.replace_session_history(self.runtime.session_history);
+        session.current_todo = current_todo;
+        session.replace_session_history(sanitized_history);
         session.last_history_model_name = self.runtime.last_history_model_name;
         session.session_title = self.runtime.title;
         session.reasoning = self.runtime.reasoning;
@@ -152,7 +169,6 @@ impl PersistedSessionSnapshot {
         session.memory_reasoning = self.runtime.memory_reasoning;
         session.planning_agents = self.runtime.planning_agents;
         session.planning = self.runtime.planning;
-        session.current_todo = self.runtime.current_todo;
         session.next_reply_id = self.runtime.next_reply_id;
         session.next_side_channel_label_id = self.runtime.next_side_channel_label_id;
         session.pending_reply = None;
@@ -431,11 +447,13 @@ impl SessionStore {
             ));
         }
         replay_journal_tail(&events_path, &mut snapshot)?;
+        sanitize_persisted_snapshot(&mut snapshot);
         Ok(snapshot)
     }
 
-    pub fn attach_resumed_session(&mut self, snapshot: PersistedSessionSnapshot) {
+    pub fn attach_resumed_session(&mut self, mut snapshot: PersistedSessionSnapshot) {
         self.disabled = false;
+        sanitize_persisted_snapshot(&mut snapshot);
         self.live = LiveSessionState::from_snapshot(snapshot);
     }
 
@@ -700,6 +718,22 @@ fn read_snapshot(path: &Path) -> Result<PersistedSessionSnapshot> {
     serde_json::from_str(&raw).with_context(|| format!("failed to parse {}", path.display()))
 }
 
+fn sanitize_persisted_snapshot(snapshot: &mut PersistedSessionSnapshot) {
+    let history = crate::app::ops::session::sanitize_session_history_messages(std::mem::take(
+        &mut snapshot.runtime.session_history,
+    ));
+    let history = crate::app::ops::session::reduce_session_history_messages(
+        history,
+        snapshot.runtime.history_mode,
+        snapshot.runtime.history_retained_steps,
+        true,
+    );
+    snapshot.runtime.session_history = crate::app::ops::session::apply_current_todo_to_history(
+        history,
+        snapshot.runtime.current_todo.as_ref(),
+    );
+}
+
 fn default_sessions_dir() -> Option<PathBuf> {
     env::var_os("HOME").map(|home| PathBuf::from(home).join(SESSIONS_DIR_RELATIVE_PATH))
 }
@@ -742,6 +776,16 @@ mod tests {
         session::test_support::{new_app, registry_app},
     };
     use crate::ask_user::{AskUserAnswer, AskUserQuestion, AskUserRequest};
+    use crate::llm::history_into_rig;
+    use crate::todo::{TodoSnapshot, TodoStatus, TodoTask};
+    use rig::{
+        OneOrMany,
+        completion::{
+            Message as RigMessage,
+            message::{AssistantContent, ToolCall, ToolFunction},
+        },
+    };
+    use serde_json::json;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_root(name: &str) -> PathBuf {
@@ -872,6 +916,116 @@ mod tests {
         assert_eq!(store.live.session_id, session_id);
         let loaded = store.load_session(&session_id).expect("load updated");
         assert_eq!(loaded.runtime.preamble_text, "preamble-2");
+    }
+
+    #[test]
+    fn load_session_sanitizes_unmatched_multi_item_tool_calls_in_history() {
+        let app = new_app(true);
+        let root = temp_root("sanitize-history");
+        let store = store_with_root(&root, &app);
+
+        let mut snapshot = PersistedSessionSnapshot::new_from_app_state(
+            app.state(),
+            "sanitize-history".into(),
+            PersistedSessionInterface::Tui,
+            1,
+            "preamble".into(),
+        );
+        snapshot.runtime.session_history = vec![
+            SessionHistoryMessage::user("first user"),
+            SessionHistoryMessage::from_rig_message(RigMessage::Assistant {
+                id: None,
+                content: OneOrMany::many(vec![
+                    AssistantContent::ToolCall(ToolCall {
+                        id: "tool-1".into(),
+                        call_id: Some("call-1".into()),
+                        function: ToolFunction::new(
+                            "Commentary".into(),
+                            json!({"message":"checking files"}),
+                        ),
+                        signature: None,
+                        additional_params: None,
+                    }),
+                    AssistantContent::ToolCall(ToolCall {
+                        id: "tool-2".into(),
+                        call_id: Some("call-2".into()),
+                        function: ToolFunction::new(
+                            "Todo".into(),
+                            json!({"operation":"create","tasks":[]}),
+                        ),
+                        signature: None,
+                        additional_params: None,
+                    }),
+                ])
+                .expect("multiple assistant content items"),
+            })
+            .expect("assistant message"),
+            SessionHistoryMessage::assistant("after tool calls"),
+        ];
+
+        let session_dir = root.join("sanitize-history");
+        fs::create_dir_all(&session_dir).expect("create session dir");
+        fs::write(
+            session_dir.join(SNAPSHOT_FILE_NAME),
+            serde_json::to_string_pretty(&snapshot).expect("serialize snapshot"),
+        )
+        .expect("write snapshot");
+
+        let loaded = store
+            .load_session("sanitize-history")
+            .expect("load session");
+        let rig_history = history_into_rig(loaded.runtime.session_history).expect("rig history");
+
+        assert_eq!(
+            rig_history,
+            vec![
+                RigMessage::user("first user"),
+                RigMessage::assistant("after tool calls"),
+            ]
+        );
+    }
+
+    #[test]
+    fn load_session_keeps_only_latest_current_todo_summary() {
+        let app = new_app(true);
+        let root = temp_root("todo-summary");
+        let store = store_with_root(&root, &app);
+
+        let mut snapshot = PersistedSessionSnapshot::new_from_app_state(
+            app.state(),
+            "todo-summary".into(),
+            PersistedSessionInterface::Tui,
+            1,
+            "preamble".into(),
+        );
+        snapshot.runtime.current_todo = Some(TodoSnapshot::new(vec![TodoTask {
+            description: "Write regression coverage".into(),
+            status: TodoStatus::Todo,
+        }]));
+        snapshot.runtime.session_history = vec![
+            SessionHistoryMessage::assistant("old"),
+            SessionHistoryMessage::assistant("[oat-todo] [in progress] stale task"),
+            SessionHistoryMessage::assistant("[oat-todo] [done] older task"),
+        ];
+
+        let session_dir = root.join("todo-summary");
+        fs::create_dir_all(&session_dir).expect("create session dir");
+        fs::write(
+            session_dir.join(SNAPSHOT_FILE_NAME),
+            serde_json::to_string_pretty(&snapshot).expect("serialize snapshot"),
+        )
+        .expect("write snapshot");
+
+        let loaded = store.load_session("todo-summary").expect("load session");
+        let rig_history = history_into_rig(loaded.runtime.session_history).expect("rig history");
+
+        assert_eq!(
+            rig_history,
+            vec![
+                RigMessage::assistant("old"),
+                RigMessage::assistant("[oat-todo] [todo] Write regression coverage"),
+            ]
+        );
     }
 
     #[test]

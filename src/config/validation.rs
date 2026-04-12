@@ -91,6 +91,10 @@ pub(super) fn validate(config: &AppConfig) -> Result<()> {
 
     validate_planning_agents(&config.model.model_name, &config.planning.agents, config)?;
 
+    if config.history.retained_steps == 0 {
+        bail!("history.retained_steps must be at least 1");
+    }
+
     if config.tools.max_output_tokens == 0 {
         bail!("tools.max_output_tokens must be at least 1");
     }

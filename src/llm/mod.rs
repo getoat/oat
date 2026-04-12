@@ -26,6 +26,7 @@ pub(crate) use responses_search::{
     ResponsesSearchObserverGuard, observer_for_scope as responses_search_observer_for_scope,
 };
 pub(crate) use service::{LlmService, run_internal_plain_prompt};
+pub(crate) use types::sanitize_rig_history;
 pub(crate) use types::{
     CompletionCapture, EventCallback, HistoryCompactionResult, InteractionResolveResult,
     PromptRunResult, ResumeOverride, ResumeRequest, TurnInterruptController, TurnInterruptRequest,

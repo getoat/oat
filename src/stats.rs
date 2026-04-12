@@ -14,11 +14,13 @@ use rig::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{model_registry, token_counting::count_text_tokens};
+use crate::{
+    model_registry, token_counting::count_text_tokens,
+    tool_result_status::tool_result_is_failure_text,
+};
 
 const STATS_DIR_RELATIVE_PATH: &str = ".config/oat/stats";
 const SCHEMA_VERSION: u32 = 5;
-const TOOL_CALL_ERROR_PREFIX: &str = "ToolCallError:";
 const NANOS_PER_USD: u64 = 1_000_000_000;
 const TOKENS_PER_MILLION: u64 = 1_000_000;
 
@@ -493,8 +495,7 @@ impl StatsHook {
     }
 
     fn record_tool_result(&self, result: &str) {
-        let normalized = normalize_tool_result(result);
-        let is_failure = normalized.starts_with(TOOL_CALL_ERROR_PREFIX);
+        let is_failure = tool_result_is_failure_text(result);
         let model_name = self.model_name.as_deref();
         let _ = update_and_persist(&self.state, |current| {
             current.apply_to_model_and_total(model_name, |totals| {
@@ -843,10 +844,6 @@ fn session_path(stats_dir: &Path, session_id: &str) -> PathBuf {
     stats_dir.join(format!("{session_id}.json"))
 }
 
-fn normalize_tool_result(result: &str) -> String {
-    serde_json::from_str::<String>(result).unwrap_or_else(|_| result.to_string())
-}
-
 fn estimate_request_cost_nanos_usd(model_name: &str, usage: Usage) -> u64 {
     let Some(model) = model_registry::find_model(model_name) else {
         return 0;
@@ -939,6 +936,28 @@ mod tests {
 
         hook.record_request();
         hook.record_tool_result(r#""ToolCallError: missing field `filename`""#);
+        hook.finish_request_without_usage();
+
+        let report = store.report().expect("load stats report");
+        assert_eq!(report.current.tool_call_count, 1);
+        assert_eq!(report.current.tool_failure_count, 1);
+        assert_eq!(report.current.tool_success_count, 0);
+
+        drop(hook);
+        drop(store);
+        fs::remove_dir_all(dir).expect("remove temp dir");
+    }
+
+    #[test]
+    fn toolset_wrapped_tool_call_error_counts_as_failure() {
+        let dir = unique_temp_dir("wrapped-failure");
+        let store = StatsStore::with_stats_dir(Some(dir.clone()));
+        let hook = store.hook();
+
+        hook.record_request();
+        hook.record_tool_result(
+            r#""Toolset error: ToolCallError: ToolCallError: patch 1 old_text was not found in src/main.tsx""#,
+        );
         hook.finish_request_without_usage();
 
         let report = store.report().expect("load stats report");

@@ -44,6 +44,7 @@ fn sample_config() -> AppConfig {
         subagents: SubagentConfig::default(),
         planning: PlanningConfig::default(),
         memory: MemoryConfig::default(),
+        history: HistoryConfig::default(),
         tools: ToolConfig::default(),
     }
 }
@@ -167,6 +168,48 @@ fn parses_expected_config_shape() {
     assert_eq!(config.tools.search_include_patterns, vec![".research/**"]);
     assert_eq!(config.tools.max_output_tokens, 2048);
     assert_eq!(config.tools.web_search.mode, WebSearchMode::Cached);
+}
+
+#[test]
+fn defaults_history_to_step_summary_with_one_retained_step() {
+    let config: AppConfig = toml::from_str(
+        r#"
+            [azure]
+            resource_name = "demo-resource"
+            api_key = "secret"
+
+            [model]
+            model_name = "gpt-5.4-mini"
+            reasoning = "medium"
+        "#,
+    )
+    .expect("config parses");
+
+    assert_eq!(config.history.mode, HistoryMode::StepSummary);
+    assert_eq!(config.history.retained_steps, 1);
+}
+
+#[test]
+fn parses_explicit_history_settings() {
+    let config: AppConfig = toml::from_str(
+        r#"
+            [azure]
+            resource_name = "demo-resource"
+            api_key = "secret"
+
+            [model]
+            model_name = "gpt-5.4-mini"
+            reasoning = "medium"
+
+            [history]
+            mode = "turn_summary"
+            retained_steps = 3
+        "#,
+    )
+    .expect("config parses");
+
+    assert_eq!(config.history.mode, HistoryMode::TurnSummary);
+    assert_eq!(config.history.retained_steps, 3);
 }
 
 #[test]
@@ -765,6 +808,7 @@ fn validation_requires_chutes_credentials_for_selected_chutes_model() {
         ui: UiConfig::default(),
         subagents: SubagentConfig::default(),
         planning: PlanningConfig::default(),
+        history: HistoryConfig::default(),
         tools: ToolConfig::default(),
     };
 
@@ -793,6 +837,7 @@ fn validation_requires_ollama_credentials_for_selected_ollama_model() {
         ui: UiConfig::default(),
         subagents: SubagentConfig::default(),
         planning: PlanningConfig::default(),
+        history: HistoryConfig::default(),
         tools: ToolConfig::default(),
     };
 
@@ -846,6 +891,7 @@ fn validation_requires_opencode_credentials_for_selected_opencode_model() {
         ui: UiConfig::default(),
         subagents: SubagentConfig::default(),
         planning: PlanningConfig::default(),
+        history: HistoryConfig::default(),
         tools: ToolConfig::default(),
     };
 
@@ -948,6 +994,7 @@ fn validation_requires_openrouter_credentials_for_selected_openrouter_model() {
         ui: UiConfig::default(),
         subagents: SubagentConfig::default(),
         planning: PlanningConfig::default(),
+        history: HistoryConfig::default(),
         tools: ToolConfig::default(),
     };
 

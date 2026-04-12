@@ -252,8 +252,8 @@ mod tests {
     use super::*;
     use crate::{
         config::{
-            AzureConfig, MemoryConfig, ModelSelectionConfig, ReasoningEffort, SafetyConfig,
-            SubagentConfig, ToolConfig, UiConfig,
+            AzureConfig, HistoryConfig, MemoryConfig, ModelSelectionConfig, ReasoningEffort,
+            SafetyConfig, SubagentConfig, ToolConfig, UiConfig,
         },
         features::planning::PlanningConfig,
         stats::StatsStore,
@@ -284,6 +284,7 @@ mod tests {
             ui: UiConfig::default(),
             subagents: SubagentConfig { max_concurrent: 4 },
             planning: PlanningConfig::default(),
+            history: HistoryConfig::default(),
             tools: ToolConfig::default(),
         }
     }

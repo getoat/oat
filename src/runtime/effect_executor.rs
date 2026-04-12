@@ -794,6 +794,8 @@ impl EffectExecutor<'_> {
         updated_config.safety.reasoning = snapshot.runtime.safety_reasoning;
         updated_config.memory.extraction.model_name = snapshot.runtime.memory_model_name.clone();
         updated_config.memory.extraction.reasoning = snapshot.runtime.memory_reasoning;
+        updated_config.history.mode = snapshot.runtime.history_mode;
+        updated_config.history.retained_steps = snapshot.runtime.history_retained_steps;
         updated_config.planning.agents = sanitize_planning_agents(
             &snapshot.runtime.model_name,
             &snapshot.runtime.planning_agents,
@@ -956,8 +958,8 @@ mod tests {
         app::{AccessMode, ApprovalMode},
         background_terminals::BackgroundTerminalManager,
         config::{
-            AppConfig, AzureConfig, MemoryConfig, ModelSelectionConfig, ReasoningEffort,
-            SafetyConfig, SubagentConfig, ToolConfig, UiConfig,
+            AppConfig, AzureConfig, HistoryConfig, MemoryConfig, ModelSelectionConfig,
+            ReasoningEffort, SafetyConfig, SubagentConfig, ToolConfig, UiConfig,
         },
         features::planning::PlanningConfig,
         llm::{AskUserController, LlmService, WriteApprovalController},
@@ -991,6 +993,7 @@ mod tests {
             ui: UiConfig::default(),
             subagents: SubagentConfig::default(),
             planning: PlanningConfig::default(),
+            history: HistoryConfig::default(),
             tools: ToolConfig::default(),
         }
     }

@@ -4,7 +4,7 @@ use std::{
 };
 
 use crate::{
-    config::ReasoningSetting,
+    config::{HistoryMode, ReasoningSetting},
     features::planning::{PlanningAgentConfig, PlanningFeatureState},
     stats::StatsTotals,
     todo::TodoSnapshot,
@@ -42,6 +42,8 @@ pub struct SessionState {
     pub show_tool_output: bool,
     pub model_name: String,
     pub last_history_model_name: Option<String>,
+    pub history_mode: HistoryMode,
+    pub history_retained_steps: usize,
     pub reasoning: ReasoningSetting,
     pub safety_model_name: String,
     pub safety_reasoning: ReasoningSetting,
@@ -122,6 +124,8 @@ impl SessionState {
             safety_model_name,
             model_name,
             last_history_model_name: None,
+            history_mode: HistoryMode::Full,
+            history_retained_steps: 1,
             reasoning,
             safety_reasoning: reasoning,
             memory_model_name,

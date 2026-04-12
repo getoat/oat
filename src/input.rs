@@ -13,7 +13,9 @@ pub fn map_event(event: Event) -> Option<Action> {
 
 pub(crate) fn map_event_with_context(event: Event, context: InputContext) -> Option<Action> {
     match event {
-        Event::Key(key) if key.kind == KeyEventKind::Press => Some(map_key_event(key, context)),
+        Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
+            Some(map_key_event(key, context))
+        }
         Event::Mouse(mouse) => map_mouse_event(mouse, context),
         Event::Paste(text) => (!matches!(
             context,
@@ -542,6 +544,22 @@ mod tests {
             KeyEventKind::Release,
         )));
         assert_eq!(action, None);
+    }
+
+    #[test]
+    fn repeat_key_events_are_treated_like_presses() {
+        let action = map_event(Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('x'),
+            KeyModifiers::NONE,
+            KeyEventKind::Repeat,
+        )));
+        assert_eq!(
+            action,
+            Some(Action::Editor(editor_input_from_key(key(
+                KeyCode::Char('x'),
+                KeyModifiers::NONE
+            ))))
+        );
     }
 
     #[test]
