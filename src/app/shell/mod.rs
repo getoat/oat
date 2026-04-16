@@ -20,6 +20,7 @@ impl App {
             model_name,
             reasoning,
             Vec::new(),
+            false,
             AccessMode::ReadOnly,
             ApprovalMode::Manual,
         )
@@ -31,6 +32,7 @@ impl App {
         model_name: impl Into<String>,
         reasoning: impl Into<ReasoningSetting>,
         planning_agents: Vec<PlanningAgentConfig>,
+        full_system_access: bool,
         initial_mode: AccessMode,
         initial_approval_mode: ApprovalMode,
     ) -> Self {
@@ -42,6 +44,7 @@ impl App {
                     model_name,
                     reasoning,
                     planning_agents,
+                    full_system_access,
                     initial_mode,
                     initial_approval_mode,
                 ),

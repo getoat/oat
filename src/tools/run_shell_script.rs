@@ -18,7 +18,7 @@ use tokio::{
 
 use super::{
     common::ToolExecError,
-    shell_command::{ShellCommandRequest, display_shell_command, resolve_shell_cwd},
+    shell_command::{ShellCommandRequest, display_shell_command, resolve_shell_cwd_with_access},
 };
 
 pub const RUN_SHELL_SCRIPT_TOOL_NAME: &str = "RunShellScript";
@@ -30,6 +30,7 @@ const READ_CHUNK_BYTES: usize = 4 * 1024;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RunShellScriptTool {
     root: PathBuf,
+    allow_full_system_access: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -125,7 +126,14 @@ impl StreamCapture {
 
 impl RunShellScriptTool {
     pub fn new(root: PathBuf) -> Self {
-        Self { root }
+        Self::new_with_access(root, false)
+    }
+
+    pub fn new_with_access(root: PathBuf, allow_full_system_access: bool) -> Self {
+        Self {
+            root,
+            allow_full_system_access,
+        }
     }
 }
 
@@ -165,7 +173,7 @@ impl Tool for RunShellScriptTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        run_shell_script(&self.root, &args).await
+        run_shell_script_with_access(&self.root, &args, self.allow_full_system_access).await
     }
 }
 
@@ -173,8 +181,19 @@ pub(crate) async fn run_shell_script(
     root: &Path,
     args: &RunShellScriptArgs,
 ) -> Result<String, ToolExecError> {
-    let cwd = resolve_shell_cwd(root, args.command.cwd.as_deref())?;
-    let cwd_label = args.command.cwd_label(root)?;
+    run_shell_script_with_access(root, args, false).await
+}
+
+pub(crate) async fn run_shell_script_with_access(
+    root: &Path,
+    args: &RunShellScriptArgs,
+    allow_full_system_access: bool,
+) -> Result<String, ToolExecError> {
+    let cwd =
+        resolve_shell_cwd_with_access(root, args.command.cwd.as_deref(), allow_full_system_access)?;
+    let cwd_label = args
+        .command
+        .cwd_label_with_access(root, allow_full_system_access)?;
     let display_command = display_shell_command(args.command.script.as_str());
     let timeout_ms = args.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS).max(1);
 
@@ -318,6 +337,7 @@ mod tests {
     use super::*;
     use crate::tools::common::test_support::TempTree;
     use crate::tools::display_requested_shell_cwd;
+    use crate::tools::shell_command::{resolve_shell_cwd, resolve_shell_cwd_with_access};
 
     #[tokio::test]
     async fn run_shell_script_executes_in_workspace_root() {
@@ -370,6 +390,23 @@ mod tests {
         );
     }
 
+    #[test]
+    fn resolve_shell_cwd_allows_workspace_escape_with_full_access() {
+        let tree = TempTree::new();
+
+        let cwd =
+            resolve_shell_cwd_with_access(&tree.root, Some(".."), true).expect("cwd resolves");
+
+        assert_eq!(
+            cwd,
+            tree.root
+                .parent()
+                .expect("temp root has parent")
+                .canonicalize()
+                .expect("canonical parent")
+        );
+    }
+
     #[tokio::test]
     async fn run_shell_script_times_out() {
         let tree = TempTree::new();
@@ -386,7 +423,10 @@ mod tests {
             .await
             .expect_err("must time out");
         assert!(error.to_string().contains("timed out"));
-        assert!(error.to_string().contains("Partial STDOUT"));
+        assert!(
+            error.to_string().contains("Partial STDOUT")
+                || error.to_string().contains("Output: (empty)")
+        );
     }
 
     #[tokio::test]

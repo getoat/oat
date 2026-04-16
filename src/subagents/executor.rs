@@ -60,8 +60,11 @@ impl SubagentManager {
         id: String,
         request: SubagentSpawnRequest,
     ) -> std::result::Result<String, SubagentExecutionFailure> {
-        let context =
-            AgentContext::subagent(request.access_mode, request.model_name_override.clone());
+        let context = AgentContext::subagent_with_full_system_access(
+            request.access_mode,
+            request.model_name_override.clone(),
+            request.allow_full_system_access,
+        );
         let service = LlmService::from_config_with_controllers(
             &request.config,
             context,

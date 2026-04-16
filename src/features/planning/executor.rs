@@ -1,13 +1,17 @@
 use std::{future::Future, pin::Pin, sync::Arc};
 
 use crate::{
+    app::AccessMode,
     config::AppConfig,
     llm::{ShellApprovalController, WriteApprovalController},
     subagents::{SubagentActivityKind, SubagentManager, SubagentSpawnRequest, SubagentStatus},
     web::WebService,
 };
 
-use super::protocol::{PlanningJob, planner_prompt, planning_finalization_prompt, planning_jobs};
+use super::protocol::{
+    PlanningJob, planner_prompt, planning_finalization_prompt,
+    planning_finalization_prompt_headless, planning_jobs,
+};
 
 pub type PlanningSynthesisFuture = Pin<Box<dyn Future<Output = Result<(), String>> + Send>>;
 pub type PlanningSynthesizer = Arc<
@@ -23,6 +27,9 @@ pub async fn run_planning_workflow(
     description: String,
     history: Vec<rig::completion::Message>,
     history_model_name: Option<String>,
+    access_mode: AccessMode,
+    allow_full_system_access: bool,
+    allow_ask_user: bool,
     config: AppConfig,
     subagents: SubagentManager,
     write_approvals: WriteApprovalController,
@@ -46,6 +53,8 @@ pub async fn run_planning_workflow(
             &config,
             &description,
             batch,
+            access_mode,
+            allow_full_system_access,
             write_approvals.clone(),
             shell_approvals.clone(),
             web.clone(),
@@ -72,8 +81,11 @@ pub async fn run_planning_workflow(
 
     let _ = reply_id;
     on_finalization_started();
-    let synth_prompt =
-        planning_finalization_prompt(&description, &successful_plans, &failed_models);
+    let synth_prompt = if allow_ask_user {
+        planning_finalization_prompt(&description, &successful_plans, &failed_models)
+    } else {
+        planning_finalization_prompt_headless(&description, &successful_plans, &failed_models)
+    };
     if let Err(error) = synthesize(synth_prompt, history, history_model_name).await {
         on_failure(format!("Planning synthesis failed: {error}"));
     }
@@ -84,6 +96,8 @@ async fn spawn_planning_batch(
     config: &AppConfig,
     description: &str,
     batch: &[PlanningJob],
+    access_mode: AccessMode,
+    allow_full_system_access: bool,
     write_approvals: WriteApprovalController,
     shell_approvals: ShellApprovalController,
     web: WebService,
@@ -97,6 +111,8 @@ async fn spawn_planning_batch(
             config,
             description,
             job.clone(),
+            access_mode,
+            allow_full_system_access,
             write_approvals.clone(),
             shell_approvals.clone(),
             web.clone(),
@@ -116,6 +132,8 @@ async fn spawn_planning_subagent(
     config: &AppConfig,
     description: &str,
     job: PlanningJob,
+    access_mode: AccessMode,
+    allow_full_system_access: bool,
     write_approvals: WriteApprovalController,
     shell_approvals: ShellApprovalController,
     web: WebService,
@@ -126,7 +144,8 @@ async fn spawn_planning_subagent(
     let snapshot = subagents
         .spawn(SubagentSpawnRequest {
             prompt: planner_prompt(description),
-            access_mode: crate::app::AccessMode::ReadOnly,
+            access_mode,
+            allow_full_system_access,
             activity_kind: SubagentActivityKind::Planning {
                 model_name: job.model_name.clone(),
             },

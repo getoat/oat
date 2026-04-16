@@ -432,6 +432,7 @@ pub(crate) fn reset_session(state: &mut AppState) {
         model_name,
         reasoning,
         planning_agents,
+        state.session.full_system_access,
         state.session.initial_mode,
         state.session.initial_approval_mode,
     );

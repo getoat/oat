@@ -19,6 +19,7 @@ use super::{
 #[derive(Debug)]
 pub struct SessionState {
     pub workspace_root: PathBuf,
+    pub full_system_access: bool,
     pub initial_mode: AccessMode,
     pub initial_approval_mode: ApprovalMode,
     pub mode: AccessMode,
@@ -75,6 +76,7 @@ impl SessionState {
             model_name,
             reasoning.into(),
             Vec::new(),
+            false,
             AccessMode::ReadOnly,
             ApprovalMode::Manual,
         )
@@ -86,6 +88,7 @@ impl SessionState {
         model_name: impl Into<String>,
         reasoning: impl Into<ReasoningSetting>,
         planning_agents: Vec<PlanningAgentConfig>,
+        full_system_access: bool,
         initial_mode: AccessMode,
         initial_approval_mode: ApprovalMode,
     ) -> Self {
@@ -95,6 +98,7 @@ impl SessionState {
         let memory_model_name = model_name.clone();
         Self {
             workspace_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            full_system_access,
             initial_mode,
             initial_approval_mode,
             mode: initial_mode,

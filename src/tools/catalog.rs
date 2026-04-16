@@ -29,6 +29,7 @@ use super::{
 #[derive(Clone)]
 pub struct ToolContext {
     pub root: PathBuf,
+    pub allow_full_system_access: bool,
     pub agent: AgentContext,
     pub config: AppConfig,
     pub write_approvals: WriteApprovalController,
@@ -82,23 +83,40 @@ const TOOL_DESCRIPTORS: [ToolDescriptor; 21] = [
     }),
     ToolDescriptor::read_only(ListTool::NAME, ToolRoleScope::Any, |context| {
         let search_policy = context.search_policy();
-        Box::new(ListTool::new(context.root, search_policy))
+        Box::new(ListTool::new_with_access(
+            context.root,
+            search_policy,
+            context.allow_full_system_access,
+        ))
     }),
     ToolDescriptor::read_only(ReadFileTool::NAME, ToolRoleScope::Any, |context| {
-        Box::new(ReadFileTool::new(context.root))
+        Box::new(ReadFileTool::new_with_access(
+            context.root,
+            context.allow_full_system_access,
+        ))
     }),
     ToolDescriptor::read_only(ReadFilesTool::NAME, ToolRoleScope::Any, |context| {
-        Box::new(ReadFilesTool::new(context.root))
+        Box::new(ReadFilesTool::new_with_access(
+            context.root,
+            context.allow_full_system_access,
+        ))
     }),
     ToolDescriptor::read_only(GrepTool::NAME, ToolRoleScope::Any, |context| {
         let search_policy = context.search_policy();
-        Box::new(GrepTool::new(context.root, search_policy))
+        Box::new(GrepTool::new_with_access(
+            context.root,
+            search_policy,
+            context.allow_full_system_access,
+        ))
     }),
     ToolDescriptor::read_only(WebRunTool::NAME, ToolRoleScope::Any, |context| {
         Box::new(WebRunTool::new(context.web))
     }),
     ToolDescriptor::read_only(RunShellScriptTool::NAME, ToolRoleScope::Any, |context| {
-        Box::new(RunShellScriptTool::new(context.root))
+        Box::new(RunShellScriptTool::new_with_access(
+            context.root,
+            context.allow_full_system_access,
+        ))
     }),
     ToolDescriptor::read_only(
         SEARCH_MEMORIES_TOOL_NAME,
@@ -122,11 +140,12 @@ const TOOL_DESCRIPTORS: [ToolDescriptor; 21] = [
         START_BACKGROUND_TERMINAL_TOOL_NAME,
         ToolRoleScope::MainWithTerminalManager,
         |context| {
-            Box::new(StartBackgroundTerminalTool::new(
+            Box::new(StartBackgroundTerminalTool::new_with_access(
                 context.root,
                 context
                     .terminals
                     .expect("background terminal tools require a manager"),
+                context.allow_full_system_access,
             ))
         },
     ),
@@ -164,13 +183,22 @@ const TOOL_DESCRIPTORS: [ToolDescriptor; 21] = [
         },
     ),
     ToolDescriptor::mutation(ApplyPatchesTool::NAME, ToolRoleScope::Any, |context| {
-        Box::new(ApplyPatchesTool::new(context.root))
+        Box::new(ApplyPatchesTool::new_with_access(
+            context.root,
+            context.allow_full_system_access,
+        ))
     }),
     ToolDescriptor::mutation(WriteFileTool::NAME, ToolRoleScope::Any, |context| {
-        Box::new(WriteFileTool::new(context.root))
+        Box::new(WriteFileTool::new_with_access(
+            context.root,
+            context.allow_full_system_access,
+        ))
     }),
     ToolDescriptor::mutation(DeletePathTool::NAME, ToolRoleScope::Any, |context| {
-        Box::new(DeletePathTool::new(context.root))
+        Box::new(DeletePathTool::new_with_access(
+            context.root,
+            context.allow_full_system_access,
+        ))
     }),
     ToolDescriptor::read_only(
         SPAWN_SUBAGENT_TOOL_NAME,
@@ -182,6 +210,7 @@ const TOOL_DESCRIPTORS: [ToolDescriptor; 21] = [
                     .expect("main agent subagent tools require a manager"),
                 context.config,
                 context.agent.access_mode,
+                context.allow_full_system_access,
                 context.write_approvals,
                 context.shell_approvals,
                 context.web,
@@ -312,6 +341,7 @@ mod tests {
     fn read_only_mode_exposes_only_read_tools() {
         let tool_names = tool_names_for_context(&ToolContext {
             root: PathBuf::from("."),
+            allow_full_system_access: false,
             agent: AgentContext::main(AccessMode::ReadOnly),
             config: sample_config(),
             write_approvals: WriteApprovalController::default(),
@@ -351,6 +381,7 @@ mod tests {
     fn read_write_mode_exposes_all_tools() {
         let tool_names = tool_names_for_context(&ToolContext {
             root: PathBuf::from("."),
+            allow_full_system_access: false,
             agent: AgentContext::main(AccessMode::ReadWrite),
             config: sample_config(),
             write_approvals: WriteApprovalController::default(),
@@ -379,6 +410,7 @@ mod tests {
     fn mutation_classification_matches_write_tools() {
         for tool_name in tool_names_for_context(&ToolContext {
             root: PathBuf::from("."),
+            allow_full_system_access: false,
             agent: AgentContext::main(AccessMode::ReadOnly),
             config: sample_config(),
             write_approvals: WriteApprovalController::default(),
@@ -406,6 +438,7 @@ mod tests {
     fn subagents_do_not_get_subagent_tools() {
         let tool_names = tool_names_for_context(&ToolContext {
             root: PathBuf::from("."),
+            allow_full_system_access: false,
             agent: AgentContext::subagent(AccessMode::ReadOnly, None),
             config: sample_config(),
             write_approvals: WriteApprovalController::default(),
@@ -428,6 +461,7 @@ mod tests {
     fn main_agent_without_manager_omits_subagent_tools() {
         let tool_names = tool_names_for_context(&ToolContext {
             root: PathBuf::from("."),
+            allow_full_system_access: false,
             agent: AgentContext::main(AccessMode::ReadOnly),
             config: sample_config(),
             write_approvals: WriteApprovalController::default(),

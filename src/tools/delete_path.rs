@@ -4,13 +4,14 @@ use rig::{completion::ToolDefinition, tool::Tool};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use super::common::{ToolExecError, display_path, resolve_workspace_path};
+use super::common::{ToolExecError, display_path, resolve_workspace_path_with_access};
 
 pub const DELETE_PATH_TOOL_NAME: &str = "DeletePath";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DeletePathTool {
     root: PathBuf,
+    allow_full_system_access: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -22,7 +23,14 @@ pub struct DeletePathArgs {
 
 impl DeletePathTool {
     pub fn new(root: PathBuf) -> Self {
-        Self { root }
+        Self::new_with_access(root, false)
+    }
+
+    pub fn new_with_access(root: PathBuf, allow_full_system_access: bool) -> Self {
+        Self {
+            root,
+            allow_full_system_access,
+        }
     }
 }
 
@@ -54,15 +62,26 @@ impl Tool for DeletePathTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        delete_path(&self.root, &args.path)
+        delete_path_with_access(&self.root, &args.path, self.allow_full_system_access)
     }
 }
 
 pub(crate) fn delete_path(root: &Path, raw_path: &str) -> Result<String, ToolExecError> {
-    let path = resolve_workspace_path(root, raw_path)?;
+    delete_path_with_access(root, raw_path, false)
+}
+
+pub(crate) fn delete_path_with_access(
+    root: &Path,
+    raw_path: &str,
+    allow_full_system_access: bool,
+) -> Result<String, ToolExecError> {
+    let path = resolve_workspace_path_with_access(root, raw_path, allow_full_system_access)?;
     let canonical_root = root.canonicalize()?;
     if path == canonical_root {
         return Err(ToolExecError::new("refusing to delete the workspace root"));
+    }
+    if path == Path::new("/") {
+        return Err(ToolExecError::new("refusing to delete the filesystem root"));
     }
 
     let metadata = std::fs::metadata(&path)?;

@@ -6,12 +6,13 @@ use serde_json::json;
 
 use super::{
     common::ToolExecError,
-    read_file::{MAX_READFILE_LIMIT, ReadFileArgs, read_file_lines},
+    read_file::{MAX_READFILE_LIMIT, ReadFileArgs},
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ReadFilesTool {
     root: PathBuf,
+    allow_full_system_access: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -21,7 +22,14 @@ pub struct ReadFilesArgs {
 
 impl ReadFilesTool {
     pub fn new(root: PathBuf) -> Self {
-        Self { root }
+        Self::new_with_access(root, false)
+    }
+
+    pub fn new_with_access(root: PathBuf, allow_full_system_access: bool) -> Self {
+        Self {
+            root,
+            allow_full_system_access,
+        }
     }
 }
 
@@ -71,13 +79,21 @@ impl Tool for ReadFilesTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        read_files_lines(&self.root, &args.files)
+        read_files_lines_with_access(&self.root, &args.files, self.allow_full_system_access)
     }
 }
 
 pub(crate) fn read_files_lines(
     root: &std::path::Path,
     files: &[ReadFileArgs],
+) -> Result<String, ToolExecError> {
+    read_files_lines_with_access(root, files, false)
+}
+
+pub(crate) fn read_files_lines_with_access(
+    root: &std::path::Path,
+    files: &[ReadFileArgs],
+    allow_full_system_access: bool,
 ) -> Result<String, ToolExecError> {
     if files.is_empty() || files.len() > 5 {
         return Err(ToolExecError::new(
@@ -87,7 +103,13 @@ pub(crate) fn read_files_lines(
 
     let mut sections = Vec::with_capacity(files.len());
     for file in files {
-        let content = read_file_lines(root, &file.filename, file.offset, file.limit)?;
+        let content = super::read_file::read_file_lines_with_access(
+            root,
+            &file.filename,
+            file.offset,
+            file.limit,
+            allow_full_system_access,
+        )?;
         sections.push(format!("==> {} <==\n{content}", file.filename));
     }
 

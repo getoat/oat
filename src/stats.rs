@@ -411,7 +411,9 @@ impl StatsStore {
 
 impl Drop for StatsStore {
     fn drop(&mut self) {
-        let _ = self.finalize_current_session();
+        if Arc::strong_count(&self.state) == 1 {
+            let _ = self.finalize_current_session();
+        }
     }
 }
 
@@ -1029,6 +1031,34 @@ mod tests {
 
         drop(hook);
         drop(store);
+        fs::remove_dir_all(dir).expect("remove temp dir");
+    }
+
+    #[test]
+    fn dropping_a_stats_clone_does_not_finalize_the_session() {
+        let dir = unique_temp_dir("clone-drop");
+        let store = StatsStore::with_stats_dir(Some(dir.clone()));
+        let clone = store.clone();
+        let hook = store.hook();
+
+        hook.record_request();
+        hook.record_response_progress();
+
+        drop(clone);
+
+        let paths = session_file_paths(&dir);
+        assert_eq!(paths.len(), 1);
+        let raw = fs::read_to_string(&paths[0]).expect("read session file");
+        let session: SessionStats = serde_json::from_str(&raw).expect("parse session file");
+        assert_eq!(session.finished_at_unix_ms, None);
+
+        drop(hook);
+        drop(store);
+
+        let raw = fs::read_to_string(&paths[0]).expect("read finalized session file");
+        let session: SessionStats = serde_json::from_str(&raw).expect("parse finalized session");
+        assert!(session.finished_at_unix_ms.is_some());
+
         fs::remove_dir_all(dir).expect("remove temp dir");
     }
 

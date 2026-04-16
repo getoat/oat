@@ -4,13 +4,14 @@ use rig::{completion::ToolDefinition, tool::Tool};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use super::common::{ToolExecError, display_path, resolve_workspace_path};
+use super::common::{ToolExecError, display_path, resolve_workspace_path_with_access};
 
 pub const WRITE_FILE_TOOL_NAME: &str = "WriteFile";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WriteFileTool {
     root: PathBuf,
+    allow_full_system_access: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -23,7 +24,14 @@ pub struct WriteFileArgs {
 
 impl WriteFileTool {
     pub fn new(root: PathBuf) -> Self {
-        Self { root }
+        Self::new_with_access(root, false)
+    }
+
+    pub fn new_with_access(root: PathBuf, allow_full_system_access: bool) -> Self {
+        Self {
+            root,
+            allow_full_system_access,
+        }
     }
 }
 
@@ -59,7 +67,12 @@ impl Tool for WriteFileTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        write_file(&self.root, &args.filename, &args.content)
+        write_file_with_access(
+            &self.root,
+            &args.filename,
+            &args.content,
+            self.allow_full_system_access,
+        )
     }
 }
 
@@ -68,7 +81,16 @@ pub(crate) fn write_file(
     filename: &str,
     content: &str,
 ) -> Result<String, ToolExecError> {
-    let path = resolve_workspace_path(root, filename)?;
+    write_file_with_access(root, filename, content, false)
+}
+
+pub(crate) fn write_file_with_access(
+    root: &Path,
+    filename: &str,
+    content: &str,
+    allow_full_system_access: bool,
+) -> Result<String, ToolExecError> {
+    let path = resolve_workspace_path_with_access(root, filename, allow_full_system_access)?;
     if path == root.canonicalize()? {
         return Err(ToolExecError::new(
             "refusing to write to the workspace root",
@@ -130,6 +152,27 @@ mod tests {
                 .to_string()
                 .contains("escapes the current workspace root")
         );
+    }
+
+    #[test]
+    fn mutation_path_resolution_allows_workspace_escape_with_full_access() {
+        let tree = TempTree::new();
+        let outside = tree.root.with_extension("outside.txt");
+
+        let output = write_file_with_access(
+            &tree.root,
+            outside.to_str().expect("utf-8 path"),
+            "hello",
+            true,
+        )
+        .expect("write succeeds");
+
+        assert_eq!(output, format!("Wrote {}.", outside.display()));
+        assert_eq!(
+            std::fs::read_to_string(&outside).expect("file exists"),
+            "hello"
+        );
+        let _ = std::fs::remove_file(outside);
     }
 
     #[tokio::test]

@@ -9,6 +9,7 @@ async-stream = "0.3.6"
 base64 = "0.22.1"
 bytes = "1.10.1"
 chrono = { version = "0.4.42", features = ["serde"] }
+clap = { version = "4.5.38", features = ["derive"] }
 crossterm = "0.29"
 fastembed = { version = "5.13.0", default-features = false, features = ["hf-hub-native-tls", "ort-load-dynamic"] }
 futures-util = "0.3.32"

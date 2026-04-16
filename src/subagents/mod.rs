@@ -86,6 +86,7 @@ pub enum SubagentUiEvent {
 pub struct SubagentSpawnRequest {
     pub prompt: String,
     pub access_mode: AccessMode,
+    pub allow_full_system_access: bool,
     pub activity_kind: SubagentActivityKind,
     pub model_name_override: Option<String>,
     pub config: AppConfig,

@@ -15,7 +15,10 @@ use std::{
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Deserializer};
 
-use crate::{features::planning::PlanningAgentConfig, model_registry};
+use crate::{
+    features::planning::{PlanningAgentConfig, sanitize_planning_agents},
+    model_registry,
+};
 use partial::PartialAppConfig;
 pub(crate) use paths::default_config_locations;
 use paths::{default_config_update_path, default_home_config_path};
@@ -23,14 +26,21 @@ use paths::{default_config_update_path, default_home_config_path};
 use types::default_api_version;
 pub(crate) use types::{
     AppConfig, CodexAuthMode, CodexConfig, HistoryMode, KimiThinkingMode, MemoryConfig,
-    MemoryExtractionConfig, RawReasoningSetting, ReasoningEffort, ReasoningSetting, WebSearchMode,
+    MemoryExtractionConfig, RawReasoningSetting, ReasoningEffort, WebSearchMode,
 };
 #[cfg(test)]
 pub(crate) use types::{
-    AzureConfig, HistoryConfig, ModelSelectionConfig, OllamaConfig, OpenRouterConfig,
-    OpencodeConfig, SafetyConfig, SubagentConfig, ToolConfig, UiConfig,
+    AzureConfig, HistoryConfig, OllamaConfig, OpenRouterConfig, OpencodeConfig, SafetyConfig,
+    SubagentConfig, ToolConfig, UiConfig,
 };
+pub use types::{ModelSelectionConfig, ReasoningSetting};
 use updates::{write_codex_auth_updates_at_path, write_config_updates_at_path};
+
+#[derive(Debug, Clone, Default)]
+pub struct RuntimeConfigOverrides {
+    pub model_selection: Option<ModelSelectionConfig>,
+    pub planning_agents: Option<Vec<PlanningAgentConfig>>,
+}
 
 const DEFAULT_CONFIG_PATH: &str = "config.toml";
 const HOME_CONFIG_RELATIVE_PATH: &str = ".config/oat/config.toml";
@@ -102,13 +112,19 @@ impl AppConfig {
         Ok(config)
     }
 
-    #[cfg(test)]
     pub fn load_from_path(path: &Path) -> Result<Self> {
         let fallback_reasoning = default_model_reasoning_string();
         let config = Self::load_partial_from_path(path, DEFAULT_MODEL_NAME, &fallback_reasoning)?
             .finalize()?;
         config.validate()?;
         Ok(config)
+    }
+
+    pub fn load_from_runtime_path(path: Option<&Path>) -> Result<Self> {
+        match path {
+            Some(path) => Self::load_from_path(path),
+            None => Self::load_from_default_path(),
+        }
     }
 
     fn load_partial_from_path(
@@ -639,8 +655,17 @@ impl AppConfig {
         Self::load_from_default_path()
     }
 
+    fn set_codex_auth_at_path(path: &Path, codex: Option<&CodexConfig>) -> Result<Self> {
+        write_codex_auth_updates_at_path(path, codex)?;
+        Self::load_from_path(path)
+    }
+
     pub fn refresh_default_codex_auth_if_needed() -> Result<Self> {
-        let current = Self::load_from_default_path()?;
+        Self::refresh_codex_auth_if_needed_at_path(None)
+    }
+
+    pub fn refresh_codex_auth_if_needed_at_path(path: Option<&Path>) -> Result<Self> {
+        let current = Self::load_from_runtime_path(path)?;
         let Some(codex) = current.codex.as_ref() else {
             return Ok(current);
         };
@@ -650,7 +675,26 @@ impl AppConfig {
 
         let runtime = tokio::runtime::Runtime::new()?;
         let refreshed = runtime.block_on(crate::codex::refresh_auth(codex))?;
-        Self::set_default_codex_auth(Some(&refreshed))
+        match path {
+            Some(path) => Self::set_codex_auth_at_path(path, Some(&refreshed)),
+            None => Self::set_default_codex_auth(Some(&refreshed)),
+        }
+    }
+
+    pub fn with_runtime_overrides(mut self, overrides: RuntimeConfigOverrides) -> Result<Self> {
+        if let Some(model_selection) = overrides.model_selection {
+            self.model = model_selection;
+            self.planning.agents =
+                sanitize_planning_agents(&self.model.model_name, &self.planning.agents);
+        }
+
+        if let Some(planning_agents) = overrides.planning_agents {
+            self.planning.agents =
+                sanitize_planning_agents(&self.model.model_name, &planning_agents);
+        }
+
+        self.validate()?;
+        Ok(self)
     }
 
     fn validate(&self) -> Result<()> {

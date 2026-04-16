@@ -57,6 +57,8 @@ pub struct PersistedSessionRuntimeState {
     pub show_tool_output: bool,
     pub history_mode: HistoryMode,
     pub history_retained_steps: usize,
+    #[serde(default)]
+    pub full_system_access: bool,
     pub preamble_text: String,
     pub session_history: Vec<SessionHistoryMessage>,
     pub last_history_model_name: Option<String>,
@@ -117,6 +119,7 @@ impl PersistedSessionSnapshot {
                 show_tool_output: state.session.show_tool_output,
                 history_mode: state.session.history_mode,
                 history_retained_steps: state.session.history_retained_steps,
+                full_system_access: state.session.full_system_access,
                 preamble_text,
                 session_history,
                 last_history_model_name: state.session.last_history_model_name.clone(),
@@ -147,10 +150,12 @@ impl PersistedSessionSnapshot {
             self.runtime.model_name.clone(),
             self.runtime.reasoning,
             self.runtime.planning_agents.clone(),
+            self.runtime.full_system_access,
             initial_mode,
             initial_approval_mode,
         );
         session.workspace_root = self.workspace_root;
+        session.full_system_access = self.runtime.full_system_access;
         session.mode = self.runtime.access_mode;
         session.approval_mode = self.runtime.approval_mode;
         session.history_mode = self.runtime.history_mode;

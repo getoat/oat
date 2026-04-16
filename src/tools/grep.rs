@@ -9,16 +9,19 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::common::{
-    ToolExecError, collect_visible_entries, display_path, is_path_visible, resolve_path,
+    ToolExecError, collect_visible_entries_limited, display_path, is_path_visible,
+    is_unsafe_system_path, path_is_within_root, resolve_path_with_access,
 };
 use crate::tool_policy::SearchPathPolicy;
 
 const MAX_GREP_MATCHES: usize = 100;
+const MAX_GREP_FILES_SCANNED: usize = 2_000;
 
 #[derive(Clone)]
 pub struct GrepTool {
     root: PathBuf,
     policy: SearchPathPolicy,
+    allow_full_system_access: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -30,7 +33,19 @@ pub struct GrepArgs {
 
 impl GrepTool {
     pub fn new(root: PathBuf, policy: SearchPathPolicy) -> Self {
-        Self { root, policy }
+        Self::new_with_access(root, policy, false)
+    }
+
+    pub fn new_with_access(
+        root: PathBuf,
+        policy: SearchPathPolicy,
+        allow_full_system_access: bool,
+    ) -> Self {
+        Self {
+            root,
+            policy,
+            allow_full_system_access,
+        }
     }
 }
 
@@ -68,12 +83,13 @@ impl Tool for GrepTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        grep_workspace(
+        grep_workspace_with_access(
             &self.root,
             &self.policy,
             &args.pattern,
             &args.path,
             args.recursive.unwrap_or(true),
+            self.allow_full_system_access,
         )
     }
 }
@@ -85,20 +101,48 @@ pub(crate) fn grep_workspace(
     path: &str,
     recursive: bool,
 ) -> Result<String, ToolExecError> {
+    grep_workspace_with_access(root, policy, pattern, path, recursive, false)
+}
+
+pub(crate) fn grep_workspace_with_access(
+    root: &Path,
+    policy: &SearchPathPolicy,
+    pattern: &str,
+    path: &str,
+    recursive: bool,
+    allow_full_system_access: bool,
+) -> Result<String, ToolExecError> {
     let regex = Regex::new(pattern)?;
-    let target = resolve_path(root, path)?;
+    let target = resolve_path_with_access(root, path, allow_full_system_access)?;
+    if is_unsafe_system_path(&target) {
+        return Err(ToolExecError::new(format!(
+            "{path} points to an unsupported system path"
+        )));
+    }
     let metadata = std::fs::metadata(&target)?;
-    if target != root && !is_path_visible(root, &target, policy)? {
+    if target != root
+        && path_is_within_root(root, &target)
+        && !is_path_visible(root, &target, policy)?
+    {
         return Err(ToolExecError::new(SearchPathPolicy::excluded_message(path)));
     }
-    let files = if metadata.is_file() {
-        vec![target]
+    let (files, truncated_scan) = if metadata.is_file() {
+        (vec![target], false)
     } else if metadata.is_dir() {
-        collect_visible_entries(&target, recursive, policy)?
+        let collected = collect_visible_entries_limited(
+            &target,
+            recursive,
+            policy,
+            Some(MAX_GREP_FILES_SCANNED),
+        )?;
+        let truncated = collected.truncated;
+        let files = collected
+            .entries
             .into_iter()
             .filter(|entry| !entry.is_dir)
             .map(|entry| entry.path)
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>();
+        (files, truncated)
     } else {
         return Err(ToolExecError::new(format!(
             "{path} is neither a file nor a directory"
@@ -139,11 +183,20 @@ pub(crate) fn grep_workspace(
     }
 
     if matches.is_empty() {
+        if truncated_scan {
+            return Ok(format!(
+                "No matches for /{pattern}/ in {path} after scanning the first {MAX_GREP_FILES_SCANNED} files."
+            ));
+        }
         return Ok(format!("No matches for /{pattern}/ in {path}."));
     }
 
     if matches.len() == MAX_GREP_MATCHES {
         matches.push(format!("... truncated after {MAX_GREP_MATCHES} matches"));
+    } else if truncated_scan {
+        matches.push(format!(
+            "... truncated after scanning the first {MAX_GREP_FILES_SCANNED} files"
+        ));
     }
 
     Ok(matches.join("\n"))

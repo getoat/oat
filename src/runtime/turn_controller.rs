@@ -196,6 +196,7 @@ impl<'a> TurnController<'a> {
                                 &updated_config,
                                 self.llm,
                                 query::mode(self.app.state()),
+                                self.app.state().session.full_system_access,
                                 self.subagents,
                                 self.terminals,
                                 self.memory,

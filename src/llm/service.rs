@@ -347,6 +347,7 @@ impl LlmService {
         let preamble = mode_preamble(&context);
         let tool_context = ToolContext {
             root: workspace_root,
+            allow_full_system_access: context.allow_full_system_access,
             agent: context.clone(),
             config: config.clone(),
             write_approvals: approvals.clone(),
@@ -399,6 +400,15 @@ impl LlmService {
 
     pub fn shell_approvals(&self) -> ShellApprovalController {
         self.shell_approvals.clone()
+    }
+
+    pub(crate) fn model_name(&self) -> &str {
+        &self.model_name
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tool_names(&self) -> &[String] {
+        &self.tool_names
     }
 
     pub(crate) fn interaction_scope(&self) -> &str {

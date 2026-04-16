@@ -51,6 +51,7 @@ pub(crate) fn bootstrap_tui(config: AppConfig, startup: StartupOptions) -> Resul
         config.model.model_name.clone(),
         config.model.reasoning,
         config.planning.agents.clone(),
+        startup.full_system_access(),
         startup.access_mode,
         startup.approval_mode,
     );
@@ -84,16 +85,20 @@ pub(crate) fn bootstrap_tui(config: AppConfig, startup: StartupOptions) -> Resul
         config.memory.clone(),
         app.state().session.workspace_root.clone(),
     )?;
+    let llm_memory = config.memory.enabled.then_some(memory.clone());
     let web = WebService::new(config.tools.max_output_tokens)?;
     let llm = {
         let _guard = runtime.enter();
         LlmService::from_config(
             &config,
-            AgentContext::main(query::mode(app.state())),
+            AgentContext::main_with_full_system_access(
+                query::mode(app.state()),
+                app.state().session.full_system_access,
+            ),
             WriteApprovalController::new(startup.approval_mode),
             Some(AskUserController::default()),
             true,
-            Some(memory.clone()),
+            llm_memory,
             Some(subagents.clone()),
             Some(terminals.clone()),
             web,
@@ -126,48 +131,52 @@ pub(crate) fn bootstrap_tui(config: AppConfig, startup: StartupOptions) -> Resul
 
 pub(crate) struct HeadlessBootstrap {
     pub(crate) runtime: Runtime,
+    pub(crate) config: AppConfig,
     pub(crate) stats: StatsStore,
-    pub(crate) stream_rx: mpsc::UnboundedReceiver<RuntimeEvent>,
-    pub(crate) task: tokio::task::JoinHandle<()>,
+    pub(crate) llm: LlmService,
+    pub(crate) subagents: SubagentManager,
+    #[allow(dead_code)]
+    pub(crate) terminals: BackgroundTerminalManager,
 }
 
 pub(crate) fn bootstrap_headless(
     config: &AppConfig,
     startup: StartupOptions,
-    prompt: String,
 ) -> Result<HeadlessBootstrap> {
     let runtime = Runtime::new()?;
     let stats = StatsStore::new();
     let memory = MemoryService::new(config.memory.clone(), std::env::current_dir()?)?;
+    let llm_memory = config.memory.enabled.then_some(memory.clone());
+    let (subagent_tx, _subagent_rx) = mpsc::unbounded_channel();
+    let subagents =
+        SubagentManager::new(config.subagents.max_concurrent, subagent_tx, stats.clone());
+    let (terminal_tx, _terminal_rx) = mpsc::unbounded_channel();
+    let terminals = BackgroundTerminalManager::new(terminal_tx);
     let web = WebService::new(config.tools.max_output_tokens)?;
     let llm = {
         let _guard = runtime.enter();
         LlmService::from_config(
             config,
-            AgentContext::main(startup.access_mode),
+            AgentContext::main_with_full_system_access(
+                startup.access_mode,
+                startup.full_system_access(),
+            ),
             WriteApprovalController::new(startup.approval_mode),
             None,
-            false,
-            Some(memory.clone()),
-            None,
-            None,
+            true,
+            llm_memory,
+            Some(subagents.clone()),
+            Some(terminals.clone()),
             web,
         )?
     };
-    let (stream_tx, stream_rx) = mpsc::unbounded_channel();
-    let stats_hook = stats.hook_for_model(config.model.model_name.clone());
-    let task = runtime.spawn({
-        let llm = llm.clone();
-        async move {
-            llm.stream_prompt(1, prompt, Vec::new(), None, stats_hook, stream_tx)
-                .await;
-        }
-    });
 
     Ok(HeadlessBootstrap {
         runtime,
+        config: config.clone(),
         stats,
-        stream_rx,
-        task,
+        llm,
+        subagents,
+        terminals,
     })
 }

@@ -4,13 +4,14 @@ use rig::{completion::ToolDefinition, tool::Tool};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use super::common::{ToolExecError, display_path, resolve_workspace_path};
+use super::common::{ToolExecError, display_path, resolve_workspace_path_with_access};
 
 pub const APPLY_PATCH_TOOL_NAME: &str = "ApplyPatches";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ApplyPatchesTool {
     root: PathBuf,
+    allow_full_system_access: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -29,7 +30,14 @@ pub struct TextPatch {
 
 impl ApplyPatchesTool {
     pub fn new(root: PathBuf) -> Self {
-        Self { root }
+        Self::new_with_access(root, false)
+    }
+
+    pub fn new_with_access(root: PathBuf, allow_full_system_access: bool) -> Self {
+        Self {
+            root,
+            allow_full_system_access,
+        }
     }
 }
 
@@ -81,7 +89,12 @@ impl Tool for ApplyPatchesTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        apply_patches(&self.root, &args.filename, &args.patches)
+        apply_patches_with_access(
+            &self.root,
+            &args.filename,
+            &args.patches,
+            self.allow_full_system_access,
+        )
     }
 }
 
@@ -90,13 +103,22 @@ pub(crate) fn apply_patches(
     filename: &str,
     patches: &[TextPatch],
 ) -> Result<String, ToolExecError> {
+    apply_patches_with_access(root, filename, patches, false)
+}
+
+pub(crate) fn apply_patches_with_access(
+    root: &Path,
+    filename: &str,
+    patches: &[TextPatch],
+    allow_full_system_access: bool,
+) -> Result<String, ToolExecError> {
     if patches.is_empty() || patches.len() > 5 {
         return Err(ToolExecError::new(
             "patches must contain between 1 and 5 entries",
         ));
     }
 
-    let path = resolve_workspace_path(root, filename)?;
+    let path = resolve_workspace_path_with_access(root, filename, allow_full_system_access)?;
     let metadata = std::fs::metadata(&path)?;
     if !metadata.is_file() {
         return Err(ToolExecError::new(format!("{filename} is not a file")));

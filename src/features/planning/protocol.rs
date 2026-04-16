@@ -131,14 +131,28 @@ pub fn planning_jobs(
 }
 
 pub fn planning_conversation_prompt(description: &str) -> String {
+    planning_conversation_prompt_with_mode(description, true)
+}
+
+pub fn planning_conversation_prompt_headless(description: &str) -> String {
+    planning_conversation_prompt_with_mode(description, false)
+}
+
+fn planning_conversation_prompt_with_mode(description: &str, allow_ask_user: bool) -> String {
+    let ambiguity_instructions = if allow_ask_user {
+        "- If any high-impact ambiguity remains, use AskUser for clarifying questions whenever the ambiguity can be expressed as meaningful multiple-choice options, and do not output a final plan yet.\n\
+- You may use AskUser multiple times across the planning session. Do not switch to plain-text clarification questions just because you already used AskUser earlier.\n"
+    } else {
+        "- Headless mode is active. Do not ask the user follow-up questions or request interactive clarification.\n\
+- If any ambiguity remains, make the most reasonable assumptions you can, state them explicitly, and continue.\n"
+    };
     format!(
         concat!(
             "{prompt}\n\n",
             "## Runtime instructions\n\n",
             "- You are starting this planning session before oat runs its automatic planning phase.\n",
             "- Stay in PHASE 1 and PHASE 2 until intent is stable.\n",
-            "- If any high-impact ambiguity remains, use AskUser for clarifying questions whenever the ambiguity can be expressed as meaningful multiple-choice options, and do not output a final plan yet.\n",
-            "- You may use AskUser multiple times across the planning session. Do not switch to plain-text clarification questions just because you already used AskUser earlier.\n",
+            "{ambiguity_instructions}",
             "- Do not output a {plan_start} block before oat has completed PHASE 3.\n",
             "- Once intent is solidified, reply with a single {ready_start} block containing a normalized planning brief and no {plan_start} block.\n",
             "- The normalized brief must include these headings in this order:\n",
@@ -154,6 +168,7 @@ pub fn planning_conversation_prompt(description: &str) -> String {
         prompt = MAIN_PLANNING_PROMPT.trim(),
         ready_start = PLANNING_READY_START_TAG,
         plan_start = PROPOSED_PLAN_START_TAG,
+        ambiguity_instructions = ambiguity_instructions,
         description = description.trim(),
     )
 }
@@ -174,6 +189,23 @@ pub fn planning_finalization_prompt(
     description: &str,
     successful_plans: &[(PlanningJob, String)],
     failed_models: &[String],
+) -> String {
+    planning_finalization_prompt_with_mode(description, successful_plans, failed_models, true)
+}
+
+pub fn planning_finalization_prompt_headless(
+    description: &str,
+    successful_plans: &[(PlanningJob, String)],
+    failed_models: &[String],
+) -> String {
+    planning_finalization_prompt_with_mode(description, successful_plans, failed_models, false)
+}
+
+fn planning_finalization_prompt_with_mode(
+    description: &str,
+    successful_plans: &[(PlanningJob, String)],
+    failed_models: &[String],
+    allow_ask_user: bool,
 ) -> String {
     let successful_sections = successful_plans
         .iter()
@@ -196,6 +228,13 @@ pub fn planning_finalization_prompt(
         failed_models.join(", ")
     };
 
+    let ambiguity_instructions = if allow_ask_user {
+        "- If a single remaining high-impact ambiguity still blocks a decision-complete plan, use AskUser when the clarification can be represented as meaningful multiple-choice options; only ask in plain text when that is genuinely not practical.\n"
+    } else {
+        "- Headless mode is active. Do not ask the user follow-up questions or request interactive clarification.\n\
+- If a remaining ambiguity blocks a decision-complete plan, choose the most reasonable assumption, state it explicitly, and continue.\n"
+    };
+
     format!(
         concat!(
             "{prompt}\n\n",
@@ -203,7 +242,7 @@ pub fn planning_finalization_prompt(
             "- oat has already completed PHASE 3 automatically.\n",
             "- Continue in PHASE 4.\n",
             "- Review the planner outputs, resolve conflicts using your judgment, and produce the final plan.\n",
-            "- If a single remaining high-impact ambiguity still blocks a decision-complete plan, use AskUser when the clarification can be represented as meaningful multiple-choice options; only ask in plain text when that is genuinely not practical.\n",
+            "{ambiguity_instructions}",
             "- Do not emit {ready_start} again.\n",
             "- When the spec is decision complete, wrap the final answer in a {plan_start} block.\n\n",
             "## Stabilized brief\n\n",
@@ -217,9 +256,23 @@ pub fn planning_finalization_prompt(
         prompt = MAIN_PLANNING_PROMPT.trim(),
         ready_start = PLANNING_READY_START_TAG,
         plan_start = PROPOSED_PLAN_START_TAG,
+        ambiguity_instructions = ambiguity_instructions,
         description = description.trim(),
         successful_sections = successful_sections,
         failure_note = failure_note,
+    )
+}
+
+pub fn accepted_plan_implementation_prompt(accepted_plan: &str) -> String {
+    format!(
+        concat!(
+            "You are no longer in Plan Mode. The plan has been accepted for implementation.\n",
+            "Do not say that you still need a developer or system transition out of plan mode.\n",
+            "Use the accepted plan below as the implementation brief, explore the workspace as needed, and begin implementation now.\n\n",
+            "Accepted plan:\n",
+            "{accepted_plan}\n"
+        ),
+        accepted_plan = accepted_plan.trim()
     )
 }
 

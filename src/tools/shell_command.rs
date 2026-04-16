@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use super::common::{ToolExecError, resolve_workspace_path};
+use super::common::{ToolExecError, resolve_workspace_path_with_access};
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ShellCommandRequest {
@@ -17,8 +17,25 @@ impl ShellCommandRequest {
         resolve_shell_cwd(root, self.cwd.as_deref())
     }
 
+    pub fn resolve_cwd_with_access(
+        &self,
+        root: &Path,
+        allow_full_system_access: bool,
+    ) -> Result<PathBuf, ToolExecError> {
+        resolve_shell_cwd_with_access(root, self.cwd.as_deref(), allow_full_system_access)
+    }
+
     pub fn cwd_label(&self, root: &Path) -> Result<String, ToolExecError> {
         let cwd = self.resolve_cwd(root)?;
+        Ok(display_shell_cwd(root, &cwd))
+    }
+
+    pub fn cwd_label_with_access(
+        &self,
+        root: &Path,
+        allow_full_system_access: bool,
+    ) -> Result<String, ToolExecError> {
+        let cwd = self.resolve_cwd_with_access(root, allow_full_system_access)?;
         Ok(display_shell_cwd(root, &cwd))
     }
 
@@ -31,8 +48,16 @@ pub(crate) fn resolve_shell_cwd(
     root: &Path,
     raw_cwd: Option<&str>,
 ) -> Result<PathBuf, ToolExecError> {
+    resolve_shell_cwd_with_access(root, raw_cwd, false)
+}
+
+pub(crate) fn resolve_shell_cwd_with_access(
+    root: &Path,
+    raw_cwd: Option<&str>,
+    allow_full_system_access: bool,
+) -> Result<PathBuf, ToolExecError> {
     raw_cwd
-        .map(|cwd| resolve_workspace_path(root, cwd))
+        .map(|cwd| resolve_workspace_path_with_access(root, cwd, allow_full_system_access))
         .transpose()
         .map(|cwd| cwd.unwrap_or_else(|| root.to_path_buf()))
 }

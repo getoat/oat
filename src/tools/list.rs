@@ -5,7 +5,8 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::common::{
-    ToolExecError, collect_visible_entries, display_path, is_path_visible, resolve_path,
+    ToolExecError, collect_visible_entries_limited, display_path, is_path_visible,
+    is_unsafe_system_path, path_is_within_root, resolve_path_with_access,
 };
 use crate::tool_policy::SearchPathPolicy;
 
@@ -15,6 +16,7 @@ const MAX_LIST_ENTRIES: usize = 400;
 pub struct ListTool {
     root: PathBuf,
     policy: SearchPathPolicy,
+    allow_full_system_access: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -25,7 +27,19 @@ pub struct ListArgs {
 
 impl ListTool {
     pub fn new(root: PathBuf, policy: SearchPathPolicy) -> Self {
-        Self { root, policy }
+        Self::new_with_access(root, policy, false)
+    }
+
+    pub fn new_with_access(
+        root: PathBuf,
+        policy: SearchPathPolicy,
+        allow_full_system_access: bool,
+    ) -> Self {
+        Self {
+            root,
+            policy,
+            allow_full_system_access,
+        }
     }
 }
 
@@ -57,11 +71,12 @@ impl Tool for ListTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        list_directory(
+        list_directory_with_access(
             &self.root,
             &self.policy,
             &args.dir,
             args.recursive.unwrap_or(false),
+            self.allow_full_system_access,
         )
     }
 }
@@ -72,32 +87,48 @@ pub(crate) fn list_directory(
     dir: &str,
     recursive: bool,
 ) -> Result<String, ToolExecError> {
-    let target = resolve_path(root, dir)?;
+    list_directory_with_access(root, policy, dir, recursive, false)
+}
+
+pub(crate) fn list_directory_with_access(
+    root: &Path,
+    policy: &SearchPathPolicy,
+    dir: &str,
+    recursive: bool,
+    allow_full_system_access: bool,
+) -> Result<String, ToolExecError> {
+    let target = resolve_path_with_access(root, dir, allow_full_system_access)?;
+    if is_unsafe_system_path(&target) {
+        return Err(ToolExecError::new(format!(
+            "{dir} points to an unsupported system path"
+        )));
+    }
     let metadata = std::fs::metadata(&target)?;
     if !metadata.is_dir() {
         return Err(ToolExecError::new(format!("{dir} is not a directory")));
     }
-    if target != root && !is_path_visible(root, &target, policy)? {
+    if target != root
+        && path_is_within_root(root, &target)
+        && !is_path_visible(root, &target, policy)?
+    {
         return Err(ToolExecError::new(SearchPathPolicy::excluded_message(dir)));
     }
 
     let mut lines = Vec::new();
     let display_root = display_path(root, &target);
     lines.push(format!("{display_root}/"));
-    for entry in collect_visible_entries(&target, recursive, policy)? {
-        if lines.len() >= MAX_LIST_ENTRIES {
-            lines.push(format!(
-                "{}... truncated after {MAX_LIST_ENTRIES} entries",
-                "  ".repeat(entry.depth.max(1))
-            ));
-            break;
-        }
-
+    let collected =
+        collect_visible_entries_limited(&target, recursive, policy, Some(MAX_LIST_ENTRIES))?;
+    for entry in collected.entries {
         let mut label = display_path(root, &entry.path);
         if entry.is_dir {
             label.push('/');
         }
         lines.push(format!("{}{}", "  ".repeat(entry.depth), label));
+    }
+
+    if collected.truncated {
+        lines.push(format!("  ... truncated after {MAX_LIST_ENTRIES} entries"));
     }
 
     Ok(lines.join("\n"))

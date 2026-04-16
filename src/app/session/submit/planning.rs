@@ -1,7 +1,10 @@
 use super::super::{Effect, PendingReplyKind};
 use super::should_request_session_title;
 use crate::app::{AccessMode, AppState, ops, query};
-use crate::features::planning::planning_conversation_prompt;
+use crate::features::planning::{
+    accepted_plan_implementation_prompt as build_accepted_plan_implementation_prompt,
+    planning_conversation_prompt,
+};
 
 pub(crate) fn submit_plan_acceptance(state: &mut AppState) -> Option<Effect> {
     if query::has_pending_reply(state) || !query::plan_review_selection_active(state) {
@@ -127,16 +130,7 @@ fn accepted_plan_implementation_prompt(state: &AppState) -> String {
         .unwrap_or(
             "<proposed_plan>\nAccepted plan content was not found in transcript.\n</proposed_plan>",
         );
-    format!(
-        concat!(
-            "You are no longer in Plan Mode. The plan has been accepted for implementation.\n",
-            "Do not say that you still need a developer or system transition out of plan mode.\n",
-            "Use the accepted plan below as the implementation brief, explore the workspace as needed, and begin implementation now.\n\n",
-            "Accepted plan:\n",
-            "{accepted_plan}\n"
-        ),
-        accepted_plan = accepted_plan
-    )
+    build_accepted_plan_implementation_prompt(accepted_plan)
 }
 
 #[cfg(test)]

@@ -29,6 +29,10 @@ use crate::{
 use super::side_channel_task_manager::SideChannelTaskManager;
 use super::{RuntimeEvent, clipboard::osc52_copy_sequence, reply_driver::ReplyDriver};
 
+fn tool_memory_service(config: &AppConfig, memory: &MemoryService) -> Option<MemoryService> {
+    config.memory.enabled.then_some(memory.clone())
+}
+
 pub(crate) struct EffectExecutor<'a> {
     pub(crate) runtime: &'a Runtime,
     pub(crate) terminal: &'a mut Tui,
@@ -50,6 +54,7 @@ pub(crate) fn rebuild_main_llm(
     config: &AppConfig,
     llm: &LlmService,
     access_mode: app::AccessMode,
+    full_system_access: bool,
     subagents: &SubagentManager,
     terminals: &BackgroundTerminalManager,
     memory: &MemoryService,
@@ -58,12 +63,12 @@ pub(crate) fn rebuild_main_llm(
     let _guard = runtime.enter();
     LlmService::from_config_with_controllers(
         config,
-        AgentContext::main(access_mode),
+        AgentContext::main_with_full_system_access(access_mode, full_system_access),
         llm.approvals(),
         llm.shell_approvals(),
         llm.ask_user_controller(),
         llm.todo_available(),
-        Some(memory.clone()),
+        tool_memory_service(config, memory),
         Some(subagents.clone()),
         Some(terminals.clone()),
         web,
@@ -75,6 +80,7 @@ pub(crate) fn build_fresh_main_llm(
     config: &AppConfig,
     access_mode: app::AccessMode,
     approval_mode: app::ApprovalMode,
+    full_system_access: bool,
     subagents: &SubagentManager,
     terminals: &BackgroundTerminalManager,
     memory: &MemoryService,
@@ -83,11 +89,11 @@ pub(crate) fn build_fresh_main_llm(
     let _guard = runtime.enter();
     LlmService::from_config(
         config,
-        AgentContext::main(access_mode),
+        AgentContext::main_with_full_system_access(access_mode, full_system_access),
         WriteApprovalController::new(approval_mode),
         Some(AskUserController::default()),
         true,
-        Some(memory.clone()),
+        tool_memory_service(config, memory),
         Some(subagents.clone()),
         Some(terminals.clone()),
         web,
@@ -99,6 +105,7 @@ fn sync_main_llm_access_mode(
     config: &AppConfig,
     llm: &mut LlmService,
     access_mode: app::AccessMode,
+    full_system_access: bool,
     subagents: &SubagentManager,
     terminals: &BackgroundTerminalManager,
     memory: &MemoryService,
@@ -113,6 +120,7 @@ fn sync_main_llm_access_mode(
         config,
         llm,
         access_mode,
+        full_system_access,
         subagents,
         terminals,
         memory,
@@ -374,6 +382,7 @@ impl EffectExecutor<'_> {
                     self.config,
                     query::mode(self.app.state()),
                     query::approval_mode(self.app.state()),
+                    self.app.state().session.full_system_access,
                     self.subagents,
                     self.terminals,
                     self.memory,
@@ -575,7 +584,10 @@ impl EffectExecutor<'_> {
                         Box::pin(async move {
                             let llm = LlmService::from_config_with_controllers(
                                 &config,
-                                AgentContext::main(app::AccessMode::ReadOnly),
+                                AgentContext::main_with_full_system_access(
+                                    app::AccessMode::ReadOnly,
+                                    false,
+                                ),
                                 write_approvals,
                                 shell_approvals,
                                 ask_user,
@@ -615,6 +627,9 @@ impl EffectExecutor<'_> {
                         description,
                         history,
                         history_model_name,
+                        app::AccessMode::ReadOnly,
+                        false,
+                        true,
                         config,
                         subagents,
                         workflow_write_approvals,
@@ -737,6 +752,7 @@ impl EffectExecutor<'_> {
             config,
             self.llm,
             access_mode,
+            self.app.state().session.full_system_access,
             self.subagents,
             self.terminals,
             self.memory,
@@ -751,6 +767,7 @@ impl EffectExecutor<'_> {
             self.config,
             self.llm,
             access_mode,
+            self.app.state().session.full_system_access,
             self.subagents,
             self.terminals,
             self.memory,
@@ -805,6 +822,7 @@ impl EffectExecutor<'_> {
             &updated_config,
             snapshot.runtime.access_mode,
             snapshot.runtime.approval_mode,
+            snapshot.runtime.full_system_access,
             self.subagents,
             self.terminals,
             self.memory,
@@ -1030,6 +1048,7 @@ mod tests {
             &config,
             &mut llm,
             AccessMode::ReadWrite,
+            false,
             &subagents,
             &terminals,
             &memory,
