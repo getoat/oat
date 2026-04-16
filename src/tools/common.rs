@@ -50,14 +50,6 @@ impl From<regex::Error> for ToolExecError {
     }
 }
 
-pub(crate) fn collect_visible_entries(
-    target: &Path,
-    recursive: bool,
-    policy: &SearchPathPolicy,
-) -> Result<Vec<VisibleEntry>, ToolExecError> {
-    Ok(collect_visible_entries_limited(target, recursive, policy, None)?.entries)
-}
-
 pub(crate) fn collect_visible_entries_limited(
     target: &Path,
     recursive: bool,
@@ -144,10 +136,6 @@ pub(crate) fn is_path_visible(
     Ok(false)
 }
 
-pub(crate) fn resolve_path(root: &Path, raw_path: &str) -> Result<PathBuf, ToolExecError> {
-    resolve_path_with_access(root, raw_path, false)
-}
-
 pub(crate) fn resolve_path_with_access(
     root: &Path,
     raw_path: &str,
@@ -167,13 +155,6 @@ pub(crate) fn resolve_path_with_access(
     }
 
     Ok(canonical_path)
-}
-
-pub(crate) fn resolve_workspace_path(
-    root: &Path,
-    raw_path: &str,
-) -> Result<PathBuf, ToolExecError> {
-    resolve_workspace_path_with_access(root, raw_path, false)
 }
 
 pub(crate) fn resolve_workspace_path_with_access(

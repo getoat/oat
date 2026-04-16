@@ -63,10 +63,6 @@ pub struct KillBackgroundTerminalArgs {
 }
 
 impl StartBackgroundTerminalTool {
-    pub fn new(root: PathBuf, manager: BackgroundTerminalManager) -> Self {
-        Self::new_with_access(root, manager, false)
-    }
-
     pub fn new_with_access(
         root: PathBuf,
         manager: BackgroundTerminalManager,

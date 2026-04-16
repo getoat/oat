@@ -15,6 +15,7 @@ pub struct AgentContext {
 }
 
 impl AgentContext {
+    #[cfg(test)]
     pub fn main(access_mode: AccessMode) -> Self {
         Self::main_with_full_system_access(access_mode, false)
     }
@@ -31,6 +32,7 @@ impl AgentContext {
         }
     }
 
+    #[cfg(test)]
     pub fn subagent(access_mode: AccessMode, model_name_override: Option<String>) -> Self {
         Self::subagent_with_full_system_access(access_mode, model_name_override, false)
     }

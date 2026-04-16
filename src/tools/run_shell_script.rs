@@ -125,10 +125,6 @@ impl StreamCapture {
 }
 
 impl RunShellScriptTool {
-    pub fn new(root: PathBuf) -> Self {
-        Self::new_with_access(root, false)
-    }
-
     pub fn new_with_access(root: PathBuf, allow_full_system_access: bool) -> Self {
         Self {
             root,
@@ -177,6 +173,7 @@ impl Tool for RunShellScriptTool {
     }
 }
 
+#[cfg(test)]
 pub(crate) async fn run_shell_script(
     root: &Path,
     args: &RunShellScriptArgs,

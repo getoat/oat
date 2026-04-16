@@ -22,6 +22,7 @@ pub struct DeletePathArgs {
 }
 
 impl DeletePathTool {
+    #[cfg(test)]
     pub fn new(root: PathBuf) -> Self {
         Self::new_with_access(root, false)
     }
@@ -66,6 +67,7 @@ impl Tool for DeletePathTool {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn delete_path(root: &Path, raw_path: &str) -> Result<String, ToolExecError> {
     delete_path_with_access(root, raw_path, false)
 }

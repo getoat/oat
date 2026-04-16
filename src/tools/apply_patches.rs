@@ -29,6 +29,7 @@ pub struct TextPatch {
 }
 
 impl ApplyPatchesTool {
+    #[cfg(test)]
     pub fn new(root: PathBuf) -> Self {
         Self::new_with_access(root, false)
     }
@@ -98,6 +99,7 @@ impl Tool for ApplyPatchesTool {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn apply_patches(
     root: &Path,
     filename: &str,

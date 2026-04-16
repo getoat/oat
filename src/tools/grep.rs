@@ -32,10 +32,6 @@ pub struct GrepArgs {
 }
 
 impl GrepTool {
-    pub fn new(root: PathBuf, policy: SearchPathPolicy) -> Self {
-        Self::new_with_access(root, policy, false)
-    }
-
     pub fn new_with_access(
         root: PathBuf,
         policy: SearchPathPolicy,
@@ -94,6 +90,7 @@ impl Tool for GrepTool {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn grep_workspace(
     root: &Path,
     policy: &SearchPathPolicy,

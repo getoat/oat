@@ -26,10 +26,6 @@ pub struct ListArgs {
 }
 
 impl ListTool {
-    pub fn new(root: PathBuf, policy: SearchPathPolicy) -> Self {
-        Self::new_with_access(root, policy, false)
-    }
-
     pub fn new_with_access(
         root: PathBuf,
         policy: SearchPathPolicy,
@@ -81,6 +77,7 @@ impl Tool for ListTool {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn list_directory(
     root: &Path,
     policy: &SearchPathPolicy,

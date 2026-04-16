@@ -23,6 +23,7 @@ pub struct WriteFileArgs {
 }
 
 impl WriteFileTool {
+    #[cfg(test)]
     pub fn new(root: PathBuf) -> Self {
         Self::new_with_access(root, false)
     }
@@ -76,6 +77,7 @@ impl Tool for WriteFileTool {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn write_file(
     root: &Path,
     filename: &str,

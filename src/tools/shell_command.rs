@@ -13,21 +13,12 @@ pub struct ShellCommandRequest {
 }
 
 impl ShellCommandRequest {
-    pub fn resolve_cwd(&self, root: &Path) -> Result<PathBuf, ToolExecError> {
-        resolve_shell_cwd(root, self.cwd.as_deref())
-    }
-
     pub fn resolve_cwd_with_access(
         &self,
         root: &Path,
         allow_full_system_access: bool,
     ) -> Result<PathBuf, ToolExecError> {
         resolve_shell_cwd_with_access(root, self.cwd.as_deref(), allow_full_system_access)
-    }
-
-    pub fn cwd_label(&self, root: &Path) -> Result<String, ToolExecError> {
-        let cwd = self.resolve_cwd(root)?;
-        Ok(display_shell_cwd(root, &cwd))
     }
 
     pub fn cwd_label_with_access(
@@ -44,6 +35,7 @@ impl ShellCommandRequest {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn resolve_shell_cwd(
     root: &Path,
     raw_cwd: Option<&str>,
