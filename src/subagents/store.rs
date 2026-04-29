@@ -68,7 +68,26 @@ impl SubagentManager {
         }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub async fn cancel_all_running(&self, emit_ui_events: bool) -> Vec<String> {
+        let (cancelled_ids, tasks) = self.cancel_all_running_inner(emit_ui_events);
+
+        for (_, handle) in tasks {
+            let _ = handle.await;
+        }
+
+        cancelled_ids
+    }
+
+    pub fn cancel_all_running_now(&self, emit_ui_events: bool) -> Vec<String> {
+        let (cancelled_ids, _) = self.cancel_all_running_inner(emit_ui_events);
+        cancelled_ids
+    }
+
+    fn cancel_all_running_inner(
+        &self,
+        emit_ui_events: bool,
+    ) -> (Vec<String>, Vec<(String, JoinHandle<()>)>) {
         let (cancelled_ids, tasks) = {
             let mut state = self.inner.state.lock().expect("subagent state lock");
             let cancelled_ids = state
@@ -81,7 +100,7 @@ impl SubagentManager {
             cancelled_ids.sort();
 
             if cancelled_ids.is_empty() {
-                return Vec::new();
+                return (Vec::new(), Vec::new());
             }
 
             for id in &cancelled_ids {
@@ -118,11 +137,7 @@ impl SubagentManager {
             handle.abort();
         }
 
-        for (_, handle) in tasks {
-            let _ = handle.await;
-        }
-
-        cancelled_ids
+        (cancelled_ids, tasks)
     }
 
     pub fn inspect(&self, id: &str) -> Result<SubagentSnapshot> {

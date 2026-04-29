@@ -91,6 +91,10 @@ pub(super) fn validate(config: &AppConfig) -> Result<()> {
 
     validate_planning_agents(&config.model.model_name, &config.planning.agents, config)?;
 
+    if config.history.retained_steps == 0 {
+        bail!("history.retained_steps must be at least 1");
+    }
+
     if config.tools.max_output_tokens == 0 {
         bail!("tools.max_output_tokens must be at least 1");
     }
@@ -221,6 +225,22 @@ fn validate_provider_credentials(
                         }
                     }
                 }
+            }
+        }
+        ModelProvider::Ollama => {
+            let Some(ollama) = config.ollama.as_ref() else {
+                bail!("config is missing the [ollama] table required for model `{model_name}`");
+            };
+            if ollama.api_key.trim().is_empty() {
+                bail!("ollama.api_key must not be empty");
+            }
+        }
+        ModelProvider::OpencodeGo => {
+            let Some(opencode) = config.opencode.as_ref() else {
+                bail!("config is missing the [opencode] table required for model `{model_name}`");
+            };
+            if opencode.api_key.trim().is_empty() {
+                bail!("opencode.api_key must not be empty");
             }
         }
         ModelProvider::OpenRouter => {

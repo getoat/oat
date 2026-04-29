@@ -8,10 +8,12 @@ use crate::{
 };
 
 use super::types::{
-    AppConfig, AzureConfig, ChutesConfig, CodexConfig, MemoryConfig, MemoryExtractionConfig,
-    MemoryRetrievalConfig, MemoryRetrievalModeConfig, ModelSelectionConfig, OpenRouterConfig,
-    RawReasoningSetting, SafetyConfig, SubagentConfig, ToolConfig, UiConfig, default_api_version,
-    default_command_history_limit, default_max_concurrent_subagents, default_show_thinking,
+    AppConfig, AzureConfig, ChutesConfig, CodexConfig, HistoryConfig, HistoryMode, MemoryConfig,
+    MemoryExtractionConfig, MemoryRetrievalConfig, MemoryRetrievalModeConfig, ModelSelectionConfig,
+    OllamaConfig, OpenRouterConfig, OpencodeConfig, RawReasoningSetting, SafetyConfig,
+    SubagentConfig, ToolConfig, ToolWebSearchConfig, UiConfig, WebSearchMode, default_api_version,
+    default_command_history_limit, default_history_mode, default_history_retained_steps,
+    default_max_concurrent_subagents, default_show_thinking, default_web_search_mode,
 };
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -19,6 +21,8 @@ pub(super) struct PartialAppConfig {
     azure: Option<PartialAzureConfig>,
     chutes: Option<PartialChutesConfig>,
     codex: Option<PartialCodexConfig>,
+    ollama: Option<PartialOllamaConfig>,
+    opencode: Option<PartialOpencodeConfig>,
     openrouter: Option<PartialOpenRouterConfig>,
     model: Option<PartialModelSelectionConfig>,
     safety: Option<PartialSafetyConfig>,
@@ -26,6 +30,7 @@ pub(super) struct PartialAppConfig {
     subagents: Option<PartialSubagentConfig>,
     planning: Option<PartialPlanningConfig>,
     memory: Option<PartialMemoryConfig>,
+    history: Option<PartialHistoryConfig>,
     tools: Option<PartialToolConfig>,
 }
 
@@ -47,6 +52,18 @@ impl PartialAppConfig {
             self.codex
                 .get_or_insert_with(PartialCodexConfig::default)
                 .merge(codex);
+        }
+
+        if let Some(ollama) = other.ollama {
+            self.ollama
+                .get_or_insert_with(PartialOllamaConfig::default)
+                .merge(ollama);
+        }
+
+        if let Some(opencode) = other.opencode {
+            self.opencode
+                .get_or_insert_with(PartialOpencodeConfig::default)
+                .merge(opencode);
         }
 
         if let Some(openrouter) = other.openrouter {
@@ -91,6 +108,12 @@ impl PartialAppConfig {
                 .merge(memory);
         }
 
+        if let Some(history) = other.history {
+            self.history
+                .get_or_insert_with(PartialHistoryConfig::default)
+                .merge(history);
+        }
+
         if let Some(tools) = other.tools {
             self.tools
                 .get_or_insert_with(PartialToolConfig::default)
@@ -98,11 +121,43 @@ impl PartialAppConfig {
         }
     }
 
+    pub(super) fn model_selection_hint(&self) -> Option<(String, String)> {
+        if let Some(model) = self.model.as_ref() {
+            let model_name = model.model_name.clone()?;
+            let reasoning = match model.reasoning.as_deref() {
+                Some(value)
+                    if model_registry::parse_reasoning_setting_for_model(&model_name, value)
+                        .is_ok() =>
+                {
+                    value.to_string()
+                }
+                _ => super::preferred_reasoning_string(&model_name),
+            };
+            return Some((model_name, reasoning));
+        }
+
+        self.azure.as_ref().and_then(|azure| {
+            let model_name = azure.legacy_model_name.clone()?;
+            let reasoning = match azure.legacy_reasoning.as_deref() {
+                Some(value)
+                    if model_registry::parse_reasoning_setting_for_model(&model_name, value)
+                        .is_ok() =>
+                {
+                    value.to_string()
+                }
+                _ => super::preferred_reasoning_string(&model_name),
+            };
+            Some((model_name, reasoning))
+        })
+    }
+
     pub(super) fn finalize(self) -> Result<AppConfig> {
         let Self {
             azure,
             chutes,
             codex,
+            ollama,
+            opencode,
             openrouter,
             model,
             safety,
@@ -110,6 +165,7 @@ impl PartialAppConfig {
             subagents,
             planning,
             memory,
+            history,
             tools,
         } = self;
 
@@ -127,6 +183,8 @@ impl PartialAppConfig {
             azure: azure.map(PartialAzureConfig::finalize).transpose()?,
             chutes: chutes.map(PartialChutesConfig::finalize).transpose()?,
             codex: codex.map(PartialCodexConfig::finalize).transpose()?,
+            ollama: ollama.map(PartialOllamaConfig::finalize).transpose()?,
+            opencode: opencode.map(PartialOpencodeConfig::finalize).transpose()?,
             openrouter: openrouter
                 .map(PartialOpenRouterConfig::finalize)
                 .transpose()?,
@@ -136,6 +194,7 @@ impl PartialAppConfig {
             subagents: subagents.unwrap_or_default().finalize(),
             planning: planning.unwrap_or_default().finalize(),
             memory: memory.unwrap_or_default().finalize(&model)?,
+            history: history.unwrap_or_default().finalize(),
             tools: tools.unwrap_or_default().finalize(),
         })
     }
@@ -288,6 +347,44 @@ impl PartialCodexConfig {
             id_token: self.id_token.filter(|value| !value.trim().is_empty()),
             account_id: self.account_id.filter(|value| !value.trim().is_empty()),
             last_refresh: self.last_refresh,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct PartialOllamaConfig {
+    api_key: Option<String>,
+}
+
+impl PartialOllamaConfig {
+    fn merge(&mut self, other: Self) {
+        if other.api_key.is_some() {
+            self.api_key = other.api_key;
+        }
+    }
+
+    fn finalize(self) -> Result<OllamaConfig> {
+        Ok(OllamaConfig {
+            api_key: self.api_key.unwrap_or_default(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct PartialOpencodeConfig {
+    api_key: Option<String>,
+}
+
+impl PartialOpencodeConfig {
+    fn merge(&mut self, other: Self) {
+        if other.api_key.is_some() {
+            self.api_key = other.api_key;
+        }
+    }
+
+    fn finalize(self) -> Result<OpencodeConfig> {
+        Ok(OpencodeConfig {
+            api_key: self.api_key.unwrap_or_default(),
         })
     }
 }
@@ -692,6 +789,33 @@ impl PartialMemoryExtractionConfig {
 struct PartialToolConfig {
     search_include_patterns: Option<Vec<String>>,
     max_output_tokens: Option<usize>,
+    web_search: Option<PartialToolWebSearchConfig>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct PartialHistoryConfig {
+    mode: Option<HistoryMode>,
+    retained_steps: Option<usize>,
+}
+
+impl PartialHistoryConfig {
+    fn merge(&mut self, other: Self) {
+        if other.mode.is_some() {
+            self.mode = other.mode;
+        }
+        if other.retained_steps.is_some() {
+            self.retained_steps = other.retained_steps;
+        }
+    }
+
+    fn finalize(self) -> HistoryConfig {
+        HistoryConfig {
+            mode: self.mode.unwrap_or_else(default_history_mode),
+            retained_steps: self
+                .retained_steps
+                .unwrap_or_else(default_history_retained_steps),
+        }
+    }
 }
 
 impl PartialToolConfig {
@@ -702,6 +826,11 @@ impl PartialToolConfig {
         if other.max_output_tokens.is_some() {
             self.max_output_tokens = other.max_output_tokens;
         }
+        if let Some(web_search) = other.web_search {
+            self.web_search
+                .get_or_insert_with(PartialToolWebSearchConfig::default)
+                .merge(web_search);
+        }
     }
 
     fn finalize(self) -> ToolConfig {
@@ -710,7 +839,42 @@ impl PartialToolConfig {
             max_output_tokens: self
                 .max_output_tokens
                 .unwrap_or_else(tool_policy::default_tool_output_max_tokens),
+            web_search: self.web_search.unwrap_or_default().finalize(),
         }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct PartialToolWebSearchConfig {
+    mode: Option<WebSearchMode>,
+    enabled: Option<bool>,
+}
+
+impl PartialToolWebSearchConfig {
+    fn merge(&mut self, other: Self) {
+        if other.mode.is_some() {
+            self.mode = other.mode;
+        }
+        if other.enabled.is_some() {
+            self.enabled = other.enabled;
+        }
+    }
+
+    fn finalize(self) -> ToolWebSearchConfig {
+        ToolWebSearchConfig {
+            mode: self
+                .mode
+                .or_else(|| self.enabled.map(legacy_web_search_mode))
+                .unwrap_or_else(default_web_search_mode),
+        }
+    }
+}
+
+fn legacy_web_search_mode(enabled: bool) -> WebSearchMode {
+    if enabled {
+        WebSearchMode::Live
+    } else {
+        WebSearchMode::Disabled
     }
 }
 

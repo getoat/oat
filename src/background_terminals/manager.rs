@@ -290,7 +290,7 @@ impl BackgroundTerminalManager {
         ids
     }
 
-    fn inspect_now(
+    pub(crate) fn inspect_now(
         &self,
         id: &str,
         after_sequence: Option<u64>,

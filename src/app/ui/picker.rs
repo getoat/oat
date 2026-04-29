@@ -126,7 +126,25 @@ mod tests {
             )
         }));
         assert!(entries.iter().any(|entry| {
+            matches!(
+                entry,
+                ModelPickerEntry::ProviderHeading(ModelProvider::Ollama)
+            )
+        }));
+        assert!(entries.iter().any(|entry| {
+            matches!(
+                entry,
+                ModelPickerEntry::ProviderHeading(ModelProvider::OpencodeGo)
+            )
+        }));
+        assert!(entries.iter().any(|entry| {
             matches!(entry, ModelPickerEntry::Model(model) if model.name == "zai-org/GLM-5-TEE")
+        }));
+        assert!(entries.iter().any(|entry| {
+            matches!(entry, ModelPickerEntry::Model(model) if model.name == "glm-5.1:cloud")
+        }));
+        assert!(entries.iter().any(|entry| {
+            matches!(entry, ModelPickerEntry::Model(model) if model.name == "opencode-go/glm-5.1")
         }));
     }
 

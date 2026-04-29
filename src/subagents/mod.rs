@@ -13,6 +13,7 @@ use crate::{
     config::AppConfig,
     llm::{ShellApprovalController, WriteApprovalController},
     token_counting::count_text_tokens,
+    web::WebService,
 };
 pub use failures::normalize_subagent_failure;
 pub(crate) use failures::{SubagentFailureLog, persist_subagent_failure_log};
@@ -85,11 +86,13 @@ pub enum SubagentUiEvent {
 pub struct SubagentSpawnRequest {
     pub prompt: String,
     pub access_mode: AccessMode,
+    pub allow_full_system_access: bool,
     pub activity_kind: SubagentActivityKind,
     pub model_name_override: Option<String>,
     pub config: AppConfig,
     pub write_approvals: WriteApprovalController,
     pub shell_approvals: ShellApprovalController,
+    pub web: WebService,
 }
 
 #[derive(Clone, Debug, Serialize)]

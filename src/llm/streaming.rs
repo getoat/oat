@@ -19,6 +19,7 @@ use crate::{
     debug_log::log_debug,
     stats::StatsHook,
     todo::parse_snapshot,
+    tool_result_status::tool_result_is_failure_text,
     tools::{AskUserTool, CommentaryTool, TodoTool},
 };
 
@@ -33,6 +34,7 @@ use super::{
     resume::{ReplayProbe, ResumeOverrideController, reconcile_stream_text},
 };
 
+const NORMAL_STREAM_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(60);
 const POST_TOOL_RESULT_PROGRESS_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Default)]
@@ -51,6 +53,14 @@ impl PartialToolCall {
 pub(crate) enum PromptStepOutcome {
     Finished(PromptRunResult),
     Continue(StepBoundaryState),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StreamWaitState {
+    Normal,
+    AwaitingToolResult,
+    AwaitingPostToolProgress,
+    AwaitingPostToolFailureProgress,
 }
 
 pub(crate) async fn run_prompt_step<M>(
@@ -100,7 +110,7 @@ where
             capture: step_boundary.clone(),
         },
         second: CombinedHook {
-            first: stats_hook,
+            first: stats_hook.clone(),
             second: CombinedHook {
                 first: CompletionCaptureHook { capture },
                 second: CombinedHook {
@@ -136,18 +146,13 @@ where
     let mut commentary_replay_messages = replay_seed
         .map(|seed| seed.commentary_messages.into())
         .filter(|messages: &VecDeque<String>| !messages.is_empty());
-    let mut awaiting_post_tool_progress = false;
+    let mut wait_state = StreamWaitState::Normal;
 
-    while let Some(chunk) = next_stream_item_with_timeout(
-        &mut stream,
-        awaiting_post_tool_progress,
-        POST_TOOL_RESULT_PROGRESS_TIMEOUT,
-    )
-    .await?
-    {
-        awaiting_post_tool_progress = false;
+    while let Some(chunk) = next_stream_item_with_timeout(&mut stream, wait_state, None).await? {
+        wait_state = StreamWaitState::Normal;
         let event = match chunk {
             Ok(MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(text))) => {
+                stats_hook.record_response_progress();
                 let delta = reconcile_stream_text(&text.text, &mut plain_replay_probe);
                 if delta.is_empty() {
                     None
@@ -159,6 +164,7 @@ where
             Ok(MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Reasoning(
                 reasoning,
             ))) => {
+                stats_hook.record_response_progress();
                 plain_replay_probe = (!output.is_empty()).then(|| ReplayProbe::new(&output));
                 let delta = reconcile_completed_reasoning_text(
                     &reasoning.display_text(),
@@ -168,6 +174,7 @@ where
                 if delta.is_empty() {
                     None
                 } else {
+                    stats_hook.record_reasoning_progress(&delta);
                     reasoning_output.push_str(&delta);
                     Some(StreamEvent::ReasoningDelta(delta))
                 }
@@ -175,11 +182,13 @@ where
             Ok(MultiTurnStreamItem::StreamAssistantItem(
                 StreamedAssistantContent::ReasoningDelta { reasoning, .. },
             )) => {
+                stats_hook.record_response_progress();
                 plain_replay_probe = (!output.is_empty()).then(|| ReplayProbe::new(&output));
                 let delta = reconcile_stream_text(&reasoning, &mut reasoning_replay_probe);
                 if delta.is_empty() {
                     None
                 } else {
+                    stats_hook.record_reasoning_progress(&delta);
                     reasoning_output.push_str(&delta);
                     Some(StreamEvent::ReasoningDelta(delta))
                 }
@@ -191,6 +200,7 @@ where
                     ..
                 },
             )) => {
+                stats_hook.record_response_progress();
                 let partial = partial_tool_calls.entry(internal_call_id).or_default();
                 match content {
                     ToolCallDeltaContent::Name(name) => {
@@ -206,6 +216,8 @@ where
                 tool_call,
                 internal_call_id,
             })) => {
+                stats_hook.record_response_progress();
+                wait_state = StreamWaitState::AwaitingToolResult;
                 plain_replay_probe = (!output.is_empty()).then(|| ReplayProbe::new(&output));
                 reasoning_replay_probe =
                     (!reasoning_output.is_empty()).then(|| ReplayProbe::new(&reasoning_output));
@@ -269,7 +281,6 @@ where
                 tool_result,
                 internal_call_id,
             })) => {
-                awaiting_post_tool_progress = true;
                 plain_replay_probe = (!output.is_empty()).then(|| ReplayProbe::new(&output));
                 reasoning_replay_probe =
                     (!reasoning_output.is_empty()).then(|| ReplayProbe::new(&reasoning_output));
@@ -281,26 +292,27 @@ where
                     "llm_stream",
                     format!("tool_result reply_id={reply_id} name={name}"),
                 );
+                let output = format_tool_result(&tool_result);
+                wait_state = if tool_result_is_failure(&output) {
+                    StreamWaitState::AwaitingPostToolFailureProgress
+                } else {
+                    StreamWaitState::AwaitingPostToolProgress
+                };
                 if name == AskUserTool::NAME {
                     None
                 } else if name == TodoTool::NAME {
-                    match parse_snapshot(&format_tool_result(&tool_result)) {
+                    match parse_snapshot(&output) {
                         Ok(snapshot) => Some(StreamEvent::TodoSnapshot(snapshot)),
-                        Err(_) => Some(StreamEvent::ToolResult {
-                            name,
-                            output: format_tool_result(&tool_result),
-                        }),
+                        Err(_) => Some(StreamEvent::ToolResult { name, output }),
                     }
                 } else if commentary_calls.contains(&internal_call_id) {
                     None
                 } else {
-                    Some(StreamEvent::ToolResult {
-                        name,
-                        output: format_tool_result(&tool_result),
-                    })
+                    Some(StreamEvent::ToolResult { name, output })
                 }
             }
             Ok(MultiTurnStreamItem::FinalResponse(response)) => {
+                stats_hook.record_response_progress();
                 log_debug("llm_stream", format!("final_response reply_id={reply_id}"));
                 let history = response.history().map(ToOwned::to_owned);
                 let history = history.map(history_from_rig).transpose()?;
@@ -322,9 +334,11 @@ where
                 if let Some(boundary) = step_boundary.take()
                     && is_step_boundary_error(&error)
                 {
+                    stats_hook.finish_request_without_usage();
                     return Ok(PromptStepOutcome::Continue(boundary));
                 }
                 let message = error.to_string();
+                stats_hook.fail_request();
                 let _ = (emit)(reply_id, StreamEvent::Failed(message.clone()));
                 return Err(error.into());
             }
@@ -338,6 +352,7 @@ where
     }
 
     let message = "Request ended before response completed.".to_string();
+    stats_hook.fail_request();
     let _ = (emit)(reply_id, StreamEvent::Failed(message.clone()));
     Err(anyhow::anyhow!(message))
 }
@@ -359,20 +374,45 @@ pub(crate) fn reconcile_completed_reasoning_text(
 
 async fn next_stream_item_with_timeout<S, T>(
     stream: &mut S,
-    awaiting_post_tool_progress: bool,
-    timeout: Duration,
+    wait_state: StreamWaitState,
+    timeout_override: Option<Duration>,
 ) -> Result<Option<T>>
 where
     S: futures_util::Stream<Item = T> + Unpin,
 {
-    if awaiting_post_tool_progress {
+    let timeout = timeout_override.or(match wait_state {
+        StreamWaitState::Normal => Some(NORMAL_STREAM_INACTIVITY_TIMEOUT),
+        // Tool execution and human approval should be controlled by the tool/hook path itself.
+        // Do not apply an outer provider inactivity timeout while waiting for a tool result.
+        StreamWaitState::AwaitingToolResult => None,
+        StreamWaitState::AwaitingPostToolProgress => Some(POST_TOOL_RESULT_PROGRESS_TIMEOUT),
+        // If a tool failed, keep waiting for the model to adapt instead of converting the tool
+        // failure into a turn-level timeout.
+        StreamWaitState::AwaitingPostToolFailureProgress => None,
+    });
+
+    if let Some(timeout) = timeout {
         match tokio::time::timeout(timeout, stream.next()).await {
             Ok(item) => Ok(item),
             Err(_) => {
-                log_debug("llm_stream", "post_tool_progress_timeout");
-                Err(anyhow::anyhow!(
-                    "Request stalled after tool execution without further model output."
-                ))
+                let (log_label, message) = match wait_state {
+                    StreamWaitState::Normal => (
+                        "stream_inactivity_timeout",
+                        "Request stalled without provider output before the turn completed.",
+                    ),
+                    StreamWaitState::AwaitingToolResult => {
+                        unreachable!("awaiting tool result should not be subject to stream timeout")
+                    }
+                    StreamWaitState::AwaitingPostToolProgress => (
+                        "post_tool_progress_timeout",
+                        "Request stalled after tool execution without further model output.",
+                    ),
+                    StreamWaitState::AwaitingPostToolFailureProgress => unreachable!(
+                        "tool failure follow-up should not be subject to stream timeout"
+                    ),
+                };
+                log_debug("llm_stream", log_label);
+                Err(anyhow::anyhow!(message))
             }
         }
     } else {
@@ -388,18 +428,75 @@ fn is_step_boundary_error(error: &StreamingError) -> bool {
     )
 }
 
+fn tool_result_is_failure(output: &str) -> bool {
+    tool_result_is_failure_text(output)
+}
+
 #[cfg(test)]
 mod tests {
     use futures_util::stream;
 
-    use super::next_stream_item_with_timeout;
+    use super::{StreamWaitState, next_stream_item_with_timeout, tool_result_is_failure};
 
     #[tokio::test]
     async fn post_tool_timeout_returns_next_item_when_progress_resumes() {
         let mut stream = stream::iter([1]);
 
+        let item = next_stream_item_with_timeout(
+            &mut stream,
+            StreamWaitState::AwaitingPostToolProgress,
+            Some(std::time::Duration::from_millis(10)),
+        )
+        .await
+        .expect("stream item");
+
+        assert_eq!(item, Some(1));
+    }
+
+    #[tokio::test]
+    async fn normal_timeout_fails_when_stream_stops_without_closing() {
+        let mut stream = stream::pending::<i32>();
+
+        let error = next_stream_item_with_timeout(
+            &mut stream,
+            StreamWaitState::Normal,
+            Some(std::time::Duration::from_millis(10)),
+        )
+        .await
+        .expect_err("timeout error");
+
+        assert!(
+            error
+                .to_string()
+                .contains("stalled without provider output")
+        );
+    }
+
+    #[tokio::test]
+    async fn post_tool_timeout_fails_when_no_follow_up_arrives() {
+        let mut stream = stream::pending::<i32>();
+
+        let error = next_stream_item_with_timeout(
+            &mut stream,
+            StreamWaitState::AwaitingPostToolProgress,
+            Some(std::time::Duration::from_millis(10)),
+        )
+        .await
+        .expect_err("timeout error");
+
+        assert!(
+            error
+                .to_string()
+                .contains("Request stalled after tool execution")
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_wait_without_override_waits_for_result_without_timeout() {
+        let mut stream = stream::iter([1]);
+
         let item =
-            next_stream_item_with_timeout(&mut stream, true, std::time::Duration::from_millis(10))
+            next_stream_item_with_timeout(&mut stream, StreamWaitState::AwaitingToolResult, None)
                 .await
                 .expect("stream item");
 
@@ -407,19 +504,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn post_tool_timeout_fails_when_no_follow_up_arrives() {
-        let mut stream = stream::pending::<i32>();
+    async fn post_tool_failure_wait_without_override_waits_for_result_without_timeout() {
+        let mut stream = stream::iter([1]);
 
-        let error =
-            next_stream_item_with_timeout(&mut stream, true, std::time::Duration::from_millis(10))
-                .await
-                .expect_err("timeout error");
+        let item = next_stream_item_with_timeout(
+            &mut stream,
+            StreamWaitState::AwaitingPostToolFailureProgress,
+            None,
+        )
+        .await
+        .expect("stream item");
 
-        assert!(
-            error
-                .to_string()
-                .contains("Request stalled after tool execution")
-        );
+        assert_eq!(item, Some(1));
+    }
+
+    #[test]
+    fn tool_result_failure_detection_tracks_tool_errors() {
+        assert!(tool_result_is_failure(
+            "ToolCallError: Shell command timed out after 10ms."
+        ));
+        assert!(tool_result_is_failure(
+            "Toolset error: ToolCallError: ToolCallError: patch 1 old_text was not found"
+        ));
+        assert!(!tool_result_is_failure("Exit code: 0"));
     }
 }
 

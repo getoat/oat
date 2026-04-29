@@ -8,6 +8,7 @@ use crate::{
     debug_log::log_debug,
     llm::{LlmService, TurnInterruptRequest},
     memory::{CompletedTurnMemoryInput, MemoryService},
+    model_registry::{self, ModelProvider},
     session_store::SessionStore,
     stats::StatsStore,
     subagents::{SubagentManager, SubagentUiEvent},
@@ -148,27 +149,17 @@ impl<'a> TurnController<'a> {
                     let stats_hook = self
                         .stats
                         .hook_for_model(config.memory.extraction.model_name.clone());
-                    if config.memory.extraction.run_in_background {
-                        self.runtime.spawn(async move {
-                            if let Err(error) = memory
-                                .process_completed_turn(config, stats_hook, input)
-                                .await
-                            {
-                                log_debug(
-                                    "memory",
-                                    format!("background_memory_extraction_failed error={error}"),
-                                );
-                            }
-                        });
-                    } else if let Err(error) = self
-                        .runtime
-                        .block_on(memory.process_completed_turn(config, stats_hook, input))
-                    {
-                        log_debug(
-                            "memory",
-                            format!("synchronous_memory_extraction_failed error={error}"),
-                        );
-                    }
+                    self.runtime.spawn(async move {
+                        if let Err(error) = memory
+                            .process_completed_turn(config, stats_hook, input)
+                            .await
+                        {
+                            log_debug(
+                                "memory",
+                                format!("background_memory_extraction_failed error={error}"),
+                            );
+                        }
+                    });
                 }
                 effect
             }
@@ -176,6 +167,83 @@ impl<'a> TurnController<'a> {
                 self.side_channel_task_manager
                     .clear_completed_task(reply_id);
                 self.app.apply(Action::SideChannelEvent { reply_id, event })
+            }
+            RuntimeEvent::CodexLoginStarted { session } => {
+                let prompt = session.prompt().clone();
+                crate::app::ops::transcript::push_agent_message(
+                    self.app.state_mut(),
+                    format!(
+                        "Open {} and enter code `{}`. Waiting for Codex device login to complete.",
+                        prompt.verification_url, prompt.user_code
+                    ),
+                );
+                let stream_tx = self.stream_tx.clone();
+                self.runtime.spawn(async move {
+                    let result = crate::codex::complete_device_code_login(session)
+                        .await
+                        .map_err(|error| error.to_string());
+                    let _ = stream_tx.send(RuntimeEvent::CodexLoginCompleted { result });
+                });
+                None
+            }
+            RuntimeEvent::CodexLoginCompleted { result } => {
+                self.app.state_mut().session.pending_codex_login = false;
+                match result {
+                    Ok(codex) => {
+                        match crate::config::AppConfig::set_default_codex_auth(Some(&codex)) {
+                            Ok(updated_config) => match super::effect_executor::rebuild_main_llm(
+                                self.runtime,
+                                &updated_config,
+                                self.llm,
+                                query::mode(self.app.state()),
+                                self.app.state().session.full_system_access,
+                                self.subagents,
+                                self.terminals,
+                                self.memory,
+                                self.llm.web_service(),
+                            ) {
+                                Ok(rebuilt) => {
+                                    self.memory.set_config(updated_config.memory.clone());
+                                    *self.config = updated_config;
+                                    *self.llm = rebuilt;
+                                    crate::app::ops::transcript::push_agent_message(
+                                        self.app.state_mut(),
+                                        "Codex login complete. Credentials were saved to config.toml.",
+                                    );
+                                    let codex_model_count = model_registry::models()
+                                        .iter()
+                                        .filter(|model| model.provider == ModelProvider::Codex)
+                                        .count();
+                                    crate::app::ops::transcript::push_agent_message(
+                                        self.app.state_mut(),
+                                        format!(
+                                            "Loaded {} bundled Codex model{} for the picker.",
+                                            codex_model_count,
+                                            if codex_model_count == 1 { "" } else { "s" }
+                                        ),
+                                    );
+                                }
+                                Err(error) => crate::app::ops::transcript::push_error_message(
+                                    self.app.state_mut(),
+                                    format!(
+                                        "Codex login succeeded but runtime reload failed: {error}"
+                                    ),
+                                ),
+                            },
+                            Err(error) => crate::app::ops::transcript::push_error_message(
+                                self.app.state_mut(),
+                                format!(
+                                    "Codex login succeeded but credentials could not be saved: {error}"
+                                ),
+                            ),
+                        }
+                    }
+                    Err(error) => crate::app::ops::transcript::push_error_message(
+                        self.app.state_mut(),
+                        format!("Codex login failed: {error}"),
+                    ),
+                }
+                None
             }
         };
         self.process_follow_ups(effect);
@@ -264,6 +332,8 @@ fn runtime_event_label(event: &RuntimeEvent) -> &'static str {
             crate::app::StreamEvent::Commentary(_) => "MainReply:Commentary",
             crate::app::StreamEvent::ReasoningDelta(_) => "MainReply:ReasoningDelta",
             crate::app::StreamEvent::ToolCall { .. } => "MainReply:ToolCall",
+            crate::app::StreamEvent::HostedToolStarted { .. } => "MainReply:HostedToolStarted",
+            crate::app::StreamEvent::HostedToolCompleted { .. } => "MainReply:HostedToolCompleted",
             crate::app::StreamEvent::ToolResult { .. } => "MainReply:ToolResult",
             crate::app::StreamEvent::TodoSnapshot(_) => "MainReply:TodoSnapshot",
             crate::app::StreamEvent::AskUserRequested { .. } => "MainReply:AskUserRequested",
@@ -282,6 +352,8 @@ fn runtime_event_label(event: &RuntimeEvent) -> &'static str {
             crate::app::StreamEvent::SessionTitleGenerated(_) => "MainReply:SessionTitleGenerated",
         },
         RuntimeEvent::SideChannel { .. } => "SideChannel",
+        RuntimeEvent::CodexLoginStarted { .. } => "CodexLoginStarted",
+        RuntimeEvent::CodexLoginCompleted { .. } => "CodexLoginCompleted",
     }
 }
 

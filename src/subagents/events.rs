@@ -9,6 +9,8 @@ impl SubagentManager {
             | StreamEvent::TextDelta(_)
             | StreamEvent::Commentary(_)
             | StreamEvent::ReasoningDelta(_)
+            | StreamEvent::HostedToolStarted { .. }
+            | StreamEvent::HostedToolCompleted { .. }
             | StreamEvent::ToolResult { .. }
             | StreamEvent::TodoSnapshot(_)
             | StreamEvent::AskUserRequested { .. }

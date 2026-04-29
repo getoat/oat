@@ -92,6 +92,7 @@ impl ReplyDriver {
 
         let reply_kind = query::active_reply_kind(app.state()).unwrap_or(PendingReplyKind::Normal);
         let reply_id = ops::session::ensure_pending_reply(app.state_mut(), reply_kind);
+        ops::session::initialize_pending_reply_history(app.state_mut());
         let replay_seed = query::pending_reply_replay_seed(app.state());
         let llm = llm.clone();
         let stats_hook = stats.hook_for_model(query::model_name(app.state()).to_string());
@@ -198,6 +199,8 @@ fn stream_event_label(event: &StreamEvent) -> &'static str {
         StreamEvent::Commentary(_) => "Commentary",
         StreamEvent::ReasoningDelta(_) => "ReasoningDelta",
         StreamEvent::ToolCall { .. } => "ToolCall",
+        StreamEvent::HostedToolStarted { .. } => "HostedToolStarted",
+        StreamEvent::HostedToolCompleted { .. } => "HostedToolCompleted",
         StreamEvent::ToolResult { .. } => "ToolResult",
         StreamEvent::TodoSnapshot(_) => "TodoSnapshot",
         StreamEvent::AskUserRequested { .. } => "AskUserRequested",

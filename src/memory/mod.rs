@@ -1704,6 +1704,11 @@ fn transcript_entry_to_evidence(entry: &TranscriptEntry) -> MemoryTranscriptEvid
             label: Some(result.name.clone()),
             content: truncate(&result.output, 1_200),
         },
+        TranscriptEntry::HostedToolStatus(status) => MemoryTranscriptEvidence {
+            kind: "hosted_tool_status".into(),
+            label: Some(status.kind.status_label().into()),
+            content: truncate(&status.detail, 600),
+        },
         TranscriptEntry::TodoSnapshot(todo) => MemoryTranscriptEvidence {
             kind: "todo_snapshot".into(),
             label: None,

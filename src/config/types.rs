@@ -14,6 +14,8 @@ pub struct AppConfig {
     pub azure: Option<AzureConfig>,
     pub chutes: Option<ChutesConfig>,
     pub codex: Option<CodexConfig>,
+    pub ollama: Option<OllamaConfig>,
+    pub opencode: Option<OpencodeConfig>,
     pub openrouter: Option<OpenRouterConfig>,
     pub model: ModelSelectionConfig,
     pub safety: SafetyConfig,
@@ -21,6 +23,7 @@ pub struct AppConfig {
     pub subagents: SubagentConfig,
     pub planning: PlanningConfig,
     pub memory: MemoryConfig,
+    pub history: HistoryConfig,
     pub tools: ToolConfig,
 }
 
@@ -53,6 +56,24 @@ impl AppConfig {
             model_registry::ModelProvider::Codex => Ok(ProviderConfigRef::Codex(
                 self.codex.as_ref().unwrap_or(&EMPTY_CODEX_CONFIG),
             )),
+            model_registry::ModelProvider::Ollama => self
+                .ollama
+                .as_ref()
+                .map(ProviderConfigRef::Ollama)
+                .ok_or_else(|| {
+                    anyhow!(
+                        "config is missing the [ollama] table required for model `{model_name}`"
+                    )
+                }),
+            model_registry::ModelProvider::OpencodeGo => self
+                .opencode
+                .as_ref()
+                .map(ProviderConfigRef::Opencode)
+                .ok_or_else(|| {
+                    anyhow!(
+                        "config is missing the [opencode] table required for model `{model_name}`"
+                    )
+                }),
             model_registry::ModelProvider::OpenRouter => self
                 .openrouter
                 .as_ref()
@@ -63,6 +84,18 @@ impl AppConfig {
                     )
                 }),
         }
+    }
+
+    pub fn base_url_for_model(&self, model_name: &str) -> Result<String> {
+        let model = model_registry::find_model(model_name).ok_or_else(|| {
+            anyhow!(model_registry::unknown_model_message(
+                "model.model_name",
+                model_name
+            ))
+        })?;
+        Ok(self
+            .provider_config_for_model(model_name)?
+            .base_url(model.api_family))
     }
 }
 
@@ -179,9 +212,66 @@ impl OpenRouterConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct OpencodeConfig {
+    pub api_key: String,
+}
+
+impl OpencodeConfig {
+    pub fn base_url(&self, api_family: model_registry::ModelApiFamily) -> &'static str {
+        match api_family {
+            model_registry::ModelApiFamily::Anthropic => "https://opencode.ai/zen/go",
+            model_registry::ModelApiFamily::Completions
+            | model_registry::ModelApiFamily::Responses => "https://opencode.ai/zen/go/v1",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct OllamaConfig {
+    pub api_key: String,
+}
+
+impl OllamaConfig {
+    pub fn base_url(&self) -> &'static str {
+        "https://ollama.com/v1"
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct ModelSelectionConfig {
     pub model_name: String,
     pub reasoning: ReasoningSetting,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct HistoryConfig {
+    #[serde(default = "default_history_mode")]
+    pub mode: HistoryMode,
+    #[serde(default = "default_history_retained_steps")]
+    pub retained_steps: usize,
+}
+
+impl Default for HistoryConfig {
+    fn default() -> Self {
+        Self {
+            mode: default_history_mode(),
+            retained_steps: default_history_retained_steps(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HistoryMode {
+    Full,
+    TurnSummary,
+    StepSummary,
+}
+
+impl Default for HistoryMode {
+    fn default() -> Self {
+        default_history_mode()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -189,6 +279,8 @@ pub enum ProviderConfigRef<'a> {
     Azure(&'a AzureConfig),
     Chutes(&'a ChutesConfig),
     Codex(&'a CodexConfig),
+    Ollama(&'a OllamaConfig),
+    Opencode(&'a OpencodeConfig),
     OpenRouter(&'a OpenRouterConfig),
 }
 
@@ -198,15 +290,19 @@ impl ProviderConfigRef<'_> {
             Self::Azure(config) => Some(&config.api_key),
             Self::Chutes(config) => Some(&config.api_key),
             Self::Codex(config) => config.auth_token(),
+            Self::Ollama(config) => Some(&config.api_key),
+            Self::Opencode(config) => Some(&config.api_key),
             Self::OpenRouter(config) => Some(&config.api_key),
         }
     }
 
-    pub fn base_url(&self) -> String {
+    pub fn base_url(&self, api_family: model_registry::ModelApiFamily) -> String {
         match self {
             Self::Azure(config) => format!("{}/openai/v1", config.endpoint().trim_end_matches('/')),
             Self::Chutes(config) => config.base_url().to_string(),
             Self::Codex(config) => config.base_url().to_string(),
+            Self::Ollama(config) => config.base_url().to_string(),
+            Self::Opencode(config) => config.base_url(api_family).to_string(),
             Self::OpenRouter(config) => config.base_url().to_string(),
         }
     }
@@ -214,7 +310,11 @@ impl ProviderConfigRef<'_> {
     pub fn account_id(&self) -> Option<&str> {
         match self {
             Self::Codex(config) => config.account_id(),
-            Self::Azure(_) | Self::Chutes(_) | Self::OpenRouter(_) => None,
+            Self::Azure(_)
+            | Self::Chutes(_)
+            | Self::Ollama(_)
+            | Self::Opencode(_)
+            | Self::OpenRouter(_) => None,
         }
     }
 }
@@ -363,6 +463,8 @@ pub struct ToolConfig {
     pub search_include_patterns: Vec<String>,
     #[serde(default = "tool_policy::default_tool_output_max_tokens")]
     pub max_output_tokens: usize,
+    #[serde(default)]
+    pub web_search: ToolWebSearchConfig,
 }
 
 impl Default for ToolConfig {
@@ -370,7 +472,36 @@ impl Default for ToolConfig {
         Self {
             search_include_patterns: Vec::new(),
             max_output_tokens: tool_policy::default_tool_output_max_tokens(),
+            web_search: ToolWebSearchConfig::default(),
         }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct ToolWebSearchConfig {
+    #[serde(default = "default_web_search_mode")]
+    pub mode: WebSearchMode,
+}
+
+impl Default for ToolWebSearchConfig {
+    fn default() -> Self {
+        Self {
+            mode: default_web_search_mode(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum WebSearchMode {
+    Disabled,
+    Cached,
+    Live,
+}
+
+impl Default for WebSearchMode {
+    fn default() -> Self {
+        default_web_search_mode()
     }
 }
 
@@ -530,6 +661,18 @@ impl<'de> Deserialize<'de> for ReasoningSetting {
 
 pub(super) fn default_show_thinking() -> bool {
     true
+}
+
+pub(super) fn default_web_search_mode() -> WebSearchMode {
+    WebSearchMode::Live
+}
+
+pub(super) fn default_history_mode() -> HistoryMode {
+    HistoryMode::StepSummary
+}
+
+pub(super) fn default_history_retained_steps() -> usize {
+    1
 }
 
 pub(super) fn default_command_history_limit() -> usize {

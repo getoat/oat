@@ -4,7 +4,7 @@ use std::{
 };
 
 use crate::{
-    config::ReasoningSetting,
+    config::{HistoryMode, ReasoningSetting},
     features::planning::{PlanningAgentConfig, PlanningFeatureState},
     stats::StatsTotals,
     todo::TodoSnapshot,
@@ -19,6 +19,7 @@ use super::{
 #[derive(Debug)]
 pub struct SessionState {
     pub workspace_root: PathBuf,
+    pub full_system_access: bool,
     pub initial_mode: AccessMode,
     pub initial_approval_mode: ApprovalMode,
     pub mode: AccessMode,
@@ -28,17 +29,22 @@ pub struct SessionState {
     pub should_quit: bool,
     pub entries: Vec<TranscriptEntry>,
     pub transcript_revision: u64,
+    pub transcript_structure_revision: u64,
+    pub transcript_tail_revision: u64,
     pub session_history: Vec<SessionHistoryMessage>,
     pub estimated_session_history_tokens: u64,
     pub pending_reply: Option<PendingReply>,
     pub next_reply_id: u64,
     pub session_title: Option<String>,
+    pub pending_codex_login: bool,
     pub pending_session_title_reply_id: Option<u64>,
     pub tick_count: usize,
     pub show_thinking: bool,
     pub show_tool_output: bool,
     pub model_name: String,
     pub last_history_model_name: Option<String>,
+    pub history_mode: HistoryMode,
+    pub history_retained_steps: usize,
     pub reasoning: ReasoningSetting,
     pub safety_model_name: String,
     pub safety_reasoning: ReasoningSetting,
@@ -70,6 +76,7 @@ impl SessionState {
             model_name,
             reasoning.into(),
             Vec::new(),
+            false,
             AccessMode::ReadOnly,
             ApprovalMode::Manual,
         )
@@ -81,6 +88,7 @@ impl SessionState {
         model_name: impl Into<String>,
         reasoning: impl Into<ReasoningSetting>,
         planning_agents: Vec<PlanningAgentConfig>,
+        full_system_access: bool,
         initial_mode: AccessMode,
         initial_approval_mode: ApprovalMode,
     ) -> Self {
@@ -90,6 +98,7 @@ impl SessionState {
         let memory_model_name = model_name.clone();
         Self {
             workspace_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            full_system_access,
             initial_mode,
             initial_approval_mode,
             mode: initial_mode,
@@ -104,11 +113,14 @@ impl SessionState {
                 tag: None,
             })],
             transcript_revision: 0,
+            transcript_structure_revision: 0,
+            transcript_tail_revision: 0,
             session_history: Vec::new(),
             estimated_session_history_tokens: 0,
             pending_reply: None,
             next_reply_id: 1,
             session_title: None,
+            pending_codex_login: false,
             pending_session_title_reply_id: None,
             tick_count: 0,
             show_thinking,
@@ -116,6 +128,8 @@ impl SessionState {
             safety_model_name,
             model_name,
             last_history_model_name: None,
+            history_mode: HistoryMode::Full,
+            history_retained_steps: 1,
             reasoning,
             safety_reasoning: reasoning,
             memory_model_name,

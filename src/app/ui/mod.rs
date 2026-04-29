@@ -5,6 +5,7 @@ mod composer;
 mod history;
 mod picker;
 mod state;
+mod stats;
 
 pub use approvals::{ShellApprovalEditMode, ShellApprovalUiState};
 pub use ask_user::AskUserUiState;
@@ -13,9 +14,10 @@ pub use composer::{
     ComposerUiState, new_composer_with_text, normalize_pasted_line_endings, picker_height,
     split_command_query, textarea_input,
 };
-pub use history::{HistoryRenderCache, HistoryViewState};
+pub use history::{HistoryRenderCache, HistoryTailRenderCache, HistoryViewState};
 pub use picker::{
     ModelPickerEntry, ModelPickerTab, PickerSelection, ReasoningPickerTarget, SelectionPicker,
     SessionPickerEntry, display_entries_for_tab, selectable_models_for_tab,
 };
 pub use state::UiState;
+pub use stats::{StatsScreenState, StatsScreenTab, StatsTableRow};

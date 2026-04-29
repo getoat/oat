@@ -3,6 +3,7 @@ mod events;
 mod history;
 mod input;
 mod planning;
+mod stats;
 mod system;
 
 use super::{Action, Effect};
@@ -36,6 +37,14 @@ pub(crate) fn apply(state: &mut AppState, action: Action) -> Option<Effect> {
         | Action::StartHistorySelection { .. }
         | Action::UpdateHistorySelection { .. }
         | Action::FinishHistorySelection { .. } => history::handle(state, action),
+        Action::StatsTabLeft
+        | Action::StatsTabRight
+        | Action::ScrollStatsPageUp
+        | Action::ScrollStatsPageDown
+        | Action::ScrollStatsToTop
+        | Action::ScrollStatsToBottom
+        | Action::ScrollStatsUp { .. }
+        | Action::ScrollStatsDown { .. } => stats::handle(state, action),
         Action::ApproveWriteOnce | Action::ApproveWriteAllSession | Action::DenyWrite => {
             approvals::handle(state, action)
         }

@@ -1,7 +1,10 @@
 use super::super::{Effect, PendingReplyKind};
 use super::should_request_session_title;
 use crate::app::{AccessMode, AppState, ops, query};
-use crate::features::planning::planning_conversation_prompt;
+use crate::features::planning::{
+    accepted_plan_implementation_prompt as build_accepted_plan_implementation_prompt,
+    planning_conversation_prompt,
+};
 
 pub(crate) fn submit_plan_acceptance(state: &mut AppState) -> Option<Effect> {
     if query::has_pending_reply(state) || !query::plan_review_selection_active(state) {
@@ -53,6 +56,8 @@ pub(super) fn submit_planning_draft(state: &mut AppState, submitted: &str) -> Op
     }
 
     let session_title_prompt = should_request_session_title(state).then(|| submitted.to_string());
+    let history = state.session.session_history.to_vec();
+    let history_model_name = state.session.last_history_model_name.clone();
     ops::planning::consume_planning_draft_mode(state);
     ops::composer::record_submitted_input(state, submitted);
     ops::transcript::push_user_message(state, submitted.to_string());
@@ -63,18 +68,18 @@ pub(super) fn submit_planning_draft(state: &mut AppState, submitted: &str) -> Op
     let prompt = planning_conversation_prompt(submitted);
     ops::session::set_active_main_request_seed(
         state,
-        state.session.session_history.to_vec(),
+        history.clone(),
         submitted.to_string(),
         prompt.clone(),
-        state.session.last_history_model_name.clone(),
+        history_model_name.clone(),
         state.session.entries.len(),
     );
 
     Some(Effect::PromptModel {
         reply_id,
         prompt,
-        history: state.session.session_history.to_vec(),
-        history_model_name: state.session.last_history_model_name.clone(),
+        history,
+        history_model_name,
         session_title_prompt,
     })
 }
@@ -85,6 +90,8 @@ pub(super) fn submit_planning_turn(state: &mut AppState, submitted: &str) -> Opt
     }
 
     let session_title_prompt = should_request_session_title(state).then(|| submitted.to_string());
+    let history = state.session.session_history.to_vec();
+    let history_model_name = state.session.last_history_model_name.clone();
     ops::composer::record_submitted_input(state, submitted);
     ops::transcript::push_user_message(state, submitted.to_string());
     ops::history::resume_history_follow(state);
@@ -93,18 +100,18 @@ pub(super) fn submit_planning_turn(state: &mut AppState, submitted: &str) -> Opt
     ops::session::set_pending_reply(state, reply_id, PendingReplyKind::Planning);
     ops::session::set_active_main_request_seed(
         state,
-        state.session.session_history.to_vec(),
+        history.clone(),
         submitted.to_string(),
         submitted.to_string(),
-        state.session.last_history_model_name.clone(),
+        history_model_name.clone(),
         state.session.entries.len(),
     );
 
     Some(Effect::PromptModel {
         reply_id,
         prompt: submitted.to_string(),
-        history: state.session.session_history.to_vec(),
-        history_model_name: state.session.last_history_model_name.clone(),
+        history,
+        history_model_name,
         session_title_prompt,
     })
 }
@@ -123,16 +130,7 @@ fn accepted_plan_implementation_prompt(state: &AppState) -> String {
         .unwrap_or(
             "<proposed_plan>\nAccepted plan content was not found in transcript.\n</proposed_plan>",
         );
-    format!(
-        concat!(
-            "You are no longer in Plan Mode. The plan has been accepted for implementation.\n",
-            "Do not say that you still need a developer or system transition out of plan mode.\n",
-            "Use the accepted plan below as the implementation brief, explore the workspace as needed, and begin implementation now.\n\n",
-            "Accepted plan:\n",
-            "{accepted_plan}\n"
-        ),
-        accepted_plan = accepted_plan
-    )
+    build_accepted_plan_implementation_prompt(accepted_plan)
 }
 
 #[cfg(test)]
@@ -199,6 +197,12 @@ mod tests {
         assert!(app.state_mut().session.pending_reply.is_some());
         assert!(!app.plan_review_selection_active());
         assert_eq!(app.state().session.mode, AccessMode::ReadWrite);
+        assert_eq!(
+            app.session_history(),
+            &[crate::app::SessionHistoryMessage::user(
+                "I accept this plan. Begin implementation now."
+            )]
+        );
         assert_eq!(
             app.state_mut()
                 .session

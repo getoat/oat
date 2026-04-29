@@ -11,12 +11,13 @@ use anyhow::{Context, Result, anyhow};
 use base64::Engine;
 use bytes::Bytes;
 use chrono::Utc;
+use futures_util::StreamExt;
 use rig::http_client::{
     self, HeaderValue, HttpClientExt, LazyBody, MultipartForm, Request, ReqwestClient, Response,
     StreamingResponse,
 };
 use serde::{Deserialize, Deserializer, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use crate::config::{CodexAuthMode, CodexConfig};
 
@@ -29,13 +30,13 @@ const REFRESH_INTERVAL_DAYS: i64 = 8;
 static MODEL_CACHE: LazyLock<Mutex<Option<Vec<CachedCodexModel>>>> =
     LazyLock::new(|| Mutex::new(None));
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DeviceCodePrompt {
     pub(crate) verification_url: String,
     pub(crate) user_code: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DeviceCodeSession {
     prompt: DeviceCodePrompt,
     device_auth_id: String,
@@ -122,17 +123,17 @@ fn http_client() -> reqwest::Client {
 }
 
 #[derive(Clone, Debug, Default)]
-pub(crate) struct CodexHttpClient {
+pub(crate) struct ResponsesHttpClient {
     inner: ReqwestClient,
 }
 
-impl CodexHttpClient {
+impl ResponsesHttpClient {
     pub(crate) fn new(inner: ReqwestClient) -> Self {
         Self { inner }
     }
 }
 
-impl HttpClientExt for CodexHttpClient {
+impl HttpClientExt for ResponsesHttpClient {
     fn send<T, U>(
         &self,
         req: Request<T>,
@@ -142,10 +143,17 @@ impl HttpClientExt for CodexHttpClient {
         U: From<Bytes> + Send + 'static,
     {
         let inner = self.inner.clone();
-        let req = normalize_codex_request(req);
+        let req = normalize_responses_request(req);
         async move {
             let req = req?;
-            HttpClientExt::send(&inner, req).await
+            let response = HttpClientExt::send::<Bytes, Bytes>(&inner, req).await?;
+            let (parts, body) = response.into_parts();
+            let body: LazyBody<U> = Box::pin(async move {
+                let bytes = body.await?;
+                let normalized = normalize_responses_response_body(&bytes).unwrap_or(bytes);
+                Ok(U::from(normalized))
+            });
+            Ok(Response::from_parts(parts, body))
         }
     }
 
@@ -168,9 +176,10 @@ impl HttpClientExt for CodexHttpClient {
         T: Into<Bytes>,
     {
         let inner = self.inner.clone();
-        let req = normalize_codex_request(req);
+        let req = normalize_responses_request(req);
         async move {
             let req = req?;
+            let (req, interaction_scope) = strip_interaction_scope(req);
             let mut response = HttpClientExt::send_streaming(&inner, req).await?;
             if !response.headers().contains_key("content-type") {
                 response.headers_mut().insert(
@@ -178,12 +187,12 @@ impl HttpClientExt for CodexHttpClient {
                     HeaderValue::from_static("text/event-stream; charset=utf-8"),
                 );
             }
-            Ok(response)
+            Ok(observe_streaming_response(response, interaction_scope))
         }
     }
 }
 
-fn normalize_codex_request<T>(req: Request<T>) -> http_client::Result<Request<Bytes>>
+fn normalize_responses_request<T>(req: Request<T>) -> http_client::Result<Request<Bytes>>
 where
     T: Into<Bytes>,
 {
@@ -199,6 +208,52 @@ where
 
     let normalized = normalize_codex_request_body(&body).unwrap_or(body);
     Ok(Request::from_parts(parts, normalized))
+}
+
+fn strip_interaction_scope(mut req: Request<Bytes>) -> (Request<Bytes>, Option<String>) {
+    let scope = req
+        .headers_mut()
+        .remove(crate::llm::OAT_INTERACTION_SCOPE_HEADER)
+        .and_then(|value| value.to_str().ok().map(str::to_string));
+    (req, scope)
+}
+
+fn observe_streaming_response(
+    response: StreamingResponse,
+    interaction_scope: Option<String>,
+) -> StreamingResponse {
+    let Some(scope) = interaction_scope else {
+        return response;
+    };
+    let Some(observer) = crate::llm::responses_search_observer_for_scope(&scope) else {
+        return response;
+    };
+
+    let (parts, body) = response.into_parts();
+    let body = async_stream::stream! {
+        let mut body = body;
+        let mut normalizer = ResponsesStreamNormalizer::default();
+
+        while let Some(chunk) = body.next().await {
+            match chunk {
+                Ok(bytes) => {
+                    observer.observe_chunk(&bytes);
+                    for normalized in normalizer.push_chunk(&bytes) {
+                        yield Ok(normalized);
+                    }
+                }
+                Err(error) => {
+                    yield Err(error);
+                    return;
+                }
+            }
+        }
+
+        for normalized in normalizer.finish() {
+            yield Ok(normalized);
+        }
+    };
+    Response::from_parts(parts, Box::pin(body))
 }
 
 fn normalize_codex_request_body(body: &Bytes) -> Option<Bytes> {
@@ -241,6 +296,131 @@ fn normalize_codex_request_body(body: &Bytes) -> Option<Bytes> {
     }
 
     serde_json::to_vec(&payload).ok().map(Bytes::from)
+}
+
+fn normalize_responses_response_body(body: &Bytes) -> Option<Bytes> {
+    let mut payload: Value = serde_json::from_slice(body).ok()?;
+    sanitize_responses_payload(&mut payload)
+        .then(|| serde_json::to_vec(&payload).ok().map(Bytes::from))
+        .flatten()
+}
+
+#[derive(Default)]
+struct ResponsesStreamNormalizer {
+    buffer: String,
+}
+
+impl ResponsesStreamNormalizer {
+    fn push_chunk(&mut self, chunk: &Bytes) -> Vec<Bytes> {
+        self.buffer.push_str(
+            &String::from_utf8_lossy(chunk)
+                .replace("\r\n", "\n")
+                .replace('\r', "\n"),
+        );
+        self.drain_complete_events()
+    }
+
+    fn finish(&mut self) -> Vec<Bytes> {
+        if self.buffer.is_empty() {
+            return Vec::new();
+        }
+
+        let tail = std::mem::take(&mut self.buffer);
+        vec![normalize_responses_sse_event(&tail)]
+    }
+
+    fn drain_complete_events(&mut self) -> Vec<Bytes> {
+        let mut events = Vec::new();
+        while let Some(delimiter) = self.buffer.find("\n\n") {
+            let raw_event = self.buffer[..delimiter].to_string();
+            self.buffer.drain(..delimiter + 2);
+            events.push(normalize_responses_sse_event(&raw_event));
+        }
+        events
+    }
+}
+
+fn normalize_responses_sse_event(raw_event: &str) -> Bytes {
+    let data = raw_event
+        .lines()
+        .filter_map(|line| line.strip_prefix("data:"))
+        .map(str::trim_start)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    if data.is_empty() || data == "[DONE]" {
+        return Bytes::from(format!("{raw_event}\n\n"));
+    }
+
+    let Ok(mut payload) = serde_json::from_str::<Value>(&data) else {
+        return Bytes::from(format!("{raw_event}\n\n"));
+    };
+    if !sanitize_responses_payload(&mut payload) {
+        return Bytes::from(format!("{raw_event}\n\n"));
+    }
+
+    let mut lines = raw_event
+        .lines()
+        .filter(|line| !line.starts_with("data:"))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let serialized = serde_json::to_string(&payload).unwrap_or(data);
+    lines.push(format!("data: {serialized}"));
+    Bytes::from(format!("{}\n\n", lines.join("\n")))
+}
+
+fn sanitize_responses_payload(payload: &mut Value) -> bool {
+    let Some(object) = payload.as_object_mut() else {
+        return false;
+    };
+
+    let mut changed = false;
+    if let Some(item) = object.get_mut("item") {
+        changed |= sanitize_web_search_output_item(item);
+    }
+    if let Some(output) = object.get_mut("output").and_then(Value::as_array_mut) {
+        changed |= sanitize_output_array(output);
+    }
+    if let Some(response) = object.get_mut("response").and_then(Value::as_object_mut)
+        && let Some(output) = response.get_mut("output").and_then(Value::as_array_mut)
+    {
+        changed |= sanitize_output_array(output);
+    }
+    changed
+}
+
+fn sanitize_output_array(output: &mut [Value]) -> bool {
+    output.iter_mut().fold(false, |changed, item| {
+        sanitize_web_search_output_item(item) || changed
+    })
+}
+
+fn sanitize_web_search_output_item(item: &mut Value) -> bool {
+    let Some(object) = item.as_object_mut() else {
+        return false;
+    };
+    if object.get("type").and_then(Value::as_str) != Some("web_search_call") {
+        return false;
+    }
+
+    let id = object
+        .get("id")
+        .and_then(Value::as_str)
+        .or_else(|| object.get("call_id").and_then(Value::as_str))
+        .unwrap_or("ws_placeholder")
+        .to_string();
+    let status = object.get("status").cloned();
+
+    let mut replacement = Map::new();
+    replacement.insert("type".into(), Value::String("reasoning".into()));
+    replacement.insert("id".into(), Value::String(id));
+    replacement.insert("summary".into(), Value::Array(Vec::new()));
+    if let Some(status) = status {
+        replacement.insert("status".into(), status);
+    }
+
+    *object = replacement;
+    true
 }
 
 fn extract_instruction_text(item: &serde_json::Map<String, Value>) -> Option<String> {
@@ -543,7 +723,9 @@ pub(crate) fn cached_display_name(model_name: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_codex_request_body;
+    use super::{
+        ResponsesStreamNormalizer, normalize_codex_request_body, normalize_responses_response_body,
+    };
     use bytes::Bytes;
     use serde_json::{Value, json};
 
@@ -621,5 +803,87 @@ mod tests {
         assert_eq!(input.len(), 1);
         assert!(input[0].get("id").is_none());
         assert_eq!(input[0]["role"], "user");
+    }
+
+    #[test]
+    fn responses_response_body_sanitizes_web_search_output_items() {
+        let body = Bytes::from(
+            serde_json::to_vec(&json!({
+                "id": "resp_1",
+                "object": "response",
+                "created_at": 1,
+                "status": "completed",
+                "model": "gpt-5.4-mini",
+                "output": [
+                    {
+                        "id": "ws_1",
+                        "type": "web_search_call",
+                        "status": "completed",
+                        "action": {
+                            "type": "open_page",
+                            "url": "https://example.com"
+                        }
+                    },
+                    {
+                        "id": "msg_1",
+                        "type": "message",
+                        "role": "assistant",
+                        "status": "completed",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": "hello",
+                                "annotations": []
+                            }
+                        ]
+                    }
+                ]
+            }))
+            .expect("serialize"),
+        );
+
+        let normalized = normalize_responses_response_body(&body).expect("normalized");
+        let payload: Value = serde_json::from_slice(&normalized).expect("payload");
+        let output = payload["output"].as_array().expect("output");
+
+        assert_eq!(output[0]["type"], "reasoning");
+        assert_eq!(output[0]["id"], "ws_1");
+        assert_eq!(output[0]["summary"], json!([]));
+        assert_eq!(output[0]["status"], "completed");
+        assert_eq!(output[1]["type"], "message");
+    }
+
+    #[test]
+    fn stream_normalizer_sanitizes_split_web_search_events() {
+        let mut normalizer = ResponsesStreamNormalizer::default();
+        let chunks = [
+            Bytes::from(
+                "data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"ws_1\",\"type\":",
+            ),
+            Bytes::from(
+                "\"web_search_call\",\"status\":\"completed\",\"action\":{\"type\":\"search\",\"query\":\"rust\"}}}\n\n",
+            ),
+            Bytes::from(
+                "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"created_at\":1,\"status\":\"completed\",\"model\":\"gpt-5.4-mini\",\"output\":[{\"id\":\"ws_1\",\"type\":\"web_search_call\",\"status\":\"completed\",\"action\":{\"type\":\"search\",\"query\":\"rust\"}}]}}\n\n",
+            ),
+        ];
+
+        let mut output = Vec::new();
+        for chunk in &chunks {
+            output.extend(normalizer.push_chunk(chunk));
+        }
+        output.extend(normalizer.finish());
+
+        assert_eq!(output.len(), 2);
+        let first = String::from_utf8(output[0].to_vec()).expect("utf8");
+        let second = String::from_utf8(output[1].to_vec()).expect("utf8");
+
+        assert!(!first.contains("web_search_call"));
+        assert!(first.contains("\"type\":\"reasoning\""));
+        assert!(first.contains("\"id\":\"ws_1\""));
+
+        assert!(!second.contains("web_search_call"));
+        assert!(second.contains("\"type\":\"reasoning\""));
+        assert!(second.contains("\"id\":\"ws_1\""));
     }
 }

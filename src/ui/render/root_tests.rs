@@ -67,6 +67,7 @@ fn render_shows_mode_line_and_initial_prompt() {
         tool_call_count: 0,
         tool_success_count: 0,
         tool_failure_count: 0,
+        ..StatsTotals::default()
     });
 
     terminal

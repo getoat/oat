@@ -22,6 +22,7 @@ pub const KILL_BACKGROUND_TERMINAL_TOOL_NAME: &str = "KillBackgroundTerminal";
 pub struct StartBackgroundTerminalTool {
     root: PathBuf,
     manager: BackgroundTerminalManager,
+    allow_full_system_access: bool,
 }
 
 #[derive(Clone)]
@@ -62,8 +63,16 @@ pub struct KillBackgroundTerminalArgs {
 }
 
 impl StartBackgroundTerminalTool {
-    pub fn new(root: PathBuf, manager: BackgroundTerminalManager) -> Self {
-        Self { root, manager }
+    pub fn new_with_access(
+        root: PathBuf,
+        manager: BackgroundTerminalManager,
+        allow_full_system_access: bool,
+    ) -> Self {
+        Self {
+            root,
+            manager,
+            allow_full_system_access,
+        }
     }
 }
 
@@ -115,8 +124,12 @@ impl Tool for StartBackgroundTerminalTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        let cwd = args.command.resolve_cwd(&self.root)?;
-        let cwd_label = args.command.cwd_label(&self.root)?;
+        let cwd = args
+            .command
+            .resolve_cwd_with_access(&self.root, self.allow_full_system_access)?;
+        let cwd_label = args
+            .command
+            .cwd_label_with_access(&self.root, self.allow_full_system_access)?;
         let label = args
             .label
             .as_deref()

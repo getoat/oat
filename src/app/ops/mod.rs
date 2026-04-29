@@ -5,4 +5,5 @@ pub(crate) mod history;
 pub(crate) mod picker;
 pub(crate) mod planning;
 pub(crate) mod session;
+pub(crate) mod stats;
 pub(crate) mod transcript;

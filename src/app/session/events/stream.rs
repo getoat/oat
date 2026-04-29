@@ -1,5 +1,6 @@
 use super::super::{
-    Effect, PendingReplyActivity, PendingReplyKind, SideChannelEvent, StreamEvent, TurnEndReason,
+    ActivityDisplayState, Effect, PendingReplyActivity, PendingReplyKind, SideChannelEvent,
+    StreamEvent, TurnEndReason,
 };
 use crate::app::{AppState, MessageStyle, ops, query};
 use crate::features::planning::{PlanningReply, PlanningStage, parse_planning_reply};
@@ -22,6 +23,7 @@ pub(crate) fn on_stream_event(
         StreamEvent::TextDelta(delta) => {
             ops::session::set_pending_reply_activity(state, PendingReplyActivity::Responding);
             ops::transcript::append_pending_stream_message(state, &delta, MessageStyle::Plain);
+            ops::session::append_pending_reply_history_text(state, &delta);
             None
         }
         StreamEvent::Commentary(message) => {
@@ -42,18 +44,43 @@ pub(crate) fn on_stream_event(
         }
         StreamEvent::ToolCall { name, arguments } => {
             ops::session::set_pending_reply_activity(state, PendingReplyActivity::WaitingForTool);
-            ops::transcript::push_tool_call(state, name, arguments);
+            ops::transcript::push_tool_call(state, name.clone(), arguments.clone());
+            ops::session::push_pending_reply_history_tool_call(state, &name, &arguments);
+            None
+        }
+        StreamEvent::HostedToolStarted { id, kind, detail } => {
+            ops::session::set_pending_reply_activity(state, PendingReplyActivity::SearchingWeb);
+            ops::transcript::upsert_hosted_tool_status(
+                state,
+                id,
+                kind,
+                ActivityDisplayState::Running,
+                detail,
+            );
+            None
+        }
+        StreamEvent::HostedToolCompleted { id, kind, detail } => {
+            ops::session::set_pending_reply_activity(state, PendingReplyActivity::Responding);
+            ops::transcript::upsert_hosted_tool_status(
+                state,
+                id,
+                kind,
+                ActivityDisplayState::Completed,
+                detail,
+            );
             None
         }
         StreamEvent::ToolResult { name, output } => {
             ops::session::set_pending_reply_activity(state, PendingReplyActivity::Responding);
-            ops::transcript::push_tool_result(state, name, output);
+            ops::transcript::push_tool_result(state, name.clone(), output.clone());
+            ops::session::push_pending_reply_history_tool_result(state, &name, &output);
             None
         }
         StreamEvent::TodoSnapshot(snapshot) => {
             ops::session::set_pending_reply_activity(state, PendingReplyActivity::Responding);
             ops::session::set_current_todo(state, snapshot.has_list.then_some(snapshot.clone()));
             ops::transcript::push_todo_snapshot(state, snapshot);
+            ops::session::sync_pending_reply_history(state);
             None
         }
         StreamEvent::AskUserRequested {
@@ -126,6 +153,12 @@ pub(crate) fn on_stream_event(
                     history,
                     query::active_main_request_seed(state),
                 );
+                let history = ops::session::reduce_session_history_messages(
+                    history,
+                    state.session.history_mode,
+                    state.session.history_retained_steps,
+                    reason == TurnEndReason::Completed,
+                );
                 ops::session::replace_session_history(state, history);
                 let model_name = state.session.model_name.clone();
                 ops::session::set_last_history_model_name(state, Some(model_name));
@@ -174,6 +207,7 @@ pub(crate) fn on_stream_event(
                 ops::planning::begin_planning_conversation(state);
             }
             ops::ask_user::clear_pending_ask_user(state);
+            ops::session::persist_safe_pending_reply_history(state);
             ops::session::clear_active_main_request_seed(state);
             ops::session::clear_pending_reply_only(state);
             ops::transcript::push_error_message(state, format!("Request failed: {error}"));
@@ -213,14 +247,21 @@ mod tests {
     use super::*;
     use crate::{
         app::{
-            Action, ChatMessage, Effect, MainRequestSeed, MessageStyle, PendingReply,
-            PendingReplyKind, PendingSideReply, SessionHistoryMessage, SideChannelEvent,
-            SideChannelKind, Speaker, TranscriptEntry,
+            Action, ChatMessage, Effect, HostedToolKind, MainRequestSeed, MessageStyle,
+            PendingReply, PendingReplyKind, PendingSideReply, SessionHistoryMessage,
+            SideChannelEvent, SideChannelKind, Speaker, TranscriptEntry,
+            session::PendingReplyActivity,
             session::test_support::{new_app, registry_app},
         },
         ask_user::{AskUserAnswer, AskUserQuestion, AskUserRequest},
         features::planning::PlanningStage,
+        llm::history_into_rig,
         todo::{TodoSnapshot, TodoStatus, TodoTask},
+    };
+    use rig::OneOrMany;
+    use rig::completion::{
+        Message as RigMessage,
+        message::{AssistantContent, ToolResultContent, UserContent},
     };
 
     fn ask_user_request() -> AskUserRequest {
@@ -827,6 +868,186 @@ mod tests {
     }
 
     #[test]
+    fn finished_stream_compacts_successful_tool_traces_in_final_history() {
+        let mut app = new_app(true);
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(2, PendingReplyKind::Normal));
+
+        app.apply(Action::StreamEvent {
+            reply_id: 2,
+            event: StreamEvent::TurnEnded {
+                reason: TurnEndReason::Completed,
+                history: Some(vec![
+                    SessionHistoryMessage::user("hello"),
+                    SessionHistoryMessage::from_rig_message(RigMessage::Assistant {
+                        id: None,
+                        content: OneOrMany::one(AssistantContent::tool_call(
+                            "tool-1",
+                            "ReadFile",
+                            serde_json::json!({
+                                "filename": "src/main.rs",
+                                "offset": 0,
+                                "limit": 10
+                            }),
+                        )),
+                    })
+                    .expect("tool call"),
+                    SessionHistoryMessage::from_rig_message(RigMessage::User {
+                        content: OneOrMany::one(UserContent::tool_result_with_call_id(
+                            "tool-1",
+                            "call-1".to_string(),
+                            OneOrMany::one(ToolResultContent::text("1 | hello")),
+                        )),
+                    })
+                    .expect("tool result"),
+                    SessionHistoryMessage::assistant("world"),
+                ]),
+            },
+        });
+
+        let rig_history = history_into_rig(app.session_history().to_vec()).expect("rig history");
+        assert_eq!(
+            rig_history,
+            vec![
+                RigMessage::user("hello"),
+                RigMessage::assistant("Read `src/main.rs` lines 1-10."),
+                RigMessage::assistant("world"),
+            ]
+        );
+    }
+
+    #[test]
+    fn finished_stream_compacts_failed_tool_traces_in_final_history() {
+        let mut app = new_app(true);
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(2, PendingReplyKind::Normal));
+
+        app.apply(Action::StreamEvent {
+            reply_id: 2,
+            event: StreamEvent::TurnEnded {
+                reason: TurnEndReason::Completed,
+                history: Some(vec![
+                    SessionHistoryMessage::user("hello"),
+                    SessionHistoryMessage::from_rig_message(RigMessage::Assistant {
+                        id: None,
+                        content: OneOrMany::one(AssistantContent::tool_call_with_call_id(
+                            "tool-1",
+                            "call-1".to_string(),
+                            "ApplyPatches".to_string(),
+                            serde_json::json!({
+                                "filename": "src/main.tsx",
+                                "patches": [{"old_text": "old", "new_text": "new"}],
+                                "intent": "Update main file"
+                            }),
+                        )),
+                    })
+                    .expect("tool call"),
+                    SessionHistoryMessage::from_rig_message(RigMessage::User {
+                        content: OneOrMany::one(UserContent::tool_result_with_call_id(
+                            "tool-1",
+                            "call-1".to_string(),
+                            OneOrMany::one(ToolResultContent::text(
+                                "Toolset error: ToolCallError: ToolCallError: patch 1 old_text was not found in src/main.tsx",
+                            )),
+                        )),
+                    })
+                    .expect("tool result"),
+                    SessionHistoryMessage::assistant("world"),
+                ]),
+            },
+        });
+
+        let rig_history = history_into_rig(app.session_history().to_vec()).expect("rig history");
+        assert_eq!(
+            rig_history,
+            vec![
+                RigMessage::user("hello"),
+                RigMessage::assistant(
+                    "Failed to update `src/main.tsx`: patch 1 old_text was not found in src/main.tsx"
+                ),
+                RigMessage::assistant("world"),
+            ]
+        );
+    }
+
+    #[test]
+    fn finished_stream_drops_todo_traces_from_final_history() {
+        let mut app = new_app(true);
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(2, PendingReplyKind::Normal));
+
+        app.apply(Action::StreamEvent {
+            reply_id: 2,
+            event: StreamEvent::TurnEnded {
+                reason: TurnEndReason::Completed,
+                history: Some(vec![
+                    SessionHistoryMessage::user("hello"),
+                    SessionHistoryMessage::from_rig_message(RigMessage::Assistant {
+                        id: None,
+                        content: OneOrMany::one(AssistantContent::tool_call_with_call_id(
+                            "tool-1",
+                            "call-1".to_string(),
+                            "Todo".to_string(),
+                            serde_json::json!({
+                                "operation": "update",
+                                "tasks": []
+                            }),
+                        )),
+                    })
+                    .expect("tool call"),
+                    SessionHistoryMessage::from_rig_message(RigMessage::User {
+                        content: OneOrMany::one(UserContent::tool_result_with_call_id(
+                            "tool-1",
+                            "call-1".to_string(),
+                            OneOrMany::one(ToolResultContent::text("{\"has_list\":true}")),
+                        )),
+                    })
+                    .expect("tool result"),
+                    SessionHistoryMessage::assistant("world"),
+                ]),
+            },
+        });
+
+        let rig_history = history_into_rig(app.session_history().to_vec()).expect("rig history");
+        assert_eq!(
+            rig_history,
+            vec![RigMessage::user("hello"), RigMessage::assistant("world"),]
+        );
+    }
+
+    #[test]
+    fn finished_stream_keeps_latest_todo_summary_in_final_history() {
+        let mut app = new_app(true);
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(2, PendingReplyKind::Normal));
+        app.state_mut().session.current_todo = Some(TodoSnapshot::new(vec![TodoTask {
+            description: "Inspect workspace".into(),
+            status: TodoStatus::InProgress,
+        }]));
+
+        app.apply(Action::StreamEvent {
+            reply_id: 2,
+            event: StreamEvent::TurnEnded {
+                reason: TurnEndReason::Completed,
+                history: Some(vec![
+                    SessionHistoryMessage::user("hello"),
+                    SessionHistoryMessage::assistant("world"),
+                ]),
+            },
+        });
+
+        let rig_history = history_into_rig(app.session_history().to_vec()).expect("rig history");
+        assert_eq!(
+            rig_history,
+            vec![
+                RigMessage::user("hello"),
+                RigMessage::assistant("world"),
+                RigMessage::assistant("[oat-todo] [in progress] Inspect workspace"),
+            ]
+        );
+    }
+
+    #[test]
     fn finished_stream_rewrites_transformed_prompt_to_visible_prompt() {
         let mut app = new_app(true);
         app.state_mut().session.pending_reply =
@@ -1012,6 +1233,351 @@ mod tests {
     }
 
     #[test]
+    fn failed_stream_preserves_incremental_history_for_continue() {
+        let mut app = new_app(true);
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(2, PendingReplyKind::Normal));
+        app.state_mut().session.active_main_request_seed = Some(MainRequestSeed {
+            history: vec![SessionHistoryMessage::assistant("old")],
+            visible_prompt: "I accept this plan. Begin implementation now.".into(),
+            model_prompt: "You are no longer in Plan Mode. Begin implementation now.".into(),
+            history_model_name: None,
+            transcript_len_before: 0,
+        });
+        crate::app::ops::session::initialize_pending_reply_history(app.state_mut());
+
+        app.apply(Action::StreamEvent {
+            reply_id: 2,
+            event: StreamEvent::TextDelta("implemented part".into()),
+        });
+        app.apply(Action::StreamEvent {
+            reply_id: 2,
+            event: StreamEvent::Failed("boom".into()),
+        });
+
+        let rig_history = history_into_rig(app.session_history().to_vec()).expect("rig history");
+        assert_eq!(rig_history[0], RigMessage::assistant("old"));
+        assert_eq!(
+            rig_history[1],
+            RigMessage::user("I accept this plan. Begin implementation now.")
+        );
+        assert_eq!(rig_history[2], RigMessage::assistant("implemented part"));
+
+        app.composer_mut().insert_str("continue");
+        let effect = app.apply(Action::SubmitMessage);
+        let Some(Effect::PromptModel {
+            prompt, history, ..
+        }) = effect
+        else {
+            panic!("expected prompt model effect");
+        };
+        assert_eq!(prompt, "continue");
+        let rig_history = history_into_rig(history).expect("rig history");
+        assert_eq!(
+            rig_history,
+            vec![
+                RigMessage::assistant("old"),
+                RigMessage::user("I accept this plan. Begin implementation now."),
+                RigMessage::assistant("implemented part"),
+            ]
+        );
+    }
+
+    #[test]
+    fn failed_stream_drops_incomplete_tool_calls_from_incremental_history() {
+        let mut app = new_app(true);
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(2, PendingReplyKind::Normal));
+        app.state_mut().session.active_main_request_seed = Some(MainRequestSeed {
+            history: vec![SessionHistoryMessage::assistant("old")],
+            visible_prompt: "continue".into(),
+            model_prompt: "continue".into(),
+            history_model_name: None,
+            transcript_len_before: 0,
+        });
+        crate::app::ops::session::initialize_pending_reply_history(app.state_mut());
+
+        app.apply(Action::StreamEvent {
+            reply_id: 2,
+            event: StreamEvent::TextDelta("checking files".into()),
+        });
+        app.apply(Action::StreamEvent {
+            reply_id: 2,
+            event: StreamEvent::ToolCall {
+                name: "ReadFile".into(),
+                arguments: r#"{"path":"src/main.rs"}"#.into(),
+            },
+        });
+        app.apply(Action::StreamEvent {
+            reply_id: 2,
+            event: StreamEvent::Failed("boom".into()),
+        });
+
+        let rig_history = history_into_rig(app.session_history().to_vec()).expect("rig history");
+        assert_eq!(rig_history[0], RigMessage::assistant("old"));
+        assert_eq!(rig_history[1], RigMessage::user("continue"));
+        assert_eq!(rig_history[2], RigMessage::assistant("checking files"));
+        assert!(
+            !rig_history
+                .iter()
+                .any(|message| matches!(message, RigMessage::Assistant { content, .. } if matches!(content.first_ref(), AssistantContent::ToolCall(_)))),
+            "failed history should not retain unmatched tool calls"
+        );
+
+        app.composer_mut().insert_str("continue");
+        let effect = app.apply(Action::SubmitMessage);
+        let Some(Effect::PromptModel { history, .. }) = effect else {
+            panic!("expected prompt model effect");
+        };
+        let rig_history = history_into_rig(history).expect("rig history");
+        assert_eq!(
+            rig_history,
+            vec![
+                RigMessage::assistant("old"),
+                RigMessage::user("continue"),
+                RigMessage::assistant("checking files"),
+            ]
+        );
+    }
+
+    #[test]
+    fn todo_snapshots_keep_only_latest_summary_in_incremental_history() {
+        let mut app = new_app(true);
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(2, PendingReplyKind::Normal));
+        app.state_mut().session.active_main_request_seed = Some(MainRequestSeed {
+            history: vec![SessionHistoryMessage::assistant("old")],
+            visible_prompt: "continue".into(),
+            model_prompt: "continue".into(),
+            history_model_name: None,
+            transcript_len_before: 0,
+        });
+        crate::app::ops::session::initialize_pending_reply_history(app.state_mut());
+
+        app.apply(Action::StreamEvent {
+            reply_id: 2,
+            event: StreamEvent::TodoSnapshot(TodoSnapshot::new(vec![TodoTask {
+                description: "Inspect workspace".into(),
+                status: TodoStatus::InProgress,
+            }])),
+        });
+        app.apply(Action::StreamEvent {
+            reply_id: 2,
+            event: StreamEvent::TodoSnapshot(TodoSnapshot::new(vec![TodoTask {
+                description: "Write regression coverage".into(),
+                status: TodoStatus::Todo,
+            }])),
+        });
+
+        let rig_history = history_into_rig(app.session_history().to_vec()).expect("rig history");
+        assert_eq!(
+            rig_history,
+            vec![
+                RigMessage::assistant("old"),
+                RigMessage::user("continue"),
+                RigMessage::assistant("[oat-todo] [todo] Write regression coverage"),
+            ]
+        );
+        assert_eq!(
+            app.current_todo(),
+            Some(&TodoSnapshot::new(vec![TodoTask {
+                description: "Write regression coverage".into(),
+                status: TodoStatus::Todo,
+            }]))
+        );
+    }
+
+    #[test]
+    fn cleared_todo_snapshot_removes_summary_from_incremental_history() {
+        let mut app = new_app(true);
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(2, PendingReplyKind::Normal));
+        app.state_mut().session.active_main_request_seed = Some(MainRequestSeed {
+            history: vec![SessionHistoryMessage::assistant("old")],
+            visible_prompt: "continue".into(),
+            model_prompt: "continue".into(),
+            history_model_name: None,
+            transcript_len_before: 0,
+        });
+        crate::app::ops::session::initialize_pending_reply_history(app.state_mut());
+
+        app.apply(Action::StreamEvent {
+            reply_id: 2,
+            event: StreamEvent::TodoSnapshot(TodoSnapshot::new(vec![TodoTask {
+                description: "Inspect workspace".into(),
+                status: TodoStatus::InProgress,
+            }])),
+        });
+        app.apply(Action::StreamEvent {
+            reply_id: 2,
+            event: StreamEvent::TodoSnapshot(TodoSnapshot::cleared()),
+        });
+
+        let rig_history = history_into_rig(app.session_history().to_vec()).expect("rig history");
+        assert_eq!(
+            rig_history,
+            vec![RigMessage::assistant("old"), RigMessage::user("continue"),]
+        );
+        assert!(app.current_todo().is_none());
+    }
+
+    #[test]
+    fn unmatched_tool_results_are_not_written_to_incremental_history() {
+        let mut app = new_app(true);
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(2, PendingReplyKind::Normal));
+        app.state_mut().session.active_main_request_seed = Some(MainRequestSeed {
+            history: vec![SessionHistoryMessage::assistant("old")],
+            visible_prompt: "continue".into(),
+            model_prompt: "continue".into(),
+            history_model_name: None,
+            transcript_len_before: 0,
+        });
+        crate::app::ops::session::initialize_pending_reply_history(app.state_mut());
+
+        app.apply(Action::StreamEvent {
+            reply_id: 2,
+            event: StreamEvent::ToolResult {
+                name: "ReadFile".into(),
+                output: "1 | hello".into(),
+            },
+        });
+
+        match &app.entries()[1] {
+            TranscriptEntry::ToolResult(tool_result) => {
+                assert_eq!(tool_result.name, "ReadFile");
+                assert_eq!(tool_result.output, "1 | hello");
+            }
+            entry => panic!("expected tool result, got {entry:?}"),
+        }
+
+        let rig_history = history_into_rig(app.session_history().to_vec()).expect("rig history");
+        assert_eq!(
+            rig_history,
+            vec![RigMessage::assistant("old"), RigMessage::user("continue"),]
+        );
+    }
+
+    #[test]
+    fn tool_results_are_preserved_in_incremental_history() {
+        let mut app = new_app(true);
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(2, PendingReplyKind::Normal));
+        app.state_mut().session.active_main_request_seed = Some(MainRequestSeed {
+            history: vec![SessionHistoryMessage::assistant("old")],
+            visible_prompt: "continue".into(),
+            model_prompt: "continue".into(),
+            history_model_name: None,
+            transcript_len_before: 0,
+        });
+        crate::app::ops::session::initialize_pending_reply_history(app.state_mut());
+
+        app.apply(Action::StreamEvent {
+            reply_id: 2,
+            event: StreamEvent::ToolCall {
+                name: "ReadFile".into(),
+                arguments: r#"{"path":"src/main.rs"}"#.into(),
+            },
+        });
+        app.apply(Action::StreamEvent {
+            reply_id: 2,
+            event: StreamEvent::ToolResult {
+                name: "ReadFile".into(),
+                output: "1 | hello".into(),
+            },
+        });
+
+        let rig_history = history_into_rig(app.session_history().to_vec()).expect("rig history");
+        assert_eq!(rig_history[0], RigMessage::assistant("old"));
+        assert_eq!(rig_history[1], RigMessage::user("continue"));
+        assert!(matches!(
+            &rig_history[2],
+            RigMessage::Assistant { content, .. }
+                if matches!(
+                    content.first_ref(),
+                    AssistantContent::ToolCall(tool_call)
+                        if tool_call.function.name == "ReadFile"
+                            && tool_call.function.arguments == serde_json::json!({"path": "src/main.rs"})
+                            && tool_call.call_id.is_some()
+                )
+        ));
+        assert!(matches!(
+            &rig_history[3],
+            RigMessage::User { content }
+                if matches!(
+                    content.first_ref(),
+                    UserContent::ToolResult(tool_result)
+                        if tool_result.id.starts_with("oat_tool_call_")
+                            && tool_result.call_id.is_some()
+                            && matches!(
+                                tool_result.content.first_ref(),
+                                ToolResultContent::Text(text) if text.text == "1 | hello"
+                            )
+                )
+        ));
+    }
+
+    #[test]
+    fn tool_failure_results_can_be_followed_by_more_assistant_text() {
+        let mut app = new_app(true);
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(2, PendingReplyKind::Normal));
+        app.state_mut().session.active_main_request_seed = Some(MainRequestSeed {
+            history: vec![SessionHistoryMessage::assistant("old")],
+            visible_prompt: "continue".into(),
+            model_prompt: "continue".into(),
+            history_model_name: None,
+            transcript_len_before: 0,
+        });
+        crate::app::ops::session::initialize_pending_reply_history(app.state_mut());
+
+        app.apply(Action::StreamEvent {
+            reply_id: 2,
+            event: StreamEvent::ToolCall {
+                name: "RunShellScript".into(),
+                arguments: r#"{"script":"sleep 1","intent":"timeout"}"#.into(),
+            },
+        });
+        app.apply(Action::StreamEvent {
+            reply_id: 2,
+            event: StreamEvent::ToolResult {
+                name: "RunShellScript".into(),
+                output: "ToolCallError: Shell command timed out after 10ms.".into(),
+            },
+        });
+        app.apply(Action::StreamEvent {
+            reply_id: 2,
+            event: StreamEvent::TextDelta("I will write the files directly.".into()),
+        });
+
+        let rig_history = history_into_rig(app.session_history().to_vec()).expect("rig history");
+        assert!(
+            matches!(&rig_history[2], RigMessage::Assistant { content, .. }
+            if matches!(
+                content.first_ref(),
+                AssistantContent::ToolCall(tool_call)
+                    if tool_call.function.name == "RunShellScript"
+                        && tool_call.call_id.is_some()
+            ))
+        );
+        assert!(matches!(&rig_history[3], RigMessage::User { content }
+        if matches!(
+            content.first_ref(),
+            UserContent::ToolResult(tool_result)
+                if tool_result.call_id.is_some()
+                    && matches!(
+                        tool_result.content.first_ref(),
+                        ToolResultContent::Text(text)
+                            if text.text == "ToolCallError: Shell command timed out after 10ms."
+                    )
+        )));
+        assert_eq!(
+            rig_history[4],
+            RigMessage::assistant("I will write the files directly.")
+        );
+    }
+
+    #[test]
     fn session_title_event_updates_title_without_active_reply() {
         let mut app = new_app(true);
         app.state_mut().session.pending_session_title_reply_id = Some(7);
@@ -1095,5 +1661,68 @@ mod tests {
         assert_eq!(message.style, MessageStyle::Error);
         assert_eq!(message.tag.as_deref(), Some("btw 1"));
         assert_eq!(message.text, "Request failed: boom");
+    }
+
+    #[test]
+    fn hosted_tool_events_update_status_and_activity() {
+        let mut app = new_app(true);
+        app.state_mut().session.pending_reply =
+            Some(PendingReply::new(11, PendingReplyKind::Normal));
+
+        app.apply(Action::StreamEvent {
+            reply_id: 11,
+            event: StreamEvent::HostedToolStarted {
+                id: "ws_1".into(),
+                kind: HostedToolKind::Search,
+                detail: "latest rust news".into(),
+            },
+        });
+
+        assert_eq!(
+            app.state()
+                .session
+                .pending_reply
+                .as_ref()
+                .map(|pending| pending.activity),
+            Some(PendingReplyActivity::SearchingWeb)
+        );
+        assert!(matches!(
+            app.entries().last(),
+            Some(TranscriptEntry::HostedToolStatus(status))
+                if status.id == "ws_1"
+                    && status.state == ActivityDisplayState::Running
+                    && status.detail == "latest rust news"
+        ));
+
+        app.apply(Action::StreamEvent {
+            reply_id: 11,
+            event: StreamEvent::HostedToolCompleted {
+                id: "ws_1".into(),
+                kind: HostedToolKind::Search,
+                detail: "latest rust news".into(),
+            },
+        });
+
+        assert_eq!(
+            app.state()
+                .session
+                .pending_reply
+                .as_ref()
+                .map(|pending| pending.activity),
+            Some(PendingReplyActivity::Responding)
+        );
+        assert_eq!(
+            app.entries()
+                .iter()
+                .filter(|entry| matches!(entry, TranscriptEntry::HostedToolStatus(_)))
+                .count(),
+            1
+        );
+        assert!(matches!(
+            app.entries().last(),
+            Some(TranscriptEntry::HostedToolStatus(status))
+                if status.id == "ws_1"
+                    && status.state == ActivityDisplayState::Completed
+        ));
     }
 }

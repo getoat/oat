@@ -9,6 +9,14 @@ api_version = "2025-01-01-preview"
 # Optional. Required only when selecting a Chutes-hosted model.
 api_key = "paste-your-chutes-api-key-here"
 
+[ollama]
+# Optional. Required only when selecting an Ollama Cloud model.
+api_key = "paste-your-ollama-api-key-here"
+
+[opencode]
+# Optional. Required only when selecting an OpenCode Go model.
+api_key = "paste-your-opencode-api-key-here"
+
 [openrouter]
 # Optional. Required only when selecting an OpenRouter-hosted model.
 api_key = "paste-your-openrouter-api-key-here"
@@ -40,7 +48,7 @@ model_name = "gpt-5.4-mini"
 # none, minimal, low, medium, high, xhigh
 # kimi-k2.5: on, off
 # OpenRouter reasoning support is also model-specific
-# Chutes models in this registry: default
+# Chutes, Ollama Cloud, and OpenCode Go models in this registry: default
 reasoning = "medium"
 
 [ui]
@@ -70,6 +78,14 @@ agents = []
 #
 # [[planning.agents]]
 # model_name = "zai-org/GLM-5-TEE"
+# reasoning = "default"
+#
+# [[planning.agents]]
+# model_name = "glm-5.1:cloud"
+# reasoning = "default"
+#
+# [[planning.agents]]
+# model_name = "opencode-go/glm-5.1"
 # reasoning = "default"
 #
 # [[planning.agents]]
@@ -130,6 +146,18 @@ min_active_confidence = 85
 # Run extraction asynchronously after a completed main-agent turn.
 run_in_background = true
 
+[history]
+# Controls how much prior tool traffic is preserved in model-facing history.
+# "full" keeps raw history.
+# "turn_summary" keeps raw history during a turn and summarizes older tool
+# traffic when the turn finalizes.
+# "step_summary" keeps the active step raw and summarizes older completed steps
+# during long multi-step turns.
+mode = "step_summary"
+
+# Number of most-recent completed steps to keep raw in step_summary mode.
+retained_steps = 1
+
 [safety]
 # Optional dedicated model used to classify shell commands as low, medium, or
 # high risk before they can run. If omitted in an existing config, oat will
@@ -140,6 +168,13 @@ reasoning = "medium"
 [tools]
 # Tool outputs are truncated after approximately this many tokens.
 max_output_tokens = 10000
+
+# Hosted web search mode for Responses-capable models.
+# "disabled" omits the hosted search tool entirely.
+# "cached" keeps provider-side web search but disables live external fetches.
+# "live" allows live external web fetches.
+[tools.web_search]
+mode = "live"
 
 # Optional allowlist patterns, relative to the workspace root, for paths that
 # should remain searchable even when they are hidden or otherwise excluded by

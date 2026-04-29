@@ -14,7 +14,8 @@ use super::{
     AskUserController, InteractionResolveResult, LlmService, ResumeOverride, ResumeRequest,
     WriteApprovalController,
     agent_builder::{
-        http_headers_for_model, mode_preamble, openai_base_url_for_model, reasoning_params,
+        RequestFeatures, http_headers_for_model, mode_preamble, openai_base_url_for_model,
+        reasoning_params, request_params,
     },
     compaction::{
         COMPACTION_SUMMARY_PREFIX, message_contains_tool_state, rebuild_compacted_history,
@@ -36,11 +37,13 @@ use crate::{
     },
     completion_request::CompletionRequestSnapshot,
     config::{
-        AppConfig, AzureConfig, CodexAuthMode, CodexConfig, KimiThinkingMode, MemoryConfig,
-        ModelSelectionConfig, OpenRouterConfig, ReasoningEffort, ReasoningSetting, SafetyConfig,
-        SubagentConfig, ToolConfig, UiConfig,
+        AppConfig, AzureConfig, CodexAuthMode, CodexConfig, HistoryConfig, KimiThinkingMode,
+        MemoryConfig, ModelSelectionConfig, OllamaConfig, OpenRouterConfig, OpencodeConfig,
+        ReasoningEffort, ReasoningSetting, SafetyConfig, SubagentConfig, ToolConfig, UiConfig,
+        WebSearchMode,
     },
     features::planning::PlanningConfig,
+    web::WebService,
 };
 
 fn sample_config() -> AppConfig {
@@ -52,6 +55,8 @@ fn sample_config() -> AppConfig {
         }),
         chutes: None,
         codex: None,
+        ollama: None,
+        opencode: None,
         openrouter: None,
         model: ModelSelectionConfig {
             model_name: "gpt-5.4-mini".into(),
@@ -69,8 +74,13 @@ fn sample_config() -> AppConfig {
         },
         subagents: SubagentConfig { max_concurrent: 4 },
         planning: PlanningConfig::default(),
+        history: HistoryConfig::default(),
         tools: ToolConfig::default(),
     }
+}
+
+fn test_web_service() -> WebService {
+    WebService::new(sample_config().tools.max_output_tokens).expect("web service")
 }
 
 #[test]
@@ -139,6 +149,107 @@ fn codex_reasoning_params_use_responses_shape() {
             },
             "store": false
         })
+    );
+}
+
+#[test]
+fn responses_models_add_live_hosted_web_search_when_enabled() {
+    let params = request_params(
+        "gpt-5.4-mini",
+        ReasoningSetting::Gpt(ReasoningEffort::Minimal),
+        RequestFeatures {
+            web_search: Some(WebSearchMode::Live),
+        },
+    );
+
+    assert_eq!(params["reasoning_effort"], "minimal");
+    assert_eq!(params["tools"][0]["type"], "web_search");
+    assert_eq!(params["tools"][0]["external_web_access"], true);
+}
+
+#[test]
+fn responses_models_add_cached_hosted_web_search_when_enabled() {
+    let params = request_params(
+        "gpt-5.4-mini",
+        ReasoningSetting::Gpt(ReasoningEffort::Minimal),
+        RequestFeatures {
+            web_search: Some(WebSearchMode::Cached),
+        },
+    );
+
+    assert_eq!(params["reasoning_effort"], "minimal");
+    assert_eq!(params["tools"][0]["type"], "web_search");
+    assert_eq!(params["tools"][0]["external_web_access"], false);
+}
+
+#[test]
+fn request_params_skip_hosted_search_when_feature_disabled() {
+    let params = request_params(
+        "gpt-5.4-mini",
+        ReasoningSetting::Gpt(ReasoningEffort::Minimal),
+        RequestFeatures::default(),
+    );
+
+    assert!(params.get("tools").is_none());
+}
+
+#[test]
+fn request_params_skip_hosted_search_for_non_responses_models() {
+    let params = request_params(
+        "gpt-5-mini",
+        ReasoningSetting::Default,
+        RequestFeatures {
+            web_search: Some(WebSearchMode::Live),
+        },
+    );
+
+    assert!(params.get("tools").is_none());
+}
+
+#[test]
+fn ollama_base_url_targets_ollama_cloud() {
+    let mut config = sample_config();
+    config.ollama = Some(OllamaConfig {
+        api_key: "ollama-secret".into(),
+    });
+
+    assert_eq!(
+        openai_base_url_for_model(&config, "glm-5.1:cloud").expect("base url"),
+        "https://ollama.com/v1"
+    );
+
+    let headers = http_headers_for_model(&config, "glm-5.1:cloud").expect("headers");
+    assert!(headers.get("HTTP-Referer").is_none());
+    assert!(headers.get("X-OpenRouter-Title").is_none());
+}
+
+#[test]
+fn opencode_openai_compatible_models_use_go_v1_base_url() {
+    let mut config = sample_config();
+    config.opencode = Some(OpencodeConfig {
+        api_key: "opencode-secret".into(),
+    });
+
+    assert_eq!(
+        openai_base_url_for_model(&config, "opencode-go/glm-5.1").expect("base url"),
+        "https://opencode.ai/zen/go/v1"
+    );
+
+    let headers = http_headers_for_model(&config, "opencode-go/glm-5.1").expect("headers");
+    assert!(headers.get("HTTP-Referer").is_none());
+    assert!(headers.get("X-OpenRouter-Title").is_none());
+}
+
+#[test]
+fn opencode_anthropic_models_use_go_base_url() {
+    let mut config = sample_config();
+    config.opencode = Some(OpencodeConfig {
+        api_key: "opencode-secret".into(),
+    });
+
+    assert_eq!(
+        openai_base_url_for_model(&config, "opencode-go/minimax-m2.7").expect("base url"),
+        "https://opencode.ai/zen/go"
     );
 }
 
@@ -473,6 +584,10 @@ fn read_only_mode_preamble_uses_shared_prompt_and_read_only_suffix() {
     assert!(preamble.contains("You are oat: an opinionated agent thing."));
     assert!(preamble.contains("You are a provider-agnostic coding agent."));
     assert!(preamble.contains("You have three modes: read-only, write, and plan mode."));
+    assert!(preamble.contains(
+        "When you need to fetch or retrieve a web page, use the WebRun tool instead of hosted `web_search`."
+    ));
+    assert!(preamble.contains("Use `open` for a known URL"));
     assert!(
         preamble
             .contains("Intermediary updates are provided to the user via the `Commentary` tool.")
@@ -494,6 +609,7 @@ async fn read_write_mode_registers_mutation_tools() {
         None,
         None,
         None,
+        test_web_service(),
     )
     .expect("service builds");
 
@@ -546,6 +662,7 @@ async fn read_only_mode_omits_mutation_tools() {
         None,
         None,
         None,
+        test_web_service(),
     )
     .expect("service builds");
 
@@ -790,6 +907,7 @@ async fn write_mode_preamble_is_the_same_for_both_approval_modes() {
         None,
         None,
         None,
+        test_web_service(),
     )
     .expect("manual service builds")
     .preamble;
@@ -802,10 +920,15 @@ async fn write_mode_preamble_is_the_same_for_both_approval_modes() {
         None,
         None,
         None,
+        test_web_service(),
     )
     .expect("disabled service builds")
     .preamble;
 
+    assert!(manual.contains(
+        "When you need to fetch or retrieve a web page, use the WebRun tool instead of hosted `web_search`."
+    ));
+    assert!(manual.contains("Use `open` for a known URL"));
     assert_eq!(manual, disabled);
 }
 
@@ -820,6 +943,7 @@ async fn todo_tool_can_be_disabled_independently_of_ask_user() {
         None,
         None,
         None,
+        test_web_service(),
     )
     .expect("service builds");
 

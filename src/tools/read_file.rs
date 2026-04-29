@@ -7,13 +7,14 @@ use rig::{completion::ToolDefinition, tool::Tool};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use super::common::{ToolExecError, display_path, resolve_path};
+use super::common::{ToolExecError, display_path, is_unsafe_system_path, resolve_path_with_access};
 
 pub(crate) const MAX_READFILE_LIMIT: usize = 300;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ReadFileTool {
     root: PathBuf,
+    allow_full_system_access: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -24,8 +25,11 @@ pub struct ReadFileArgs {
 }
 
 impl ReadFileTool {
-    pub fn new(root: PathBuf) -> Self {
-        Self { root }
+    pub fn new_with_access(root: PathBuf, allow_full_system_access: bool) -> Self {
+        Self {
+            root,
+            allow_full_system_access,
+        }
     }
 }
 
@@ -63,15 +67,32 @@ impl Tool for ReadFileTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        read_file_lines(&self.root, &args.filename, args.offset, args.limit)
+        read_file_lines_with_access(
+            &self.root,
+            &args.filename,
+            args.offset,
+            args.limit,
+            self.allow_full_system_access,
+        )
     }
 }
 
+#[cfg(test)]
 pub(crate) fn read_file_lines(
     root: &Path,
     filename: &str,
     offset: usize,
     limit: usize,
+) -> Result<String, ToolExecError> {
+    read_file_lines_with_access(root, filename, offset, limit, false)
+}
+
+pub(crate) fn read_file_lines_with_access(
+    root: &Path,
+    filename: &str,
+    offset: usize,
+    limit: usize,
+    allow_full_system_access: bool,
 ) -> Result<String, ToolExecError> {
     if limit == 0 || limit > MAX_READFILE_LIMIT {
         return Err(ToolExecError::new(format!(
@@ -79,7 +100,12 @@ pub(crate) fn read_file_lines(
         )));
     }
 
-    let path = resolve_path(root, filename)?;
+    let path = resolve_path_with_access(root, filename, allow_full_system_access)?;
+    if is_unsafe_system_path(&path) {
+        return Err(ToolExecError::new(format!(
+            "{filename} points to an unsupported system path"
+        )));
+    }
     let metadata = std::fs::metadata(&path)?;
     if !metadata.is_file() {
         return Err(ToolExecError::new(format!("{filename} is not a file")));
@@ -129,5 +155,13 @@ mod tests {
                 .to_string()
                 .contains("limit must be between 1 and 300")
         );
+    }
+
+    #[test]
+    fn read_file_rejects_proc_like_system_paths() {
+        let tree = sample_tree();
+        let error = read_file_lines_with_access(&tree.root, "/proc/version", 0, 1, true)
+            .expect_err("proc-like path must fail");
+        assert!(error.to_string().contains("unsupported system path"));
     }
 }

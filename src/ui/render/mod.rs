@@ -5,6 +5,7 @@ mod input;
 mod overlay;
 mod planning;
 mod queue;
+mod stats;
 
 use ratatui::{
     Frame,
@@ -20,14 +21,41 @@ use input::render_input;
 use overlay::render_overlay;
 use planning::pending_plan_review_height;
 use queue::{queued_message_strip_height, render_queued_message_strip};
+use stats::{render_stats_footer, render_stats_screen};
 
 use super::{history::render_history, markdown::loading_frame, theme::accent_color};
 
 pub fn render(frame: &mut Frame, app: &mut App) {
     let screen = frame.area();
-    ops::composer::set_composer_wrap_width(app.state_mut(), composer_content_width(screen.width));
     let accent = accent_color(query::mode(app.state()), query::plan_active(app.state()));
     let show_top_status_bar = !query::shows_startup_banner_state(app.state());
+    if matches!(
+        query::input_context(app.state()),
+        crate::app::InputContext::Stats
+    ) {
+        let mut constraints = Vec::new();
+        if show_top_status_bar {
+            constraints.push(Constraint::Length(1));
+        }
+        constraints.push(Constraint::Min(1));
+        constraints.push(Constraint::Length(1));
+
+        let layout = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(constraints)
+            .split(screen);
+
+        let mut section = 0;
+        if show_top_status_bar {
+            render_top_status_bar(frame, app, layout[section], accent);
+            section += 1;
+        }
+        render_stats_screen(frame, app, layout[section], accent);
+        render_stats_footer(frame, layout[section + 1], accent);
+        return;
+    }
+
+    ops::composer::set_composer_wrap_width(app.state_mut(), composer_content_width(screen.width));
     let input_height = if let Some(pending) = query::pending_write_approval(app.state()) {
         pending_write_approval_height(pending, screen.width)
     } else if query::has_pending_shell_approval(app.state()) {

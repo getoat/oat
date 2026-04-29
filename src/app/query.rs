@@ -34,6 +34,7 @@ pub(crate) enum InputContext {
         editing: bool,
     },
     PlanReview,
+    Stats,
     Picker,
     CommandPalette,
     Composer,
@@ -224,8 +225,12 @@ pub fn active_background_terminal_count(state: &AppState) -> usize {
     state.session.active_background_terminal_count
 }
 
-pub fn transcript_revision(state: &AppState) -> u64 {
-    state.session.transcript_revision
+pub fn transcript_structure_revision(state: &AppState) -> u64 {
+    state.session.transcript_structure_revision
+}
+
+pub fn transcript_tail_revision(state: &AppState) -> u64 {
+    state.session.transcript_tail_revision
 }
 
 pub fn next_request_context_percent_state(state: &AppState) -> u64 {
@@ -242,6 +247,11 @@ pub fn history_render_cache(state: &AppState) -> Option<&HistoryRenderCache> {
 
 pub fn selection_picker(state: &AppState) -> Option<&SelectionPicker> {
     state.ui.picker.as_ref()
+}
+
+#[cfg(test)]
+pub fn stats_screen_visible(state: &AppState) -> bool {
+    state.ui.stats_screen.is_some()
 }
 
 #[cfg(test)]
@@ -391,6 +401,8 @@ pub(crate) fn input_context_parts(session: &SessionState, ui: &UiState) -> Input
         && session.planning.review == Some(PlanReviewState::Selection)
     {
         InputContext::PlanReview
+    } else if ui.stats_screen.is_some() {
+        InputContext::Stats
     } else if ui.picker.is_some() {
         InputContext::Picker
     } else {

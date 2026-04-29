@@ -7,34 +7,40 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use rig::{completion::Message as RigMessage, providers::openai};
+use rig::{
+    completion::Message as RigMessage,
+    providers::{anthropic, openai},
+};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::{
     agent::AgentContext,
     app::{
-        AccessMode, PendingReplyReplaySeed, SessionHistoryMessage, ShellApprovalDecision,
-        SideChannelEvent, TurnEndReason, WriteApprovalDecision,
+        AccessMode, HostedToolKind, PendingReplyReplaySeed, SessionHistoryMessage,
+        ShellApprovalDecision, SideChannelEvent, TurnEndReason, WriteApprovalDecision,
     },
     ask_user::AskUserResponse,
     background_terminals::BackgroundTerminalManager,
     completion_request::CompletionRequestSnapshot,
-    config::{AppConfig, ReasoningSetting},
+    config::{AppConfig, ReasoningSetting, WebSearchMode},
     debug_log::log_debug,
+    history_reduction::reduce_history,
     memory::MemoryService,
     model_registry,
     runtime::RuntimeEvent,
     stats::StatsHook,
     subagents::SubagentManager,
     tools::{ToolContext, tool_names_for_context},
+    web::WebService,
 };
 
 use super::{
-    CodexResponsesClient, CompletionCapture, EventCallback, HistoryCompactionResult,
-    InteractionResolveResult, PromptRunResult, ResumeOverride, StreamEvent,
+    CompletionCapture, EventCallback, HistoryCompactionResult, InteractionResolveResult,
+    PromptRunResult, ResponsesClient, ResponsesHostedToolEvent, ResponsesHostedToolKind,
+    ResponsesSearchObserverGuard, ResumeOverride, StreamEvent,
     agent_builder::{
-        build_agent, http_headers_for_model, mode_preamble, openai_base_url_for_model,
-        run_plain_prompt_with_hook,
+        RequestFeatures, build_agent, build_anthropic_agent, http_headers_for_model, mode_preamble,
+        openai_base_url_for_model, run_plain_prompt_with_hook,
     },
     compaction::{
         COMPACTION_NOTICE, COMPACTION_PROMPT, compaction_model_for_pre_turn,
@@ -48,7 +54,10 @@ use super::{
     streaming::{PromptStepOutcome, run_prompt_step},
 };
 
-const MAX_TOOL_STEPS_PER_TURN: usize = 64;
+// rig-core's multi_turn API requires a usize bound and internally checks
+// `max_turns + 1`, so `usize::MAX` would overflow. Use the largest safe value
+// to avoid imposing an application-level turn cap.
+const UNBOUNDED_TOOL_STEPS_PER_TURN: usize = usize::MAX - 1;
 const SESSION_TITLE_PROMPT_PREFIX: &str = concat!(
     "Write a concise title for this session based on the user's first request.\n",
     "Respond with only the title.\n",
@@ -61,34 +70,49 @@ static NEXT_INTERACTION_SCOPE_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone)]
 enum AgentVariant {
+    Anthropic(super::AnthropicCompletionsAgent),
     Completions(super::OpenAiCompletionsAgent),
-    Responses(super::OpenAiResponsesAgent),
+    Responses(super::ResponsesAgent),
 }
 
 #[derive(Clone)]
 enum ClientVariant {
+    Anthropic(anthropic::Client),
     Completions(openai::CompletionsClient),
-    Responses(CodexResponsesClient),
+    Responses(ResponsesClient),
 }
 
-fn is_codex_model(model_name: &str) -> bool {
-    matches!(
-        model_registry::find_model(model_name).map(|model| model.provider),
-        Some(model_registry::ModelProvider::Codex)
-    )
+fn model_api_family(model_name: &str) -> Result<model_registry::ModelApiFamily> {
+    model_registry::api_family_for_model(model_name).ok_or_else(|| {
+        anyhow::anyhow!(model_registry::unknown_model_message(
+            "model.model_name",
+            model_name,
+        ))
+    })
 }
 
-fn codex_http_client() -> crate::codex::CodexHttpClient {
-    crate::codex::CodexHttpClient::new(rig::http_client::ReqwestClient::new())
+fn responses_http_client() -> crate::codex::ResponsesHttpClient {
+    crate::codex::ResponsesHttpClient::new(rig::http_client::ReqwestClient::new())
 }
 
-fn build_responses_client(config: &AppConfig, model_name: &str) -> Result<CodexResponsesClient> {
+fn build_responses_client(
+    config: &AppConfig,
+    model_name: &str,
+    interaction_scope: Option<&str>,
+) -> Result<ResponsesClient> {
     let provider_config = config.provider_config_for_model(model_name)?;
+    let mut headers = http_headers_for_model(config, model_name)?;
+    if let Some(scope) = interaction_scope {
+        headers.insert(
+            super::OAT_INTERACTION_SCOPE_HEADER,
+            rig::http_client::HeaderValue::from_str(scope)?,
+        );
+    }
     openai::Client::builder()
-        .http_client(codex_http_client())
+        .http_client(responses_http_client())
         .api_key(provider_config.auth_token().unwrap_or_default())
         .base_url(openai_base_url_for_model(config, model_name)?)
-        .http_headers(http_headers_for_model(config, model_name)?)
+        .http_headers(headers)
         .build()
         .context("failed to build OpenAI Responses client")
 }
@@ -106,51 +130,153 @@ fn build_completions_client(
         .context("failed to build OpenAI-compatible client")
 }
 
+fn build_anthropic_client(config: &AppConfig, model_name: &str) -> Result<anthropic::Client> {
+    let provider_config = config.provider_config_for_model(model_name)?;
+    anthropic::Client::builder()
+        .api_key(provider_config.auth_token().unwrap_or_default())
+        .base_url(openai_base_url_for_model(config, model_name)?)
+        .http_headers(http_headers_for_model(config, model_name)?)
+        .build()
+        .context("failed to build Anthropic-compatible client")
+}
+
+fn build_client_variant(
+    config: &AppConfig,
+    model_name: &str,
+    interaction_scope: Option<&str>,
+) -> Result<ClientVariant> {
+    match model_api_family(model_name)? {
+        model_registry::ModelApiFamily::Anthropic => Ok(ClientVariant::Anthropic(
+            build_anthropic_client(config, model_name)?,
+        )),
+        model_registry::ModelApiFamily::Completions => Ok(ClientVariant::Completions(
+            build_completions_client(config, model_name)?,
+        )),
+        model_registry::ModelApiFamily::Responses => Ok(ClientVariant::Responses(
+            build_responses_client(config, model_name, interaction_scope)?,
+        )),
+    }
+}
+
+fn build_agent_variant(
+    client: &ClientVariant,
+    model_name: &str,
+    preamble: &str,
+    reasoning: ReasoningSetting,
+    features: RequestFeatures,
+    tool_context: Option<ToolContext>,
+) -> AgentVariant {
+    match client {
+        ClientVariant::Anthropic(client) => AgentVariant::Anthropic(build_anthropic_agent(
+            client,
+            model_name,
+            preamble,
+            reasoning,
+            features,
+            tool_context,
+        )),
+        ClientVariant::Completions(client) => AgentVariant::Completions(build_agent(
+            client,
+            model_name,
+            preamble,
+            reasoning,
+            features,
+            tool_context,
+        )),
+        ClientVariant::Responses(client) => AgentVariant::Responses(build_agent(
+            client,
+            model_name,
+            preamble,
+            reasoning,
+            features,
+            tool_context,
+        )),
+    }
+}
+
 fn build_client_and_agent(
     config: &AppConfig,
     model_name: &str,
     preamble: &str,
     reasoning: ReasoningSetting,
+    interactive_features: RequestFeatures,
+    interaction_scope: &str,
     tool_context: ToolContext,
 ) -> Result<(ClientVariant, AgentVariant)> {
-    if is_codex_model(model_name) {
-        let client = build_responses_client(config, model_name)?;
-        let agent = build_agent(&client, model_name, preamble, reasoning, Some(tool_context));
-        Ok((
-            ClientVariant::Responses(client),
-            AgentVariant::Responses(agent),
-        ))
-    } else {
-        let client = build_completions_client(config, model_name)?;
-        let agent = build_agent(&client, model_name, preamble, reasoning, Some(tool_context));
-        Ok((
-            ClientVariant::Completions(client),
-            AgentVariant::Completions(agent),
-        ))
-    }
+    let client = build_client_variant(config, model_name, Some(interaction_scope))?;
+    let agent = build_agent_variant(
+        &client,
+        model_name,
+        preamble,
+        reasoning,
+        interactive_features,
+        Some(tool_context),
+    );
+    Ok((client, agent))
 }
 
 fn build_safety_client(config: &AppConfig) -> Result<super::safety::SafetyClient> {
     let model_name = &config.safety.model_name;
-    if is_codex_model(model_name) {
-        Ok(super::safety::SafetyClient::Responses(
-            build_responses_client(config, model_name)
-                .context("failed to build safety OpenAI Responses client")?,
-        ))
-    } else {
-        Ok(super::safety::SafetyClient::Completions(
-            build_completions_client(config, model_name)
-                .context("failed to build safety OpenAI-compatible client")?,
-        ))
+    match build_client_variant(config, model_name, None)? {
+        ClientVariant::Anthropic(client) => Ok(super::safety::SafetyClient::Anthropic(client)),
+        ClientVariant::Completions(client) => Ok(super::safety::SafetyClient::Completions(client)),
+        ClientVariant::Responses(client) => Ok(super::safety::SafetyClient::Responses(client)),
+    }
+}
+
+fn interactive_request_features(config: &AppConfig, model_name: &str) -> RequestFeatures {
+    RequestFeatures {
+        web_search: model_registry::supports_search(model_name)
+            .then_some(config.tools.web_search.mode)
+            .and_then(|mode| match mode {
+                WebSearchMode::Disabled => None,
+                WebSearchMode::Cached | WebSearchMode::Live => Some(mode),
+            }),
+    }
+}
+
+async fn run_plain_prompt_with_fresh_client(
+    config: &AppConfig,
+    model_name: &str,
+    preamble: &str,
+    reasoning: ReasoningSetting,
+    prompt: String,
+    history: Vec<RigMessage>,
+    stats_hook: StatsHook,
+) -> Result<String> {
+    let client = build_client_variant(config, model_name, None)?;
+    let agent = build_agent_variant(
+        &client,
+        model_name,
+        preamble,
+        reasoning,
+        RequestFeatures::default(),
+        None,
+    );
+
+    match agent {
+        AgentVariant::Anthropic(agent) => {
+            run_plain_prompt_with_hook(&agent, prompt.clone(), history.clone(), stats_hook.clone())
+                .await
+        }
+        AgentVariant::Completions(agent) => {
+            run_plain_prompt_with_hook(&agent, prompt.clone(), history.clone(), stats_hook.clone())
+                .await
+        }
+        AgentVariant::Responses(agent) => {
+            run_plain_prompt_with_hook(&agent, prompt, history, stats_hook).await
+        }
     }
 }
 
 #[derive(Clone)]
 pub struct LlmService {
+    config: AppConfig,
     agent: AgentVariant,
     client: ClientVariant,
     model_name: String,
     reasoning: ReasoningSetting,
+    interactive_features: RequestFeatures,
     pub(crate) access_mode: AccessMode,
     role: crate::agent::AgentRole,
     pub(crate) approvals: WriteApprovalController,
@@ -158,6 +284,7 @@ pub struct LlmService {
     pub(crate) safety: SafetyClassifier,
     pub(crate) ask_user: Option<AskUserController>,
     todo_available: bool,
+    web: WebService,
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) tool_names: Vec<String>,
     #[cfg_attr(not(test), allow(dead_code))]
@@ -176,6 +303,7 @@ impl LlmService {
         memory: Option<MemoryService>,
         subagents: Option<SubagentManager>,
         terminals: Option<BackgroundTerminalManager>,
+        web: WebService,
     ) -> Result<Self> {
         let shell_approvals = ShellApprovalController::new(approvals.mode());
         Self::from_config_with_controllers(
@@ -188,6 +316,7 @@ impl LlmService {
             memory,
             subagents,
             terminals,
+            web,
         )
     }
 
@@ -201,16 +330,24 @@ impl LlmService {
         memory: Option<MemoryService>,
         subagents: Option<SubagentManager>,
         terminals: Option<BackgroundTerminalManager>,
+        web: WebService,
     ) -> Result<Self> {
         let workspace_root = env::current_dir().context("failed to determine workspace root")?;
         let model_name = context
             .model_name_override
             .clone()
             .unwrap_or_else(|| config.model.model_name.clone());
+        let interaction_scope = next_interaction_scope_id();
+        let interactive_features = if context.role == crate::agent::AgentRole::Main {
+            interactive_request_features(config, &model_name)
+        } else {
+            RequestFeatures::default()
+        };
 
         let preamble = mode_preamble(&context);
         let tool_context = ToolContext {
             root: workspace_root,
+            allow_full_system_access: context.allow_full_system_access,
             agent: context.clone(),
             config: config.clone(),
             write_approvals: approvals.clone(),
@@ -220,6 +357,7 @@ impl LlmService {
             todo_available,
             subagents,
             terminals,
+            web: web.clone(),
         };
         let tool_names = tool_names_for_context(&tool_context);
         let (client, agent) = build_client_and_agent(
@@ -227,16 +365,20 @@ impl LlmService {
             &model_name,
             &preamble,
             config.model.reasoning,
+            interactive_features,
+            &interaction_scope,
             tool_context,
         )?;
         let safety_client = build_safety_client(config)?;
         let safety = SafetyClassifier::from_client(&safety_client, config);
 
         Ok(Self {
+            config: config.clone(),
             agent,
             client,
             model_name,
             reasoning: config.model.reasoning,
+            interactive_features,
             access_mode: context.access_mode,
             role: context.role,
             approvals,
@@ -244,9 +386,10 @@ impl LlmService {
             safety,
             ask_user,
             todo_available,
+            web,
             tool_names,
             preamble,
-            interaction_scope: next_interaction_scope_id(),
+            interaction_scope,
             turn_interrupt_request: super::TurnInterruptController::default(),
         })
     }
@@ -259,6 +402,15 @@ impl LlmService {
         self.shell_approvals.clone()
     }
 
+    pub(crate) fn model_name(&self) -> &str {
+        &self.model_name
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tool_names(&self) -> &[String] {
+        &self.tool_names
+    }
+
     pub(crate) fn interaction_scope(&self) -> &str {
         &self.interaction_scope
     }
@@ -269,6 +421,29 @@ impl LlmService {
 
     pub fn todo_available(&self) -> bool {
         self.todo_available
+    }
+
+    pub(crate) fn web_service(&self) -> WebService {
+        self.web.clone()
+    }
+
+    async fn run_plain_prompt_for_model(
+        &self,
+        model_name: &str,
+        prompt: String,
+        history: Vec<RigMessage>,
+        stats_hook: StatsHook,
+    ) -> Result<String> {
+        run_plain_prompt_with_fresh_client(
+            &self.config,
+            model_name,
+            &self.preamble,
+            self.reasoning,
+            prompt,
+            history,
+            stats_hook,
+        )
+        .await
     }
 
     pub fn resolve_write_approval(
@@ -332,6 +507,50 @@ impl LlmService {
         self.turn_interrupt_request.take()
     }
 
+    fn search_observer_guard(
+        &self,
+        reply_id: u64,
+        emit: EventCallback,
+    ) -> Option<ResponsesSearchObserverGuard> {
+        if self.interactive_features.web_search.is_none()
+            || !matches!(self.client, ClientVariant::Responses(_))
+        {
+            return None;
+        }
+
+        let scope = self.interaction_scope.clone();
+        Some(ResponsesSearchObserverGuard::register(
+            scope,
+            Arc::new(move |event| {
+                let event = match event {
+                    ResponsesHostedToolEvent::WebSearchStarted { id, kind, detail } => {
+                        StreamEvent::HostedToolStarted {
+                            id,
+                            kind: match kind {
+                                ResponsesHostedToolKind::Search => HostedToolKind::Search,
+                                ResponsesHostedToolKind::OpenPage => HostedToolKind::OpenPage,
+                                ResponsesHostedToolKind::FindInPage => HostedToolKind::FindInPage,
+                            },
+                            detail,
+                        }
+                    }
+                    ResponsesHostedToolEvent::WebSearchCompleted { id, kind, detail } => {
+                        StreamEvent::HostedToolCompleted {
+                            id,
+                            kind: match kind {
+                                ResponsesHostedToolKind::Search => HostedToolKind::Search,
+                                ResponsesHostedToolKind::OpenPage => HostedToolKind::OpenPage,
+                                ResponsesHostedToolKind::FindInPage => HostedToolKind::FindInPage,
+                            },
+                            detail,
+                        }
+                    }
+                };
+                let _ = emit(reply_id, event);
+            }),
+        ))
+    }
+
     pub async fn stream_prompt(
         &self,
         reply_id: u64,
@@ -351,6 +570,8 @@ impl LlmService {
                 .send(RuntimeEvent::MainReply { reply_id, event })
                 .is_ok()
         });
+        let capture = CompletionCapture::new();
+        let _search_observer = self.search_observer_guard(reply_id, emit.clone());
         if let Err(error) = self
             .run_prompt(
                 reply_id,
@@ -358,7 +579,7 @@ impl LlmService {
                 history,
                 history_model_name,
                 stats_hook,
-                None,
+                Some(capture),
                 emit.clone(),
             )
             .await
@@ -401,40 +622,14 @@ impl LlmService {
         stats_hook: StatsHook,
     ) -> Result<Option<String>> {
         let prompt = format!("{SESSION_TITLE_PROMPT_PREFIX}{}", user_request.trim());
-        let raw = match &self.client {
-            ClientVariant::Completions(client) => {
-                let agent = build_agent(
-                    client,
-                    &self.model_name,
-                    &self.preamble,
-                    self.reasoning,
-                    None,
-                );
-                run_plain_prompt_with_hook(
-                    &agent,
-                    prompt,
-                    Vec::new(),
-                    stats_hook.with_model(self.model_name.clone()),
-                )
-                .await?
-            }
-            ClientVariant::Responses(client) => {
-                let agent = build_agent(
-                    client,
-                    &self.model_name,
-                    &self.preamble,
-                    self.reasoning,
-                    None,
-                );
-                run_plain_prompt_with_hook(
-                    &agent,
-                    prompt,
-                    Vec::new(),
-                    stats_hook.with_model(self.model_name.clone()),
-                )
-                .await?
-            }
-        };
+        let raw = self
+            .run_plain_prompt_for_model(
+                &self.model_name,
+                prompt,
+                Vec::new(),
+                stats_hook.with_model(self.model_name.clone()),
+            )
+            .await?;
 
         Ok(sanitize_session_title(&raw))
     }
@@ -458,13 +653,15 @@ impl LlmService {
                 .send(RuntimeEvent::MainReply { reply_id, event })
                 .is_ok()
         });
+        let capture = CompletionCapture::new();
+        let _search_observer = self.search_observer_guard(reply_id, emit.clone());
         if let Err(error) = self
             .run_prompt_from_state(
                 reply_id,
                 snapshot.prompt,
                 snapshot.history,
                 stats_hook,
-                None,
+                Some(capture),
                 emit.clone(),
                 Some(ResumeOverrideController::new(override_action)),
                 replay_seed,
@@ -534,12 +731,27 @@ impl LlmService {
             .await?;
 
         let outcome = match &self.client {
+            ClientVariant::Anthropic(client) => {
+                let agent = build_anthropic_agent(
+                    client,
+                    &self.model_name,
+                    &self.preamble,
+                    self.reasoning,
+                    RequestFeatures::default(),
+                    None,
+                );
+                run_prompt_step(
+                    self, &agent, reply_id, prompt, history, stats_hook, None, emit, None, None, 0,
+                )
+                .await?
+            }
             ClientVariant::Completions(client) => {
                 let agent = build_agent(
                     client,
                     &self.model_name,
                     &self.preamble,
                     self.reasoning,
+                    RequestFeatures::default(),
                     None,
                 );
                 run_prompt_step(
@@ -553,6 +765,7 @@ impl LlmService {
                     &self.model_name,
                     &self.preamble,
                     self.reasoning,
+                    RequestFeatures::default(),
                     None,
                 );
                 run_prompt_step(
@@ -616,19 +829,25 @@ impl LlmService {
         resume: Option<ResumeOverrideController>,
         mut replay_seed: Option<PendingReplyReplaySeed>,
     ) -> Result<PromptRunResult> {
-        let mut steps = 0;
-
         loop {
-            steps += 1;
-            if steps > MAX_TOOL_STEPS_PER_TURN {
-                let message =
-                    format!("Request exceeded the turn step limit ({MAX_TOOL_STEPS_PER_TURN}).");
-                let _ = (emit)(reply_id, StreamEvent::Failed(message.clone()));
-                return Err(anyhow::anyhow!(message));
-            }
-
             let replay_seed = replay_seed.take();
             let outcome = match &self.agent {
+                AgentVariant::Anthropic(agent) => {
+                    run_prompt_step(
+                        self,
+                        agent,
+                        reply_id,
+                        prompt.clone(),
+                        history.clone(),
+                        stats_hook.clone(),
+                        capture.clone(),
+                        emit.clone(),
+                        resume.clone(),
+                        replay_seed.clone(),
+                        UNBOUNDED_TOOL_STEPS_PER_TURN,
+                    )
+                    .await?
+                }
                 AgentVariant::Completions(agent) => {
                     run_prompt_step(
                         self,
@@ -641,7 +860,7 @@ impl LlmService {
                         emit.clone(),
                         resume.clone(),
                         replay_seed.clone(),
-                        MAX_TOOL_STEPS_PER_TURN,
+                        UNBOUNDED_TOOL_STEPS_PER_TURN,
                     )
                     .await?
                 }
@@ -657,7 +876,7 @@ impl LlmService {
                         emit.clone(),
                         resume.clone(),
                         replay_seed,
-                        MAX_TOOL_STEPS_PER_TURN,
+                        UNBOUNDED_TOOL_STEPS_PER_TURN,
                     )
                     .await?
                 }
@@ -668,10 +887,17 @@ impl LlmService {
                     return Ok(result);
                 }
                 PromptStepOutcome::Continue(next) => {
+                    let reduced_history = reduce_history(
+                        &next.history,
+                        self.config.history.mode,
+                        self.config.history.retained_steps,
+                        false,
+                    );
                     if let Some(super::TurnInterruptRequest::AtStepBoundary) =
                         self.take_turn_interrupt_request()
                     {
-                        let history = history_with_prompt_from_rig(next.history, next.next_prompt)?;
+                        let history =
+                            history_with_prompt_from_rig(reduced_history, next.next_prompt)?;
                         if !(emit)(
                             reply_id,
                             StreamEvent::TurnEnded {
@@ -686,7 +912,7 @@ impl LlmService {
                         });
                     }
                     prompt = next.next_prompt;
-                    history = next.history;
+                    history = reduced_history;
                     if should_compact_before_follow_up(&self.model_name, &history, &prompt) {
                         let result = self
                             .compact_history(
@@ -732,7 +958,12 @@ impl LlmService {
         emit: EventCallback,
         emit_notice: bool,
     ) -> Result<HistoryCompactionResult> {
-        let mut candidate_history = history;
+        let mut candidate_history = reduce_history(
+            &history,
+            self.config.history.mode,
+            self.config.history.retained_steps,
+            true,
+        );
 
         loop {
             let request_tokens = super::compaction::estimated_request_tokens(
@@ -750,30 +981,14 @@ impl LlmService {
                 continue;
             }
 
-            let summary = match &self.client {
-                ClientVariant::Completions(client) => {
-                    let compact_agent =
-                        build_agent(client, model_name, &self.preamble, self.reasoning, None);
-                    run_plain_prompt_with_hook(
-                        &compact_agent,
-                        COMPACTION_PROMPT.to_string(),
-                        candidate_history.clone(),
-                        stats_hook.clone(),
-                    )
-                    .await
-                }
-                ClientVariant::Responses(client) => {
-                    let compact_agent =
-                        build_agent(client, model_name, &self.preamble, self.reasoning, None);
-                    run_plain_prompt_with_hook(
-                        &compact_agent,
-                        COMPACTION_PROMPT.to_string(),
-                        candidate_history.clone(),
-                        stats_hook.clone(),
-                    )
-                    .await
-                }
-            };
+            let summary = self
+                .run_plain_prompt_for_model(
+                    model_name,
+                    COMPACTION_PROMPT.to_string(),
+                    candidate_history.clone(),
+                    stats_hook.clone(),
+                )
+                .await;
             let summary = match summary {
                 Ok(summary) => summary,
                 Err(error) if is_retryable_compaction_error(&error.to_string()) => {
@@ -805,15 +1020,16 @@ pub(crate) async fn run_internal_plain_prompt(
     prompt: String,
     stats_hook: StatsHook,
 ) -> Result<String> {
-    if is_codex_model(model_name) {
-        let client = build_responses_client(config, model_name)?;
-        let agent = build_agent(&client, model_name, preamble, reasoning, None);
-        run_plain_prompt_with_hook(&agent, prompt, Vec::new(), stats_hook).await
-    } else {
-        let client = build_completions_client(config, model_name)?;
-        let agent = build_agent(&client, model_name, preamble, reasoning, None);
-        run_plain_prompt_with_hook(&agent, prompt, Vec::new(), stats_hook).await
-    }
+    run_plain_prompt_with_fresh_client(
+        config,
+        model_name,
+        preamble,
+        reasoning,
+        prompt,
+        Vec::new(),
+        stats_hook,
+    )
+    .await
 }
 
 fn next_interaction_scope_id() -> String {

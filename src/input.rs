@@ -13,11 +13,13 @@ pub fn map_event(event: Event) -> Option<Action> {
 
 pub(crate) fn map_event_with_context(event: Event, context: InputContext) -> Option<Action> {
     match event {
-        Event::Key(key) if key.kind == KeyEventKind::Press => Some(map_key_event(key, context)),
-        Event::Mouse(mouse) => map_mouse_event(mouse),
+        Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
+            Some(map_key_event(key, context))
+        }
+        Event::Mouse(mouse) => map_mouse_event(mouse, context),
         Event::Paste(text) => (!matches!(
             context,
-            InputContext::WriteApproval | InputContext::PlanReview
+            InputContext::WriteApproval | InputContext::PlanReview | InputContext::Stats
         ))
         .then_some(Action::Paste(text)),
         _ => None,
@@ -95,6 +97,21 @@ fn map_key_event(key: KeyEvent, context: InputContext) -> Action {
             (KeyCode::End, _) => Action::ScrollHistoryToBottom,
             _ => Action::Tick,
         },
+        InputContext::Stats => match (key.code, key.modifiers) {
+            (KeyCode::Esc, _) => Action::CancelPendingReply,
+            (KeyCode::Char('c'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
+                Action::ClearComposerOrQuit
+            }
+            (KeyCode::Left, KeyModifiers::NONE) => Action::StatsTabLeft,
+            (KeyCode::Right, KeyModifiers::NONE) => Action::StatsTabRight,
+            (KeyCode::Up, KeyModifiers::NONE) => Action::SelectPreviousCommand,
+            (KeyCode::Down, KeyModifiers::NONE) => Action::SelectNextCommand,
+            (KeyCode::PageUp, _) => Action::ScrollStatsPageUp,
+            (KeyCode::PageDown, _) => Action::ScrollStatsPageDown,
+            (KeyCode::Home, _) => Action::ScrollStatsToTop,
+            (KeyCode::End, _) => Action::ScrollStatsToBottom,
+            _ => Action::Tick,
+        },
         context => match (key.code, key.modifiers) {
             (KeyCode::Esc, _) => Action::CancelPendingReply,
             (KeyCode::Char('c'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
@@ -154,27 +171,34 @@ fn editor_input_from_key(key: KeyEvent) -> EditorInput {
     }
 }
 
-fn map_mouse_event(mouse: MouseEvent) -> Option<Action> {
-    match mouse.kind {
-        MouseEventKind::Down(MouseButton::Left) => Some(Action::StartHistorySelection {
-            column: mouse.column,
-            row: mouse.row,
-        }),
-        MouseEventKind::Drag(MouseButton::Left) => Some(Action::UpdateHistorySelection {
-            column: mouse.column,
-            row: mouse.row,
-        }),
-        MouseEventKind::Up(MouseButton::Left) => Some(Action::FinishHistorySelection {
-            column: mouse.column,
-            row: mouse.row,
-        }),
-        MouseEventKind::ScrollUp => Some(Action::ScrollHistoryUp {
+fn map_mouse_event(mouse: MouseEvent, context: InputContext) -> Option<Action> {
+    match (context, mouse.kind) {
+        (InputContext::Stats, MouseEventKind::ScrollUp) => Some(Action::ScrollStatsUp {
             lines: MOUSE_SCROLL_LINES,
         }),
-        MouseEventKind::ScrollDown => Some(Action::ScrollHistoryDown {
+        (InputContext::Stats, MouseEventKind::ScrollDown) => Some(Action::ScrollStatsDown {
             lines: MOUSE_SCROLL_LINES,
         }),
-        _ => None,
+        (InputContext::Stats, _) => None,
+        (_, MouseEventKind::Down(MouseButton::Left)) => Some(Action::StartHistorySelection {
+            column: mouse.column,
+            row: mouse.row,
+        }),
+        (_, MouseEventKind::Drag(MouseButton::Left)) => Some(Action::UpdateHistorySelection {
+            column: mouse.column,
+            row: mouse.row,
+        }),
+        (_, MouseEventKind::Up(MouseButton::Left)) => Some(Action::FinishHistorySelection {
+            column: mouse.column,
+            row: mouse.row,
+        }),
+        (_, MouseEventKind::ScrollUp) => Some(Action::ScrollHistoryUp {
+            lines: MOUSE_SCROLL_LINES,
+        }),
+        (_, MouseEventKind::ScrollDown) => Some(Action::ScrollHistoryDown {
+            lines: MOUSE_SCROLL_LINES,
+        }),
+        (_, _) => None,
     }
 }
 
@@ -520,6 +544,22 @@ mod tests {
             KeyEventKind::Release,
         )));
         assert_eq!(action, None);
+    }
+
+    #[test]
+    fn repeat_key_events_are_treated_like_presses() {
+        let action = map_event(Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('x'),
+            KeyModifiers::NONE,
+            KeyEventKind::Repeat,
+        )));
+        assert_eq!(
+            action,
+            Some(Action::Editor(editor_input_from_key(key(
+                KeyCode::Char('x'),
+                KeyModifiers::NONE
+            ))))
+        );
     }
 
     #[test]

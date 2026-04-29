@@ -16,6 +16,12 @@ pub(crate) struct VisibleEntry {
 }
 
 #[derive(Debug)]
+pub(crate) struct CollectedVisibleEntries {
+    pub(crate) entries: Vec<VisibleEntry>,
+    pub(crate) truncated: bool,
+}
+
+#[derive(Debug)]
 pub struct ToolExecError(String);
 
 impl ToolExecError {
@@ -44,17 +50,20 @@ impl From<regex::Error> for ToolExecError {
     }
 }
 
-pub(crate) fn collect_visible_entries(
+pub(crate) fn collect_visible_entries_limited(
     target: &Path,
     recursive: bool,
     policy: &SearchPathPolicy,
-) -> Result<Vec<VisibleEntry>, ToolExecError> {
+    limit: Option<usize>,
+) -> Result<CollectedVisibleEntries, ToolExecError> {
     let mut builder = walk_builder(target, policy);
     if !recursive {
         builder.max_depth(Some(1));
     }
 
     let mut entries = Vec::new();
+    let mut truncated = false;
+    let limit_with_probe = limit.and_then(|value| value.checked_add(1));
     for result in builder.build() {
         let entry = result.map_err(|error| ToolExecError::new(error.to_string()))?;
         let path = entry.path();
@@ -82,6 +91,11 @@ pub(crate) fn collect_visible_entries(
             depth,
             is_dir,
         });
+
+        if limit_with_probe.is_some_and(|value| entries.len() >= value) {
+            truncated = true;
+            break;
+        }
     }
 
     entries.sort_by(|left, right| {
@@ -92,7 +106,11 @@ pub(crate) fn collect_visible_entries(
             .then_with(|| left.path.file_name().cmp(&right.path.file_name()))
     });
 
-    Ok(entries)
+    if let Some(limit) = limit {
+        entries.truncate(limit);
+    }
+
+    Ok(CollectedVisibleEntries { entries, truncated })
 }
 
 pub(crate) fn is_path_visible(
@@ -118,7 +136,11 @@ pub(crate) fn is_path_visible(
     Ok(false)
 }
 
-pub(crate) fn resolve_path(root: &Path, raw_path: &str) -> Result<PathBuf, ToolExecError> {
+pub(crate) fn resolve_path_with_access(
+    root: &Path,
+    raw_path: &str,
+    allow_full_system_access: bool,
+) -> Result<PathBuf, ToolExecError> {
     let canonical_root = root.canonicalize()?;
     let joined = if Path::new(raw_path).is_absolute() {
         PathBuf::from(raw_path)
@@ -126,7 +148,7 @@ pub(crate) fn resolve_path(root: &Path, raw_path: &str) -> Result<PathBuf, ToolE
         canonical_root.join(raw_path)
     };
     let canonical_path = joined.canonicalize()?;
-    if !canonical_path.starts_with(&canonical_root) {
+    if !allow_full_system_access && !canonical_path.starts_with(&canonical_root) {
         return Err(ToolExecError::new(format!(
             "path {raw_path} escapes the current workspace root"
         )));
@@ -135,9 +157,10 @@ pub(crate) fn resolve_path(root: &Path, raw_path: &str) -> Result<PathBuf, ToolE
     Ok(canonical_path)
 }
 
-pub(crate) fn resolve_workspace_path(
+pub(crate) fn resolve_workspace_path_with_access(
     root: &Path,
     raw_path: &str,
+    allow_full_system_access: bool,
 ) -> Result<PathBuf, ToolExecError> {
     let canonical_root = root.canonicalize()?;
     let joined = if Path::new(raw_path).is_absolute() {
@@ -156,7 +179,7 @@ pub(crate) fn resolve_workspace_path(
     }
 
     let canonical_ancestor = existing_ancestor.canonicalize()?;
-    if !canonical_ancestor.starts_with(&canonical_root) {
+    if !allow_full_system_access && !canonical_ancestor.starts_with(&canonical_root) {
         return Err(ToolExecError::new(format!(
             "path {raw_path} escapes the current workspace root"
         )));
@@ -172,11 +195,25 @@ pub(crate) fn resolve_workspace_path(
     Ok(canonical_ancestor.join(suffix))
 }
 
+pub(crate) fn path_is_within_root(root: &Path, path: &Path) -> bool {
+    let Ok(canonical_root) = root.canonicalize() else {
+        return false;
+    };
+    let Ok(canonical_path) = path.canonicalize() else {
+        return false;
+    };
+    canonical_path.starts_with(canonical_root)
+}
+
 pub(crate) fn display_path(root: &Path, path: &Path) -> String {
     path.strip_prefix(root)
         .unwrap_or(path)
         .display()
         .to_string()
+}
+
+pub(crate) fn is_unsafe_system_path(path: &Path) -> bool {
+    path.starts_with("/proc") || path.starts_with("/sys") || path.starts_with("/dev")
 }
 
 fn walk_builder(target: &Path, policy: &SearchPathPolicy) -> WalkBuilder {
@@ -191,6 +228,10 @@ fn walk_builder(target: &Path, policy: &SearchPathPolicy) -> WalkBuilder {
     let root = target.to_path_buf();
     let policy = policy.clone();
     builder.filter_entry(move |entry| {
+        if entry.path() != root && is_unsafe_system_path(entry.path()) {
+            return false;
+        }
+
         entry.path() == root
             || entry
                 .path()
@@ -298,5 +339,32 @@ pub(crate) mod test_support {
         }
 
         tree
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::common::test_support::large_tree;
+
+    #[test]
+    fn limited_visible_entry_collection_reports_truncation() {
+        let tree = large_tree(8);
+        let policy = SearchPathPolicy::new(&[]).expect("policy builds");
+
+        let collected =
+            collect_visible_entries_limited(&tree.root.join("files"), true, &policy, Some(3))
+                .expect("collection succeeds");
+
+        assert_eq!(collected.entries.len(), 3);
+        assert!(collected.truncated);
+    }
+
+    #[test]
+    fn unsafe_system_path_detection_matches_proc_like_roots() {
+        assert!(is_unsafe_system_path(Path::new("/proc")));
+        assert!(is_unsafe_system_path(Path::new("/sys/kernel")));
+        assert!(is_unsafe_system_path(Path::new("/dev/null")));
+        assert!(!is_unsafe_system_path(Path::new("/tmp/work")));
     }
 }

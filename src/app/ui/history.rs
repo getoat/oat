@@ -20,11 +20,20 @@ pub struct HistoryViewState {
 }
 
 #[derive(Clone, Debug)]
+pub struct HistoryTailRenderCache {
+    pub transcript_index: usize,
+    pub start: usize,
+    pub end: usize,
+}
+
+#[derive(Clone, Debug)]
 pub struct HistoryRenderCache {
     pub width: usize,
     pub accent: Color,
-    pub transcript_revision: u64,
+    pub structure_revision: u64,
+    pub tail_revision: u64,
     pub lines: Vec<Line<'static>>,
+    pub tail: Option<HistoryTailRenderCache>,
 }
 
 impl HistoryViewState {

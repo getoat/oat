@@ -167,36 +167,34 @@ pub(super) fn render_aux_textarea_lines(
 }
 
 pub(super) fn model_picker_tab_line(active_tab: ModelPickerTab, accent: Color) -> Line<'static> {
-    let normal_style = if active_tab == ModelPickerTab::NormalAgent {
-        Style::default().fg(accent).add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::Gray)
-    };
-    let planning_style = if active_tab == ModelPickerTab::PlanningAgents {
-        Style::default().fg(accent).add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::Gray)
-    };
-    let safety_style = if active_tab == ModelPickerTab::SafetyModel {
-        Style::default().fg(accent).add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::Gray)
-    };
-    let memory_style = if active_tab == ModelPickerTab::MemoryModel {
-        Style::default().fg(accent).add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::Gray)
-    };
+    tab_line(
+        &[
+            ("Normal agent", active_tab == ModelPickerTab::NormalAgent),
+            (
+                "Planning agents",
+                active_tab == ModelPickerTab::PlanningAgents,
+            ),
+            ("Safety model", active_tab == ModelPickerTab::SafetyModel),
+            ("Memory model", active_tab == ModelPickerTab::MemoryModel),
+        ],
+        accent,
+    )
+}
 
-    Line::from(vec![
-        Span::styled("Normal agent", normal_style),
-        Span::styled("  |  ", Style::default().fg(Color::DarkGray)),
-        Span::styled("Planning agents", planning_style),
-        Span::styled("  |  ", Style::default().fg(Color::DarkGray)),
-        Span::styled("Safety model", safety_style),
-        Span::styled("  |  ", Style::default().fg(Color::DarkGray)),
-        Span::styled("Memory model", memory_style),
-    ])
+pub(super) fn tab_line(tabs: &[(&str, bool)], accent: Color) -> Line<'static> {
+    let mut spans = Vec::new();
+    for (index, (label, active)) in tabs.iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::styled("  |  ", Style::default().fg(Color::DarkGray)));
+        }
+        let style = if *active {
+            Style::default().fg(accent).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        spans.push(Span::styled((*label).to_string(), style));
+    }
+    Line::from(spans)
 }
 
 pub(super) fn mode_status_label(

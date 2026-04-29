@@ -1,4 +1,4 @@
-use ratatui::{layout::Rect, style::Color, text::Line};
+use ratatui::layout::Rect;
 
 use crate::app::{AppState, ui::HistoryRenderCache};
 
@@ -54,19 +54,8 @@ pub(crate) fn update_history_snapshot(state: &mut AppState, area: Rect, lines: V
     state.ui.history.update_snapshot(area, lines);
 }
 
-pub(crate) fn set_history_render_cache(
-    state: &mut AppState,
-    width: usize,
-    accent: Color,
-    transcript_revision: u64,
-    lines: Vec<Line<'static>>,
-) {
-    state.ui.history_render_cache = Some(HistoryRenderCache {
-        width,
-        accent,
-        transcript_revision,
-        lines,
-    });
+pub(crate) fn set_history_render_cache(state: &mut AppState, cache: HistoryRenderCache) {
+    state.ui.history_render_cache = Some(cache);
 }
 
 pub(crate) fn clear_history_render_cache(state: &mut AppState) {

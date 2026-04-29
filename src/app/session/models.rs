@@ -3,6 +3,7 @@ use serde_json::json;
 
 use crate::token_counting::count_text_tokens;
 use crate::{
+    app::HostedToolKind,
     ask_user::AskUserRequest,
     config::{ReasoningEffort, ReasoningSetting},
     model_registry,
@@ -261,6 +262,16 @@ pub enum StreamEvent {
     ToolCall {
         name: String,
         arguments: String,
+    },
+    HostedToolStarted {
+        id: String,
+        kind: HostedToolKind,
+        detail: String,
+    },
+    HostedToolCompleted {
+        id: String,
+        kind: HostedToolKind,
+        detail: String,
     },
     ToolResult {
         name: String,

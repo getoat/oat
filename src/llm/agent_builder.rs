@@ -1,19 +1,19 @@
 use anyhow::Result;
 use futures_util::StreamExt;
 use rig::{
-    agent::{MultiTurnStreamItem, PromptHook},
+    agent::{AgentBuilder, MultiTurnStreamItem},
     client::CompletionClient,
     completion::CompletionModel,
     completion::Message as RigMessage,
     http_client::{HeaderMap, HeaderValue},
     streaming::{StreamedAssistantContent, StreamingChat},
 };
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::{
     agent::{AgentContext, AgentRole},
     app::AccessMode,
-    config::{AppConfig, KimiThinkingMode, ReasoningSetting},
+    config::{AppConfig, KimiThinkingMode, ReasoningSetting, WebSearchMode},
     model_registry,
     tools::{ToolContext, tools_for_context},
 };
@@ -22,6 +22,11 @@ const OPENROUTER_REFERER: &str = "https://getoat.app";
 const OPENROUTER_TITLE: &str = "oat";
 const OPENAI_BETA_HEADER: &str = "responses=experimental";
 const OPENAI_ORIGINATOR_HEADER_VALUE: &str = "codex_cli_rs";
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct RequestFeatures {
+    pub(crate) web_search: Option<WebSearchMode>,
+}
 
 pub(crate) fn reasoning_params(model_name: &str, reasoning: ReasoningSetting) -> serde_json::Value {
     match reasoning {
@@ -55,11 +60,33 @@ pub(crate) fn reasoning_params(model_name: &str, reasoning: ReasoningSetting) ->
     }
 }
 
+pub(crate) fn request_params(
+    model_name: &str,
+    reasoning: ReasoningSetting,
+    features: RequestFeatures,
+) -> Value {
+    let mut params = reasoning_params(model_name, reasoning);
+    if let Some(web_search_mode) = features
+        .web_search
+        .filter(|_| model_registry::uses_responses_api(model_name))
+    {
+        let tools = json!([{
+            "type": "web_search",
+            "external_web_access": matches!(web_search_mode, WebSearchMode::Live),
+        }]);
+        params
+            .as_object_mut()
+            .expect("reasoning params should serialize to an object")
+            .insert("tools".into(), tools);
+    }
+    params
+}
+
 pub(crate) fn openai_base_url_for_model(
     config: &AppConfig,
     model_name: &str,
 ) -> anyhow::Result<String> {
-    Ok(config.provider_config_for_model(model_name)?.base_url())
+    config.base_url_for_model(model_name)
 }
 
 pub(crate) fn http_headers_for_model(
@@ -144,36 +171,57 @@ pub(crate) fn build_agent<C>(
     model_name: &str,
     preamble: &str,
     reasoning: ReasoningSetting,
+    features: RequestFeatures,
     tool_context: Option<ToolContext>,
 ) -> rig::agent::Agent<C::CompletionModel>
 where
     C: CompletionClient,
     C::CompletionModel: CompletionModel + 'static,
 {
-    let api_model_name = crate::codex::api_model_name(model_name);
+    let api_model_name = model_registry::api_model_name(model_name);
     let builder = client
         .agent(api_model_name.to_string())
         .preamble(preamble)
-        .additional_params(reasoning_params(model_name, reasoning));
+        .additional_params(request_params(model_name, reasoning, features));
     match tool_context {
         Some(tool_context) => builder.tools(tools_for_context(tool_context)).build(),
         None => builder.build(),
     }
 }
 
-pub(crate) async fn run_plain_prompt_with_hook<M, H>(
+pub(crate) fn build_anthropic_agent(
+    client: &rig::providers::anthropic::Client,
+    model_name: &str,
+    preamble: &str,
+    reasoning: ReasoningSetting,
+    features: RequestFeatures,
+    tool_context: Option<ToolContext>,
+) -> rig::agent::Agent<rig::providers::anthropic::completion::CompletionModel> {
+    let model = rig::providers::anthropic::completion::CompletionModel::with_model(
+        client.clone(),
+        model_registry::api_model_name(model_name),
+    );
+    let builder = AgentBuilder::new(model)
+        .preamble(preamble)
+        .additional_params(request_params(model_name, reasoning, features));
+    match tool_context {
+        Some(tool_context) => builder.tools(tools_for_context(tool_context)).build(),
+        None => builder.build(),
+    }
+}
+
+pub(crate) async fn run_plain_prompt_with_hook<M>(
     agent: &rig::agent::Agent<M>,
     prompt: String,
     history: Vec<RigMessage>,
-    hook: H,
+    hook: crate::stats::StatsHook,
 ) -> Result<String>
 where
     M: CompletionModel + 'static,
-    H: PromptHook<M> + 'static,
 {
     let mut stream = agent
         .stream_chat(prompt, history)
-        .with_hook(hook)
+        .with_hook(hook.clone())
         .multi_turn(0)
         .await;
     let mut output = String::new();
@@ -181,18 +229,27 @@ where
     while let Some(chunk) = stream.next().await {
         match chunk {
             Ok(MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(text))) => {
+                hook.record_response_progress();
                 output.push_str(&text.text);
             }
+            Ok(MultiTurnStreamItem::StreamAssistantItem(_)) => {
+                hook.record_response_progress();
+            }
             Ok(MultiTurnStreamItem::FinalResponse(response)) => {
+                hook.record_response_progress();
                 if !response.response().is_empty() {
                     return Ok(response.response().to_string());
                 }
                 return Ok(output);
             }
             Ok(_) => {}
-            Err(error) => return Err(error.into()),
+            Err(error) => {
+                hook.fail_request();
+                return Err(error.into());
+            }
         }
     }
 
+    hook.fail_request();
     Err(anyhow::anyhow!("Request ended before response completed."))
 }

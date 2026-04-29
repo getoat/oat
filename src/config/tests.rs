@@ -29,6 +29,8 @@ fn sample_config() -> AppConfig {
         }),
         chutes: None,
         codex: None,
+        ollama: None,
+        opencode: None,
         openrouter: None,
         model: ModelSelectionConfig {
             model_name: "gpt-5.4-mini".into(),
@@ -42,6 +44,7 @@ fn sample_config() -> AppConfig {
         subagents: SubagentConfig::default(),
         planning: PlanningConfig::default(),
         memory: MemoryConfig::default(),
+        history: HistoryConfig::default(),
         tools: ToolConfig::default(),
     }
 }
@@ -102,6 +105,9 @@ fn parses_expected_config_shape() {
             [tools]
             search_include_patterns = [".research/**"]
             max_output_tokens = 2048
+
+            [tools.web_search]
+            mode = "cached"
             "#,
     )
     .expect("config parses");
@@ -161,6 +167,49 @@ fn parses_expected_config_shape() {
     assert!(!config.memory.extraction.run_in_background);
     assert_eq!(config.tools.search_include_patterns, vec![".research/**"]);
     assert_eq!(config.tools.max_output_tokens, 2048);
+    assert_eq!(config.tools.web_search.mode, WebSearchMode::Cached);
+}
+
+#[test]
+fn defaults_history_to_step_summary_with_one_retained_step() {
+    let config: AppConfig = toml::from_str(
+        r#"
+            [azure]
+            resource_name = "demo-resource"
+            api_key = "secret"
+
+            [model]
+            model_name = "gpt-5.4-mini"
+            reasoning = "medium"
+        "#,
+    )
+    .expect("config parses");
+
+    assert_eq!(config.history.mode, HistoryMode::StepSummary);
+    assert_eq!(config.history.retained_steps, 1);
+}
+
+#[test]
+fn parses_explicit_history_settings() {
+    let config: AppConfig = toml::from_str(
+        r#"
+            [azure]
+            resource_name = "demo-resource"
+            api_key = "secret"
+
+            [model]
+            model_name = "gpt-5.4-mini"
+            reasoning = "medium"
+
+            [history]
+            mode = "turn_summary"
+            retained_steps = 3
+        "#,
+    )
+    .expect("config parses");
+
+    assert_eq!(config.history.mode, HistoryMode::TurnSummary);
+    assert_eq!(config.history.retained_steps, 3);
 }
 
 #[test]
@@ -218,6 +267,7 @@ fn ui_config_defaults_tool_output_to_hidden() {
     assert!(config.tools.search_include_patterns.is_empty());
     assert_eq!(config.model.model_name, "gpt-5.4-mini");
     assert_eq!(config.safety.model_name, "gpt-5.4-mini");
+    assert_eq!(config.tools.web_search.mode, WebSearchMode::Live);
     assert_eq!(
         config.safety.reasoning,
         ReasoningSetting::Gpt(ReasoningEffort::Medium)
@@ -226,6 +276,64 @@ fn ui_config_defaults_tool_output_to_hidden() {
         config.tools.max_output_tokens,
         tool_policy::default_tool_output_max_tokens()
     );
+}
+
+#[test]
+fn legacy_web_search_enabled_false_maps_to_disabled() {
+    let config: AppConfig = toml::from_str(
+        r#"
+            [azure]
+            resource_name = "demo-resource"
+            api_key = "secret"
+            model_name = "gpt-5.4-mini"
+            reasoning = "medium"
+
+            [tools.web_search]
+            enabled = false
+            "#,
+    )
+    .expect("config parses");
+
+    assert_eq!(config.tools.web_search.mode, WebSearchMode::Disabled);
+}
+
+#[test]
+fn legacy_web_search_enabled_true_maps_to_live() {
+    let config: AppConfig = toml::from_str(
+        r#"
+            [azure]
+            resource_name = "demo-resource"
+            api_key = "secret"
+            model_name = "gpt-5.4-mini"
+            reasoning = "medium"
+
+            [tools.web_search]
+            enabled = true
+            "#,
+    )
+    .expect("config parses");
+
+    assert_eq!(config.tools.web_search.mode, WebSearchMode::Live);
+}
+
+#[test]
+fn explicit_web_search_mode_takes_precedence_over_legacy_enabled() {
+    let config: AppConfig = toml::from_str(
+        r#"
+            [azure]
+            resource_name = "demo-resource"
+            api_key = "secret"
+            model_name = "gpt-5.4-mini"
+            reasoning = "medium"
+
+            [tools.web_search]
+            mode = "cached"
+            enabled = false
+            "#,
+    )
+    .expect("config parses");
+
+    assert_eq!(config.tools.web_search.mode, WebSearchMode::Cached);
 }
 
 #[test]
@@ -328,6 +436,31 @@ fn parses_chutes_model_and_defaults_safety_from_model() {
 }
 
 #[test]
+fn parses_ollama_model_and_defaults_safety_from_model() {
+    let config: AppConfig = toml::from_str(
+        r#"
+            [ollama]
+            api_key = "ollama-secret"
+
+            [model]
+            model_name = "glm-5.1:cloud"
+            reasoning = "default"
+            "#,
+    )
+    .expect("config parses");
+
+    assert!(config.azure.is_none());
+    assert_eq!(
+        config.ollama.as_ref().expect("ollama").api_key,
+        "ollama-secret"
+    );
+    assert_eq!(config.model.model_name, "glm-5.1:cloud");
+    assert_eq!(config.model.reasoning, ReasoningSetting::Default);
+    assert_eq!(config.safety.model_name, "glm-5.1:cloud");
+    assert_eq!(config.safety.reasoning, ReasoningSetting::Default);
+}
+
+#[test]
 fn known_model_parse_rejects_cross_family_reasoning_value() {
     let error = toml::from_str::<AppConfig>(
         r#"
@@ -366,11 +499,302 @@ fn unknown_model_parse_rejects_config_immediately() {
 }
 
 #[test]
+fn load_from_path_replaces_unknown_main_model_with_default_selection() {
+    let path = unique_temp_path("stale-main-model");
+
+    fs::write(
+        &path,
+        r#"
+            [azure]
+            resource_name = "demo-resource"
+            api_key = "secret"
+
+            [model]
+            model_name = "qwen/qwen3.6-plus:free"
+            reasoning = "medium"
+            "#,
+    )
+    .expect("write temp config");
+
+    let config = AppConfig::load_from_path(&path).expect("load sanitized config");
+
+    assert_eq!(config.model.model_name, "gpt-5.4-mini");
+    assert_eq!(
+        config.model.reasoning,
+        ReasoningSetting::Gpt(ReasoningEffort::Medium)
+    );
+    assert_eq!(config.safety.model_name, "gpt-5.4-mini");
+    assert_eq!(
+        config.safety.reasoning,
+        ReasoningSetting::Gpt(ReasoningEffort::Medium)
+    );
+
+    fs::remove_file(path).expect("remove temp config");
+}
+
+#[test]
+fn load_from_path_replaces_unknown_openrouter_model_with_openrouter_default() {
+    let path = unique_temp_path("stale-openrouter-main-model");
+
+    fs::write(
+        &path,
+        r#"
+            [openrouter]
+            api_key = "or-secret"
+
+            [model]
+            model_name = "qwen/qwen3.6-plus:free"
+            reasoning = "medium"
+            "#,
+    )
+    .expect("write temp config");
+
+    let config = AppConfig::load_from_path(&path).expect("load sanitized config");
+
+    assert_eq!(config.model.model_name, "openai/gpt-5.4-mini");
+    assert_eq!(
+        config.model.reasoning,
+        ReasoningSetting::Gpt(ReasoningEffort::Medium)
+    );
+    assert_eq!(config.safety.model_name, "openai/gpt-5.4-mini");
+    assert_eq!(
+        config.safety.reasoning,
+        ReasoningSetting::Gpt(ReasoningEffort::Medium)
+    );
+
+    fs::remove_file(path).expect("remove temp config");
+}
+
+#[test]
+fn load_from_path_replaces_unknown_ollama_model_with_ollama_default() {
+    let path = unique_temp_path("stale-ollama-main-model");
+
+    fs::write(
+        &path,
+        r#"
+            [ollama]
+            api_key = "ollama-secret"
+
+            [model]
+            model_name = "glm-4.9:cloud"
+            reasoning = "default"
+            "#,
+    )
+    .expect("write temp config");
+
+    let config = AppConfig::load_from_path(&path).expect("load sanitized config");
+
+    assert_eq!(config.model.model_name, "glm-5.1:cloud");
+    assert_eq!(config.model.reasoning, ReasoningSetting::Default);
+    assert_eq!(config.safety.model_name, "glm-5.1:cloud");
+    assert_eq!(config.safety.reasoning, ReasoningSetting::Default);
+
+    fs::remove_file(path).expect("remove temp config");
+}
+
+#[test]
+fn load_from_path_normalizes_invalid_main_model_reasoning() {
+    let path = unique_temp_path("invalid-main-reasoning");
+
+    fs::write(
+        &path,
+        r#"
+            [azure]
+            resource_name = "demo-resource"
+            api_key = "secret"
+
+            [model]
+            model_name = "gpt-5.4-mini"
+            reasoning = "xhigh"
+            "#,
+    )
+    .expect("write temp config");
+
+    let config = AppConfig::load_from_path(&path).expect("load sanitized config");
+
+    assert_eq!(config.model.model_name, "gpt-5.4-mini");
+    assert_eq!(
+        config.model.reasoning,
+        ReasoningSetting::Gpt(ReasoningEffort::Medium)
+    );
+
+    fs::remove_file(path).expect("remove temp config");
+}
+
+#[test]
+fn load_from_path_rebases_unknown_safety_and_memory_models_to_current_main_selection() {
+    let path = unique_temp_path("stale-secondary-models");
+
+    fs::write(
+        &path,
+        r#"
+            [azure]
+            resource_name = "demo-resource"
+            api_key = "secret"
+
+            [model]
+            model_name = "kimi-k2.5"
+            reasoning = "on"
+
+            [safety]
+            model_name = "qwen/qwen3.6-plus:free"
+            reasoning = "medium"
+
+            [memory.extraction]
+            enabled = true
+            model_name = "qwen/qwen3.6-plus:free"
+            reasoning = "medium"
+            "#,
+    )
+    .expect("write temp config");
+
+    let config = AppConfig::load_from_path(&path).expect("load sanitized config");
+
+    assert_eq!(config.safety.model_name, "kimi-k2.5");
+    assert_eq!(
+        config.safety.reasoning,
+        ReasoningSetting::Kimi(KimiThinkingMode::On)
+    );
+    assert_eq!(config.memory.extraction.model_name, "kimi-k2.5");
+    assert_eq!(
+        config.memory.extraction.reasoning,
+        ReasoningSetting::Kimi(KimiThinkingMode::On)
+    );
+    assert!(config.memory.extraction.enabled);
+
+    fs::remove_file(path).expect("remove temp config");
+}
+
+#[test]
+fn load_from_path_sanitizes_planning_agents() {
+    let path = unique_temp_path("stale-planning-models");
+
+    fs::write(
+        &path,
+        r#"
+            [azure]
+            resource_name = "demo-resource"
+            api_key = "secret"
+
+            [model]
+            model_name = "gpt-5.4-mini"
+            reasoning = "medium"
+
+            [[planning.agents]]
+            model_name = "qwen/qwen3.6-plus:free"
+            reasoning = "medium"
+
+            [[planning.agents]]
+            model_name = "gpt-5.4-mini"
+            reasoning = "high"
+
+            [[planning.agents]]
+            model_name = "gpt-5.4"
+            reasoning = "high"
+
+            [[planning.agents]]
+            model_name = "gpt-5.4"
+            reasoning = "low"
+
+            [[planning.agents]]
+            model_name = "kimi-k2.5"
+            reasoning = "medium"
+
+            [[planning.agents]]
+            model_name = "gpt-5.2"
+            reasoning = "on"
+            "#,
+    )
+    .expect("write temp config");
+
+    let config = AppConfig::load_from_path(&path).expect("load sanitized config");
+
+    assert_eq!(
+        config.planning.agents,
+        vec![
+            PlanningAgentConfig {
+                model_name: "gpt-5.4".into(),
+                reasoning: ReasoningEffort::High.into(),
+            },
+            PlanningAgentConfig {
+                model_name: "kimi-k2.5".into(),
+                reasoning: KimiThinkingMode::On.into(),
+            },
+            PlanningAgentConfig {
+                model_name: "gpt-5.2".into(),
+                reasoning: ReasoningEffort::Medium.into(),
+            },
+        ]
+    );
+
+    fs::remove_file(path).expect("remove temp config");
+}
+
+#[test]
+fn load_from_paths_uses_merged_main_selection_for_stale_override_sections() {
+    let home_path = unique_temp_path("home-stale-main-fallback");
+    let cwd_path = unique_temp_path("cwd-stale-main-fallback");
+
+    fs::write(
+        &home_path,
+        r#"
+            [azure]
+            resource_name = "demo-resource"
+            api_key = "secret"
+
+            [model]
+            model_name = "kimi-k2.5"
+            reasoning = "on"
+            "#,
+    )
+    .expect("write home config");
+
+    fs::write(
+        &cwd_path,
+        r#"
+            [safety]
+            model_name = "qwen/qwen3.6-plus:free"
+            reasoning = "medium"
+
+            [memory.extraction]
+            enabled = true
+            model_name = "qwen/qwen3.6-plus:free"
+            reasoning = "medium"
+            "#,
+    )
+    .expect("write cwd config");
+
+    let config =
+        AppConfig::load_from_paths(Some(&home_path), Some(&cwd_path)).expect("load merged config");
+
+    assert_eq!(config.model.model_name, "kimi-k2.5");
+    assert_eq!(
+        config.model.reasoning,
+        ReasoningSetting::Kimi(KimiThinkingMode::On)
+    );
+    assert_eq!(config.safety.model_name, "kimi-k2.5");
+    assert_eq!(
+        config.safety.reasoning,
+        ReasoningSetting::Kimi(KimiThinkingMode::On)
+    );
+    assert_eq!(config.memory.extraction.model_name, "kimi-k2.5");
+    assert_eq!(
+        config.memory.extraction.reasoning,
+        ReasoningSetting::Kimi(KimiThinkingMode::On)
+    );
+
+    fs::remove_file(home_path).expect("remove home config");
+    fs::remove_file(cwd_path).expect("remove cwd config");
+}
+
+#[test]
 fn validation_requires_chutes_credentials_for_selected_chutes_model() {
     let config = AppConfig {
         azure: None,
         chutes: None,
         codex: None,
+        ollama: None,
+        opencode: None,
         openrouter: None,
         model: ModelSelectionConfig {
             model_name: "zai-org/GLM-5-TEE".into(),
@@ -384,6 +808,7 @@ fn validation_requires_chutes_credentials_for_selected_chutes_model() {
         ui: UiConfig::default(),
         subagents: SubagentConfig::default(),
         planning: PlanningConfig::default(),
+        history: HistoryConfig::default(),
         tools: ToolConfig::default(),
     };
 
@@ -392,11 +817,170 @@ fn validation_requires_chutes_credentials_for_selected_chutes_model() {
 }
 
 #[test]
+fn validation_requires_ollama_credentials_for_selected_ollama_model() {
+    let config = AppConfig {
+        azure: None,
+        chutes: None,
+        codex: None,
+        ollama: None,
+        opencode: None,
+        openrouter: None,
+        model: ModelSelectionConfig {
+            model_name: "glm-5.1:cloud".into(),
+            reasoning: ReasoningSetting::Default,
+        },
+        safety: SafetyConfig {
+            model_name: "glm-5.1:cloud".into(),
+            reasoning: ReasoningSetting::Default,
+        },
+        memory: MemoryConfig::default(),
+        ui: UiConfig::default(),
+        subagents: SubagentConfig::default(),
+        planning: PlanningConfig::default(),
+        history: HistoryConfig::default(),
+        tools: ToolConfig::default(),
+    };
+
+    let error = config.validate().expect_err("validation should fail");
+    assert!(error.to_string().contains("missing the [ollama] table"));
+}
+
+#[test]
+fn validation_rejects_blank_ollama_api_key() {
+    let config = toml::from_str::<AppConfig>(
+        r#"
+            [ollama]
+            api_key = "   "
+
+            [model]
+            model_name = "glm-5.1:cloud"
+            reasoning = "default"
+            "#,
+    )
+    .expect("config parses");
+
+    let error = config
+        .validate()
+        .expect_err("config should fail validation");
+
+    assert!(
+        error
+            .to_string()
+            .contains("ollama.api_key must not be empty")
+    );
+}
+
+#[test]
+fn validation_requires_opencode_credentials_for_selected_opencode_model() {
+    let config = AppConfig {
+        azure: None,
+        chutes: None,
+        codex: None,
+        ollama: None,
+        opencode: None,
+        openrouter: None,
+        model: ModelSelectionConfig {
+            model_name: "opencode-go/glm-5.1".into(),
+            reasoning: ReasoningSetting::Default,
+        },
+        safety: SafetyConfig {
+            model_name: "opencode-go/glm-5.1".into(),
+            reasoning: ReasoningSetting::Default,
+        },
+        memory: MemoryConfig::default(),
+        ui: UiConfig::default(),
+        subagents: SubagentConfig::default(),
+        planning: PlanningConfig::default(),
+        history: HistoryConfig::default(),
+        tools: ToolConfig::default(),
+    };
+
+    let error = config.validate().expect_err("validation should fail");
+    assert!(error.to_string().contains("missing the [opencode] table"));
+}
+
+#[test]
+fn validation_rejects_blank_opencode_api_key() {
+    let config = toml::from_str::<AppConfig>(
+        r#"
+            [opencode]
+            api_key = "   "
+
+            [model]
+            model_name = "opencode-go/glm-5.1"
+            reasoning = "default"
+            "#,
+    )
+    .expect("config parses");
+
+    let error = config
+        .validate()
+        .expect_err("config should fail validation");
+
+    assert!(
+        error
+            .to_string()
+            .contains("opencode.api_key must not be empty")
+    );
+}
+
+#[test]
+fn parses_opencode_model_and_validates_api_key() {
+    let config: AppConfig = toml::from_str(
+        r#"
+            [opencode]
+            api_key = "opencode-secret"
+
+            [model]
+            model_name = "opencode-go/glm-5.1"
+            reasoning = "default"
+            "#,
+    )
+    .expect("config parses");
+
+    let opencode = config.opencode.as_ref().expect("opencode config");
+    assert_eq!(opencode.api_key, "opencode-secret");
+    assert_eq!(config.model.model_name, "opencode-go/glm-5.1");
+    assert_eq!(config.model.reasoning, ReasoningSetting::Default);
+    assert_eq!(config.safety.model_name, "opencode-go/glm-5.1");
+    assert_eq!(config.safety.reasoning, ReasoningSetting::Default);
+}
+
+#[test]
+fn load_from_path_replaces_unknown_opencode_model_with_opencode_default() {
+    let path = unique_temp_path("stale-opencode-main-model");
+
+    fs::write(
+        &path,
+        r#"
+            [opencode]
+            api_key = "opencode-secret"
+
+            [model]
+            model_name = "opencode-go/minimax-m2.8"
+            reasoning = "default"
+            "#,
+    )
+    .expect("write temp config");
+
+    let config = AppConfig::load_from_path(&path).expect("load sanitized config");
+
+    assert_eq!(config.model.model_name, DEFAULT_OPENCODE_MODEL_NAME);
+    assert_eq!(config.model.reasoning, ReasoningSetting::Default);
+    assert_eq!(config.safety.model_name, DEFAULT_OPENCODE_MODEL_NAME);
+    assert_eq!(config.safety.reasoning, ReasoningSetting::Default);
+
+    fs::remove_file(path).expect("remove temp config");
+}
+
+#[test]
 fn validation_requires_openrouter_credentials_for_selected_openrouter_model() {
     let config = AppConfig {
         azure: None,
         chutes: None,
         codex: None,
+        ollama: None,
+        opencode: None,
         openrouter: None,
         model: ModelSelectionConfig {
             model_name: "minimax/minimax-m2.7".into(),
@@ -410,6 +994,7 @@ fn validation_requires_openrouter_credentials_for_selected_openrouter_model() {
         ui: UiConfig::default(),
         subagents: SubagentConfig::default(),
         planning: PlanningConfig::default(),
+        history: HistoryConfig::default(),
         tools: ToolConfig::default(),
     };
 

@@ -8,18 +8,23 @@ use ratatui::{
 
 use crate::app::session::ProposedPlanEntry;
 use crate::app::{
-    App, BackgroundTerminalStatusEntry, ChatMessage, MessageStyle, SubagentStatusEntry, ToolCall,
-    ToolResultEntry, TranscriptEntry, query,
+    App, BackgroundTerminalStatusEntry, ChatMessage, HostedToolStatusEntry, MessageStyle,
+    SubagentStatusEntry, ToolCall, ToolResultEntry, TranscriptEntry, query,
 };
 use crate::todo::TodoSnapshot;
 
 use super::{
     background_terminal_activity::push_background_terminal_status_lines,
+    hosted_tool_activity::push_hosted_tool_status_lines,
     markdown::{push_message_lines, push_pending_lines, rendered_line_text},
+    scrollbar::render_vertical_scrollbar,
     subagent_activity::push_subagent_status_lines,
     todo_activity::push_todo_snapshot_lines,
     tool_activity::{push_tool_call_lines, push_tool_result_lines},
 };
+
+#[cfg(test)]
+use super::scrollbar::scrollbar_thumb_bounds;
 
 const MAX_VISIBLE_TOOL_ACTIVITY: usize = 5;
 const STARTUP_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -40,6 +45,7 @@ enum VisibleEntry<'a> {
     ProposedPlan(&'a ProposedPlanEntry),
     ToolCall(&'a ToolCall),
     ToolResult(&'a ToolResultEntry),
+    HostedToolStatus(&'a HostedToolStatusEntry),
     TodoSnapshot(&'a TodoSnapshot),
     SubagentStatus(&'a SubagentStatusEntry),
     BackgroundTerminalStatus(&'a BackgroundTerminalStatusEntry),
@@ -51,10 +57,18 @@ impl VisibleEntry<'_> {
             self,
             Self::ToolCall(_)
                 | Self::ToolResult(_)
+                | Self::HostedToolStatus(_)
                 | Self::SubagentStatus(_)
                 | Self::BackgroundTerminalStatus(_)
         )
     }
+}
+
+#[derive(Clone, Copy)]
+enum CacheAction {
+    Rebuild,
+    RefreshTail,
+    Reuse,
 }
 
 pub(super) fn render_history(
@@ -82,27 +96,47 @@ pub(super) fn render_history(
         && !query::should_show_history_busy_indicator_state(app.state());
     let mut owned_lines = None;
     let total_lines = if use_cache {
-        let transcript_revision = query::transcript_revision(app.state());
-        let cache_missing = query::history_render_cache(app.state()).is_none_or(|cache| {
-            cache.width != content_width
-                || cache.accent != accent
-                || cache.transcript_revision != transcript_revision
-        });
-        if cache_missing {
-            let lines = build_history_lines(app, content_width, accent, loading_frame);
-            crate::app::ops::history::set_history_render_cache(
-                app.state_mut(),
-                content_width,
-                accent,
-                transcript_revision,
-                lines,
-            );
-        }
-        query::history_render_cache(app.state())
-            .as_ref()
-            .expect("history cache should be populated")
-            .lines
-            .len()
+        let structure_revision = query::transcript_structure_revision(app.state());
+        let tail_revision = query::transcript_tail_revision(app.state());
+        let cache_action = query::history_render_cache(app.state())
+            .map(|cache| {
+                if cache.width != content_width
+                    || cache.accent != accent
+                    || cache.structure_revision != structure_revision
+                {
+                    CacheAction::Rebuild
+                } else if cache.tail_revision != tail_revision {
+                    CacheAction::RefreshTail
+                } else {
+                    CacheAction::Reuse
+                }
+            })
+            .unwrap_or(CacheAction::Rebuild);
+
+        let cache = match cache_action {
+            CacheAction::Rebuild => build_history_render_cache(app, content_width, accent),
+            CacheAction::RefreshTail => {
+                let mut cache = app
+                    .state_mut()
+                    .ui
+                    .history_render_cache
+                    .take()
+                    .expect("history cache should be populated");
+                if !refresh_history_tail_cache(app, &mut cache, content_width, accent) {
+                    cache = build_history_render_cache(app, content_width, accent);
+                }
+                cache
+            }
+            CacheAction::Reuse => app
+                .state_mut()
+                .ui
+                .history_render_cache
+                .take()
+                .expect("history cache should be populated"),
+        };
+        let total_lines = cache.lines.len();
+        crate::app::ops::history::set_history_render_cache(app.state_mut(), cache);
+        total_lines
     } else {
         crate::app::ops::history::clear_history_render_cache(app.state_mut());
         owned_lines = Some(build_history_lines(
@@ -170,14 +204,14 @@ fn build_history_lines(
     let mut index = 0;
 
     while index < visible_entries.len() {
-        if visible_entries[index].is_tool_activity() {
+        if visible_entries[index].1.is_tool_activity() {
             let run_end = tool_activity_run_end(&visible_entries, index);
             push_tool_activity_run_lines(&mut lines, &visible_entries[index..run_end], width);
             index = run_end;
             continue;
         }
 
-        push_visible_entry_lines(&mut lines, visible_entries[index], width, accent);
+        push_visible_entry_lines(&mut lines, visible_entries[index].1, width, accent);
         lines.push(Line::default());
         index += 1;
     }
@@ -195,32 +229,75 @@ fn build_history_lines(
     lines
 }
 
-pub(super) fn scrollbar_thumb_bounds(
-    track_height: usize,
-    total_lines: usize,
-    viewport_rows: usize,
-    scroll_position: usize,
-) -> (usize, usize) {
-    if track_height == 0 {
-        return (0, 0);
+fn build_history_render_cache(
+    app: &App,
+    width: usize,
+    accent: Color,
+) -> crate::app::ui::HistoryRenderCache {
+    let visible_entries = visible_entries(app);
+    let mut lines = Vec::new();
+    let mut tail = None;
+    let mut index = 0;
+
+    while index < visible_entries.len() {
+        if visible_entries[index].1.is_tool_activity() {
+            let run_end = tool_activity_run_end(&visible_entries, index);
+            push_tool_activity_run_lines(&mut lines, &visible_entries[index..run_end], width);
+            index = run_end;
+            continue;
+        }
+
+        let start = lines.len();
+        push_visible_entry_lines(&mut lines, visible_entries[index].1, width, accent);
+        lines.push(Line::default());
+        if index + 1 == visible_entries.len() {
+            tail = Some(crate::app::ui::HistoryTailRenderCache {
+                transcript_index: visible_entries[index].0,
+                start,
+                end: lines.len(),
+            });
+        }
+        index += 1;
     }
 
-    let total_lines = total_lines.max(1);
-    let viewport_rows = viewport_rows.max(1).min(total_lines);
-    let thumb_len =
-        ((viewport_rows as f64 / total_lines as f64) * track_height as f64).round() as usize;
-    let thumb_len = thumb_len.clamp(1, track_height);
+    crate::app::ui::HistoryRenderCache {
+        width,
+        accent,
+        structure_revision: query::transcript_structure_revision(app.state()),
+        tail_revision: query::transcript_tail_revision(app.state()),
+        lines,
+        tail,
+    }
+}
 
-    let max_scroll = total_lines.saturating_sub(viewport_rows);
-    let max_thumb_start = track_height.saturating_sub(thumb_len);
-    let thumb_start = if max_scroll == 0 || max_thumb_start == 0 {
-        0
-    } else {
-        ((scroll_position.min(max_scroll) as f64 / max_scroll as f64) * max_thumb_start as f64)
-            .round() as usize
+fn refresh_history_tail_cache(
+    app: &App,
+    cache: &mut crate::app::ui::HistoryRenderCache,
+    width: usize,
+    accent: Color,
+) -> bool {
+    let Some(tail) = cache.tail.clone() else {
+        return false;
     };
+    let Some((transcript_index, entry)) = visible_entries(app).last().copied() else {
+        return false;
+    };
+    if transcript_index != tail.transcript_index || entry.is_tool_activity() {
+        return false;
+    }
 
-    (thumb_start, thumb_len)
+    let mut replacement = Vec::new();
+    push_visible_entry_lines(&mut replacement, entry, width, accent);
+    replacement.push(Line::default());
+    let replacement_len = replacement.len();
+    cache.lines.splice(tail.start..tail.end, replacement);
+    cache.tail = Some(crate::app::ui::HistoryTailRenderCache {
+        transcript_index,
+        start: tail.start,
+        end: tail.start + replacement_len,
+    });
+    cache.tail_revision = query::transcript_tail_revision(app.state());
+    true
 }
 
 fn history_viewport_lines(
@@ -309,47 +386,47 @@ fn slice_chars(text: &str, start: usize, end: usize) -> String {
 }
 
 fn render_history_scrollbar(frame: &mut Frame, area: Rect, app: &App, accent: Color) {
-    let (thumb_start, thumb_len) = scrollbar_thumb_bounds(
-        area.height as usize,
+    render_vertical_scrollbar(
+        frame,
+        area,
         query::history_total_lines(app.state()),
         query::history_viewport_rows(app.state()),
         query::history_scroll_position(app.state()),
+        accent,
     );
-
-    let lines = (0..area.height as usize)
-        .map(|index| {
-            if index >= thumb_start && index < thumb_start + thumb_len {
-                Line::from(Span::styled(" ", Style::default().bg(accent)))
-            } else {
-                Line::from(Span::styled("│", Style::default().fg(Color::DarkGray)))
-            }
-        })
-        .collect::<Vec<_>>();
-
-    frame.render_widget(Paragraph::new(lines), area);
 }
 
-fn visible_entries(app: &App) -> Vec<VisibleEntry<'_>> {
+fn visible_entries(app: &App) -> Vec<(usize, VisibleEntry<'_>)> {
     query::entries(app.state())
         .iter()
-        .filter_map(|entry| match entry {
-            TranscriptEntry::Message(message) => Some(VisibleEntry::Message(message)),
-            TranscriptEntry::ProposedPlan(plan) => Some(VisibleEntry::ProposedPlan(plan)),
-            TranscriptEntry::ToolCall(tool_call) => Some(VisibleEntry::ToolCall(tool_call)),
+        .enumerate()
+        .filter_map(|(index, entry)| match entry {
+            TranscriptEntry::Message(message) => Some((index, VisibleEntry::Message(message))),
+            TranscriptEntry::ProposedPlan(plan) => Some((index, VisibleEntry::ProposedPlan(plan))),
+            TranscriptEntry::ToolCall(tool_call) => {
+                Some((index, VisibleEntry::ToolCall(tool_call)))
+            }
             TranscriptEntry::ToolResult(tool_result) => query::show_tool_output(app.state())
-                .then_some(VisibleEntry::ToolResult(tool_result)),
-            TranscriptEntry::TodoSnapshot(snapshot) => Some(VisibleEntry::TodoSnapshot(snapshot)),
-            TranscriptEntry::SubagentStatus(status) => Some(VisibleEntry::SubagentStatus(status)),
+                .then_some((index, VisibleEntry::ToolResult(tool_result))),
+            TranscriptEntry::HostedToolStatus(status) => {
+                Some((index, VisibleEntry::HostedToolStatus(status)))
+            }
+            TranscriptEntry::TodoSnapshot(snapshot) => {
+                Some((index, VisibleEntry::TodoSnapshot(snapshot)))
+            }
+            TranscriptEntry::SubagentStatus(status) => {
+                Some((index, VisibleEntry::SubagentStatus(status)))
+            }
             TranscriptEntry::BackgroundTerminalStatus(status) => {
-                Some(VisibleEntry::BackgroundTerminalStatus(status))
+                Some((index, VisibleEntry::BackgroundTerminalStatus(status)))
             }
         })
         .collect()
 }
 
-fn tool_activity_run_end(entries: &[VisibleEntry<'_>], start: usize) -> usize {
+fn tool_activity_run_end(entries: &[(usize, VisibleEntry<'_>)], start: usize) -> usize {
     let mut end = start;
-    while end < entries.len() && entries[end].is_tool_activity() {
+    while end < entries.len() && entries[end].1.is_tool_activity() {
         end += 1;
     }
     end
@@ -379,6 +456,9 @@ fn push_visible_entry_lines(
         }
         VisibleEntry::ToolCall(tool_call) => push_tool_call_lines(lines, tool_call, width),
         VisibleEntry::ToolResult(tool_result) => push_tool_result_lines(lines, tool_result, width),
+        VisibleEntry::HostedToolStatus(status) => {
+            push_hosted_tool_status_lines(lines, status, width)
+        }
         VisibleEntry::TodoSnapshot(snapshot) => {
             push_todo_snapshot_lines(lines, snapshot, width, accent)
         }
@@ -398,7 +478,7 @@ fn commentary_separator_line(width: usize) -> Line<'static> {
 
 fn push_tool_activity_run_lines(
     lines: &mut Vec<Line<'static>>,
-    entries: &[VisibleEntry<'_>],
+    entries: &[(usize, VisibleEntry<'_>)],
     width: usize,
 ) {
     let hidden_count = entries.len().saturating_sub(MAX_VISIBLE_TOOL_ACTIVITY);
@@ -411,11 +491,14 @@ fn push_tool_activity_run_lines(
         )));
     }
 
-    for entry in entries.iter().skip(hidden_count).copied() {
+    for (_, entry) in entries.iter().skip(hidden_count).copied() {
         match entry {
             VisibleEntry::ToolCall(tool_call) => push_tool_call_lines(lines, tool_call, width),
             VisibleEntry::ToolResult(tool_result) => {
                 push_tool_result_lines(lines, tool_result, width)
+            }
+            VisibleEntry::HostedToolStatus(status) => {
+                push_hosted_tool_status_lines(lines, status, width)
             }
             VisibleEntry::TodoSnapshot(_) => {
                 unreachable!("todo snapshots are rendered outside tool activity runs")

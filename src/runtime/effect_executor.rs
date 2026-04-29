@@ -1,7 +1,7 @@
 use std::io::Write;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use tokio::{runtime::Runtime, sync::mpsc};
 
 use crate::{
@@ -9,8 +9,7 @@ use crate::{
     agent::AgentContext,
     app::{self, App, Effect, query},
     background_terminals::{
-        BackgroundTerminalInspectRequest, BackgroundTerminalManager,
-        format_terminal_inspect_message, format_terminal_list_message,
+        BackgroundTerminalManager, format_terminal_inspect_message, format_terminal_list_message,
     },
     config::AppConfig,
     debug_log::log_debug,
@@ -24,11 +23,15 @@ use crate::{
     session_store::SessionStore,
     stats::StatsStore,
     subagents::SubagentManager,
-    ui,
+    web::WebService,
 };
 
 use super::side_channel_task_manager::SideChannelTaskManager;
 use super::{RuntimeEvent, clipboard::osc52_copy_sequence, reply_driver::ReplyDriver};
+
+fn tool_memory_service(config: &AppConfig, memory: &MemoryService) -> Option<MemoryService> {
+    config.memory.enabled.then_some(memory.clone())
+}
 
 pub(crate) struct EffectExecutor<'a> {
     pub(crate) runtime: &'a Runtime,
@@ -46,48 +49,54 @@ pub(crate) struct EffectExecutor<'a> {
     pub(crate) terminals: &'a BackgroundTerminalManager,
 }
 
-fn rebuild_main_llm(
+pub(crate) fn rebuild_main_llm(
     runtime: &Runtime,
     config: &AppConfig,
     llm: &LlmService,
     access_mode: app::AccessMode,
+    full_system_access: bool,
     subagents: &SubagentManager,
     terminals: &BackgroundTerminalManager,
     memory: &MemoryService,
+    web: WebService,
 ) -> Result<LlmService> {
     let _guard = runtime.enter();
     LlmService::from_config_with_controllers(
         config,
-        AgentContext::main(access_mode),
+        AgentContext::main_with_full_system_access(access_mode, full_system_access),
         llm.approvals(),
         llm.shell_approvals(),
         llm.ask_user_controller(),
         llm.todo_available(),
-        Some(memory.clone()),
+        tool_memory_service(config, memory),
         Some(subagents.clone()),
         Some(terminals.clone()),
+        web,
     )
 }
 
-fn build_fresh_main_llm(
+pub(crate) fn build_fresh_main_llm(
     runtime: &Runtime,
     config: &AppConfig,
     access_mode: app::AccessMode,
     approval_mode: app::ApprovalMode,
+    full_system_access: bool,
     subagents: &SubagentManager,
     terminals: &BackgroundTerminalManager,
     memory: &MemoryService,
+    web: WebService,
 ) -> Result<LlmService> {
     let _guard = runtime.enter();
     LlmService::from_config(
         config,
-        AgentContext::main(access_mode),
+        AgentContext::main_with_full_system_access(access_mode, full_system_access),
         WriteApprovalController::new(approval_mode),
         Some(AskUserController::default()),
         true,
-        Some(memory.clone()),
+        tool_memory_service(config, memory),
         Some(subagents.clone()),
         Some(terminals.clone()),
+        web,
     )
 }
 
@@ -96,9 +105,11 @@ fn sync_main_llm_access_mode(
     config: &AppConfig,
     llm: &mut LlmService,
     access_mode: app::AccessMode,
+    full_system_access: bool,
     subagents: &SubagentManager,
     terminals: &BackgroundTerminalManager,
     memory: &MemoryService,
+    web: WebService,
 ) -> Result<bool> {
     if llm.access_mode == access_mode {
         return Ok(false);
@@ -109,9 +120,11 @@ fn sync_main_llm_access_mode(
         config,
         llm,
         access_mode,
+        full_system_access,
         subagents,
         terminals,
         memory,
+        web,
     )?;
     Ok(true)
 }
@@ -161,7 +174,9 @@ impl EffectExecutor<'_> {
                     app::ops::session::begin_session_title_request(self.app.state_mut(), reply_id);
                     let title_llm = self.llm.clone();
                     let title_stream_tx = self.stream_tx.clone();
-                    let title_stats_hook = stats_hook.clone();
+                    let title_stats_hook = self
+                        .stats
+                        .hook_for_model(query::model_name(self.app.state()).to_string());
                     self.runtime.spawn(async move {
                         let title = title_llm
                             .generate_session_title(session_title_prompt, title_stats_hook)
@@ -326,10 +341,7 @@ impl EffectExecutor<'_> {
                 Ok(())
             }
             Effect::ShowStats => {
-                app::ops::transcript::push_agent_message(
-                    self.app.state_mut(),
-                    self.stats.report()?.render(),
-                );
+                app::ops::stats::open_stats_screen(self.app.state_mut(), self.stats.report()?);
                 Ok(())
             }
             Effect::OpenSessionPicker => {
@@ -362,8 +374,7 @@ impl EffectExecutor<'_> {
             Effect::LogoutCodex => self.logout_codex(),
             Effect::RotateSession => {
                 self.side_channel_task_manager.cancel_all();
-                self.runtime
-                    .block_on(self.subagents.cancel_all_running(false));
+                self.subagents.cancel_all_running_now(false);
                 self.terminals.cancel_all_running();
                 self.stats.rotate_session()?;
                 let rebuilt = build_fresh_main_llm(
@@ -371,9 +382,11 @@ impl EffectExecutor<'_> {
                     self.config,
                     query::mode(self.app.state()),
                     query::approval_mode(self.app.state()),
+                    self.app.state().session.full_system_access,
                     self.subagents,
                     self.terminals,
                     self.memory,
+                    self.llm.web_service(),
                 )?;
                 *self.llm = rebuilt;
                 self.session_store
@@ -536,6 +549,7 @@ impl EffectExecutor<'_> {
                 let todo_available = self.llm.todo_available();
                 let write_approvals = self.llm.approvals();
                 let shell_approvals = self.llm.shell_approvals();
+                let web = self.llm.web_service();
                 let stream_tx = self.stream_tx.clone();
                 let stats = self.stats.clone();
                 let task = self.runtime.spawn(async move {
@@ -558,6 +572,7 @@ impl EffectExecutor<'_> {
                     let synth_stats = stats.clone();
                     let workflow_write_approvals = write_approvals.clone();
                     let workflow_shell_approvals = shell_approvals.clone();
+                    let planning_web = web.clone();
                     let synthesize = Arc::new(move |prompt, history, history_model_name| {
                         let config = synth_config.clone();
                         let stream_tx = synth_stream_tx.clone();
@@ -565,10 +580,14 @@ impl EffectExecutor<'_> {
                         let ask_user = ask_user.clone();
                         let write_approvals = write_approvals.clone();
                         let shell_approvals = shell_approvals.clone();
+                        let web = planning_web.clone();
                         Box::pin(async move {
                             let llm = LlmService::from_config_with_controllers(
                                 &config,
-                                AgentContext::main(app::AccessMode::ReadOnly),
+                                AgentContext::main_with_full_system_access(
+                                    app::AccessMode::ReadOnly,
+                                    false,
+                                ),
                                 write_approvals,
                                 shell_approvals,
                                 ask_user,
@@ -576,6 +595,7 @@ impl EffectExecutor<'_> {
                                 None,
                                 None,
                                 None,
+                                web,
                             )
                             .map_err(|error| {
                                 format!("Failed to start planning synthesis: {error}")
@@ -607,10 +627,14 @@ impl EffectExecutor<'_> {
                         description,
                         history,
                         history_model_name,
+                        app::AccessMode::ReadOnly,
+                        false,
+                        true,
                         config,
                         subagents,
                         workflow_write_approvals,
                         workflow_shell_approvals,
+                        web,
                         on_finalization_started,
                         on_failure,
                         synthesize,
@@ -688,8 +712,7 @@ impl EffectExecutor<'_> {
             Effect::CancelPendingReply => {
                 log_debug("effect_executor", "cancel_pending_reply effect");
                 self.reply_driver.cancel_active_reply(self.llm);
-                self.runtime
-                    .block_on(self.subagents.cancel_all_running(true));
+                self.subagents.cancel_all_running_now(true);
                 Ok(())
             }
             Effect::ListBackgroundTerminals => {
@@ -701,13 +724,7 @@ impl EffectExecutor<'_> {
                 Ok(())
             }
             Effect::InspectBackgroundTerminal { id } => {
-                let result = self.runtime.block_on(self.terminals.inspect(
-                    &id,
-                    BackgroundTerminalInspectRequest {
-                        after_sequence: None,
-                        wait_for_change_ms: None,
-                    },
-                ))?;
+                let result = self.terminals.inspect_now(&id, None)?;
                 app::ops::transcript::push_agent_message(
                     self.app.state_mut(),
                     format_terminal_inspect_message(&result),
@@ -735,21 +752,26 @@ impl EffectExecutor<'_> {
             config,
             self.llm,
             access_mode,
+            self.app.state().session.full_system_access,
             self.subagents,
             self.terminals,
             self.memory,
+            self.llm.web_service(),
         )
     }
 
     fn sync_llm_access_mode(&mut self, access_mode: app::AccessMode) -> Result<bool> {
+        let web = self.llm.web_service();
         sync_main_llm_access_mode(
             self.runtime,
             self.config,
             self.llm,
             access_mode,
+            self.app.state().session.full_system_access,
             self.subagents,
             self.terminals,
             self.memory,
+            web,
         )
     }
 
@@ -789,6 +811,8 @@ impl EffectExecutor<'_> {
         updated_config.safety.reasoning = snapshot.runtime.safety_reasoning;
         updated_config.memory.extraction.model_name = snapshot.runtime.memory_model_name.clone();
         updated_config.memory.extraction.reasoning = snapshot.runtime.memory_reasoning;
+        updated_config.history.mode = snapshot.runtime.history_mode;
+        updated_config.history.retained_steps = snapshot.runtime.history_retained_steps;
         updated_config.planning.agents = sanitize_planning_agents(
             &snapshot.runtime.model_name,
             &snapshot.runtime.planning_agents,
@@ -798,9 +822,11 @@ impl EffectExecutor<'_> {
             &updated_config,
             snapshot.runtime.access_mode,
             snapshot.runtime.approval_mode,
+            snapshot.runtime.full_system_access,
             self.subagents,
             self.terminals,
             self.memory,
+            self.llm.web_service(),
         )?;
         Ok((updated_config, rebuilt))
     }
@@ -838,8 +864,7 @@ impl EffectExecutor<'_> {
 
         self.reply_driver.cancel_active_reply(self.llm);
         self.side_channel_task_manager.cancel_all();
-        self.runtime
-            .block_on(self.subagents.cancel_all_running(true));
+        self.subagents.cancel_all_running_now(true);
         self.terminals.cancel_all_running();
 
         self.memory.set_config(updated_config.memory.clone());
@@ -855,7 +880,30 @@ impl EffectExecutor<'_> {
     }
 
     fn login_codex(&mut self) -> Result<()> {
-        self.run_codex_login_flow()
+        if self.app.state().session.pending_codex_login {
+            app::ops::transcript::push_error_message(
+                self.app.state_mut(),
+                "Codex login is already in progress.",
+            );
+            return Ok(());
+        }
+
+        self.app.state_mut().session.pending_codex_login = true;
+        app::ops::transcript::push_agent_message(
+            self.app.state_mut(),
+            "Starting Codex device login.",
+        );
+        let stream_tx = self.stream_tx.clone();
+        self.runtime.spawn(async move {
+            let event = match crate::codex::begin_device_code_login().await {
+                Ok(session) => RuntimeEvent::CodexLoginStarted { session },
+                Err(error) => RuntimeEvent::CodexLoginCompleted {
+                    result: Err(error.to_string()),
+                },
+            };
+            let _ = stream_tx.send(event);
+        });
+        Ok(())
     }
 
     fn logout_codex(&mut self) -> Result<()> {
@@ -876,48 +924,6 @@ impl EffectExecutor<'_> {
         Ok(())
     }
 
-    fn run_codex_login_flow(&mut self) -> Result<()> {
-        let session = self
-            .runtime
-            .block_on(crate::codex::begin_device_code_login())?;
-        let prompt = session.prompt().clone();
-        app::ops::transcript::push_agent_message(
-            self.app.state_mut(),
-            format!(
-                "Open {} and enter code `{}`. Waiting for Codex device login to complete.",
-                prompt.verification_url, prompt.user_code
-            ),
-        );
-        self.draw_ui()?;
-
-        let codex = self
-            .runtime
-            .block_on(crate::codex::complete_device_code_login(session))?;
-        let updated_config = AppConfig::set_default_codex_auth(Some(&codex))?;
-        self.sync_runtime_config(updated_config)?;
-        app::ops::transcript::push_agent_message(
-            self.app.state_mut(),
-            "Codex login complete. Credentials were saved to config.toml.",
-        );
-        let codex_model_count = self.codex_model_count();
-        app::ops::transcript::push_agent_message(
-            self.app.state_mut(),
-            format!(
-                "Loaded {} bundled Codex model{} for the picker.",
-                codex_model_count,
-                if codex_model_count == 1 { "" } else { "s" }
-            ),
-        );
-        Ok(())
-    }
-
-    fn codex_model_count(&self) -> usize {
-        model_registry::models()
-            .iter()
-            .filter(|model| model.provider == ModelProvider::Codex)
-            .count()
-    }
-
     fn ensure_codex_auth_for_model(&mut self, model_name: &str) -> Result<()> {
         self.ensure_codex_auth_for_models(std::iter::once(model_name))
     }
@@ -933,7 +939,9 @@ impl EffectExecutor<'_> {
             .as_ref()
             .is_some_and(|config| config.is_authenticated());
         if needs_codex_auth && !has_auth {
-            self.run_codex_login_flow()?;
+            return Err(anyhow!(
+                "Codex authentication required. Run /login and retry."
+            ));
         }
         Ok(())
     }
@@ -956,11 +964,6 @@ impl EffectExecutor<'_> {
             Some(ModelProvider::Codex)
         )
     }
-
-    fn draw_ui(&mut self) -> Result<()> {
-        self.terminal.draw(|frame| ui::render(frame, self.app))?;
-        Ok(())
-    }
 }
 
 #[cfg(test)]
@@ -973,14 +976,15 @@ mod tests {
         app::{AccessMode, ApprovalMode},
         background_terminals::BackgroundTerminalManager,
         config::{
-            AppConfig, AzureConfig, MemoryConfig, ModelSelectionConfig, ReasoningEffort,
-            SafetyConfig, SubagentConfig, ToolConfig, UiConfig,
+            AppConfig, AzureConfig, HistoryConfig, MemoryConfig, ModelSelectionConfig,
+            ReasoningEffort, SafetyConfig, SubagentConfig, ToolConfig, UiConfig,
         },
         features::planning::PlanningConfig,
         llm::{AskUserController, LlmService, WriteApprovalController},
         memory::MemoryService,
         stats::StatsStore,
         subagents::SubagentManager,
+        web::WebService,
     };
 
     fn sample_config() -> AppConfig {
@@ -992,6 +996,8 @@ mod tests {
             }),
             chutes: None,
             codex: None,
+            ollama: None,
+            opencode: None,
             openrouter: None,
             model: ModelSelectionConfig {
                 model_name: "gpt-5.4-mini".into(),
@@ -1005,6 +1011,7 @@ mod tests {
             ui: UiConfig::default(),
             subagents: SubagentConfig::default(),
             planning: PlanningConfig::default(),
+            history: HistoryConfig::default(),
             tools: ToolConfig::default(),
         }
     }
@@ -1020,6 +1027,7 @@ mod tests {
         let memory =
             MemoryService::new(config.memory.clone(), std::env::current_dir().expect("cwd"))
                 .expect("memory");
+        let web = WebService::new(config.tools.max_output_tokens).expect("web");
         let _guard = runtime.enter();
         let mut llm = LlmService::from_config(
             &config,
@@ -1030,6 +1038,7 @@ mod tests {
             Some(memory.clone()),
             Some(subagents.clone()),
             Some(terminals.clone()),
+            web.clone(),
         )
         .expect("service builds");
         drop(_guard);
@@ -1039,9 +1048,11 @@ mod tests {
             &config,
             &mut llm,
             AccessMode::ReadWrite,
+            false,
             &subagents,
             &terminals,
             &memory,
+            web,
         )
         .expect("runtime mode sync succeeds");
 

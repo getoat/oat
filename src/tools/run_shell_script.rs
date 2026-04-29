@@ -1,4 +1,6 @@
 use std::{
+    collections::VecDeque,
+    io,
     path::{Path, PathBuf},
     process::Stdio,
     time::Duration,
@@ -7,19 +9,28 @@ use std::{
 use rig::{completion::ToolDefinition, tool::Tool};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tokio::{process::Command, time::timeout};
+use tokio::{
+    io::{AsyncRead, AsyncReadExt},
+    process::Command,
+    task::JoinHandle,
+    time::timeout,
+};
 
 use super::{
     common::ToolExecError,
-    shell_command::{ShellCommandRequest, display_shell_command, resolve_shell_cwd},
+    shell_command::{ShellCommandRequest, display_shell_command, resolve_shell_cwd_with_access},
 };
 
 pub const RUN_SHELL_SCRIPT_TOOL_NAME: &str = "RunShellScript";
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
+const OUTPUT_HEAD_BYTES: usize = 16 * 1024;
+const OUTPUT_TAIL_BYTES: usize = 16 * 1024;
+const READ_CHUNK_BYTES: usize = 4 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RunShellScriptTool {
     root: PathBuf,
+    allow_full_system_access: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -30,9 +41,95 @@ pub struct RunShellScriptArgs {
     pub timeout_ms: Option<u64>,
 }
 
+#[derive(Debug, Default)]
+struct StreamCapture {
+    head: Vec<u8>,
+    tail: VecDeque<u8>,
+    total_bytes: usize,
+    newline_count: usize,
+    ends_with_newline: bool,
+}
+
+impl StreamCapture {
+    fn push(&mut self, chunk: &[u8]) {
+        if chunk.is_empty() {
+            return;
+        }
+
+        self.total_bytes += chunk.len();
+        self.newline_count += chunk.iter().filter(|&&byte| byte == b'\n').count();
+        self.ends_with_newline = chunk.last().copied() == Some(b'\n');
+
+        let head_remaining = OUTPUT_HEAD_BYTES.saturating_sub(self.head.len());
+        if head_remaining > 0 {
+            self.head
+                .extend_from_slice(&chunk[..chunk.len().min(head_remaining)]);
+        }
+
+        for byte in chunk {
+            if self.tail.len() == OUTPUT_TAIL_BYTES {
+                self.tail.pop_front();
+            }
+            self.tail.push_back(*byte);
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.total_bytes == 0
+    }
+
+    fn line_count(&self) -> usize {
+        if self.total_bytes == 0 {
+            0
+        } else {
+            self.newline_count + usize::from(!self.ends_with_newline)
+        }
+    }
+
+    fn excerpt(&self) -> String {
+        let tail_bytes = self.tail.iter().copied().collect::<Vec<_>>();
+        let overlap = self
+            .head
+            .len()
+            .saturating_add(tail_bytes.len())
+            .saturating_sub(self.total_bytes);
+        let suffix = &tail_bytes[overlap.min(tail_bytes.len())..];
+        let head = String::from_utf8_lossy(&self.head);
+        let suffix = String::from_utf8_lossy(suffix);
+
+        if self.total_bytes > OUTPUT_HEAD_BYTES + OUTPUT_TAIL_BYTES {
+            format!("{head}\n\n[... omitted middle output ...]\n\n{suffix}",)
+        } else {
+            format!("{head}{suffix}")
+        }
+    }
+
+    fn render_section(&self, label: &str) -> Option<String> {
+        if self.is_empty() {
+            return None;
+        }
+
+        let mut section = format!(
+            "{label}: {} bytes across {} line{}",
+            self.total_bytes,
+            self.line_count(),
+            if self.line_count() == 1 { "" } else { "s" }
+        );
+        if self.total_bytes > OUTPUT_HEAD_BYTES + OUTPUT_TAIL_BYTES {
+            section.push_str(" (excerpt truncated)");
+        }
+        section.push_str("\n");
+        section.push_str(&self.excerpt());
+        Some(section)
+    }
+}
+
 impl RunShellScriptTool {
-    pub fn new(root: PathBuf) -> Self {
-        Self { root }
+    pub fn new_with_access(root: PathBuf, allow_full_system_access: bool) -> Self {
+        Self {
+            root,
+            allow_full_system_access,
+        }
     }
 }
 
@@ -72,50 +169,115 @@ impl Tool for RunShellScriptTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        run_shell_script(&self.root, &args).await
+        run_shell_script_with_access(&self.root, &args, self.allow_full_system_access).await
     }
 }
 
+#[cfg(test)]
 pub(crate) async fn run_shell_script(
     root: &Path,
     args: &RunShellScriptArgs,
 ) -> Result<String, ToolExecError> {
-    let cwd = resolve_shell_cwd(root, args.command.cwd.as_deref())?;
-    let cwd_label = args.command.cwd_label(root)?;
+    run_shell_script_with_access(root, args, false).await
+}
+
+pub(crate) async fn run_shell_script_with_access(
+    root: &Path,
+    args: &RunShellScriptArgs,
+    allow_full_system_access: bool,
+) -> Result<String, ToolExecError> {
+    let cwd =
+        resolve_shell_cwd_with_access(root, args.command.cwd.as_deref(), allow_full_system_access)?;
+    let cwd_label = args
+        .command
+        .cwd_label_with_access(root, allow_full_system_access)?;
     let display_command = display_shell_command(args.command.script.as_str());
     let timeout_ms = args.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS).max(1);
 
-    let mut child = Command::new("bash");
-    child.arg("-lc");
-    child.arg(args.command.script.as_str());
-    child.current_dir(&cwd);
-    child.stdout(Stdio::piped());
-    child.stderr(Stdio::piped());
+    let mut command = Command::new("bash");
+    command.arg("-lc");
+    command.arg(args.command.script.as_str());
+    command.current_dir(&cwd);
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
 
-    let output = timeout(Duration::from_millis(timeout_ms), child.output())
-        .await
-        .map_err(|_| {
-            ToolExecError::new(format!(
-                "Shell command timed out after {timeout_ms}ms.\nCommand: {display_command}\nWorking directory: {cwd_label}"
-            ))
-        })?
+    let mut child = command
+        .spawn()
         .map_err(|error| ToolExecError::new(format!("failed to launch shell command: {error}")))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| ToolExecError::new("failed to capture stdout"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| ToolExecError::new("failed to capture stderr"))?;
+
+    let stdout_task = tokio::spawn(capture_stream(stdout));
+    let stderr_task = tokio::spawn(capture_stream(stderr));
+
+    let status = match timeout(Duration::from_millis(timeout_ms), child.wait()).await {
+        Ok(status) => status.map_err(|error| {
+            ToolExecError::new(format!("failed to wait on shell command: {error}"))
+        })?,
+        Err(_) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            let stdout = join_capture(stdout_task).await?;
+            let stderr = join_capture(stderr_task).await?;
+            return Err(ToolExecError::new(format_timeout_result(
+                &display_command,
+                &cwd_label,
+                timeout_ms,
+                &stdout,
+                &stderr,
+            )));
+        }
+    };
+
+    let stdout = join_capture(stdout_task).await?;
+    let stderr = join_capture(stderr_task).await?;
 
     Ok(format_shell_result(
         &display_command,
         &cwd_label,
-        output.status.code(),
-        String::from_utf8_lossy(&output.stdout).as_ref(),
-        String::from_utf8_lossy(&output.stderr).as_ref(),
+        status.code(),
+        &stdout,
+        &stderr,
     ))
+}
+
+async fn capture_stream<R>(mut reader: R) -> io::Result<StreamCapture>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut capture = StreamCapture::default();
+    let mut buffer = vec![0_u8; READ_CHUNK_BYTES];
+
+    loop {
+        let read = reader.read(&mut buffer).await?;
+        if read == 0 {
+            return Ok(capture);
+        }
+        capture.push(&buffer[..read]);
+    }
+}
+
+async fn join_capture(
+    handle: JoinHandle<io::Result<StreamCapture>>,
+) -> Result<StreamCapture, ToolExecError> {
+    handle
+        .await
+        .map_err(|error| ToolExecError::new(format!("failed to capture process output: {error}")))?
+        .map_err(|error| ToolExecError::new(format!("failed to read process output: {error}")))
 }
 
 fn format_shell_result(
     command: &str,
     cwd: &str,
     exit_code: Option<i32>,
-    stdout: &str,
-    stderr: &str,
+    stdout: &StreamCapture,
+    stderr: &StreamCapture,
 ) -> String {
     let mut sections = vec![
         format!("Command: {command}"),
@@ -128,11 +290,37 @@ fn format_shell_result(
         ),
     ];
 
-    if !stdout.is_empty() {
-        sections.push(format!("STDOUT:\n{stdout}"));
+    if let Some(section) = stdout.render_section("STDOUT") {
+        sections.push(section);
     }
-    if !stderr.is_empty() {
-        sections.push(format!("STDERR:\n{stderr}"));
+    if let Some(section) = stderr.render_section("STDERR") {
+        sections.push(section);
+    }
+    if stdout.is_empty() && stderr.is_empty() {
+        sections.push("Output: (empty)".into());
+    }
+
+    sections.join("\n\n")
+}
+
+fn format_timeout_result(
+    command: &str,
+    cwd: &str,
+    timeout_ms: u64,
+    stdout: &StreamCapture,
+    stderr: &StreamCapture,
+) -> String {
+    let mut sections = vec![
+        format!("Shell command timed out after {timeout_ms}ms."),
+        format!("Command: {command}"),
+        format!("Working directory: {cwd}"),
+    ];
+
+    if let Some(section) = stdout.render_section("Partial STDOUT") {
+        sections.push(section);
+    }
+    if let Some(section) = stderr.render_section("Partial STDERR") {
+        sections.push(section);
     }
     if stdout.is_empty() && stderr.is_empty() {
         sections.push("Output: (empty)".into());
@@ -146,6 +334,7 @@ mod tests {
     use super::*;
     use crate::tools::common::test_support::TempTree;
     use crate::tools::display_requested_shell_cwd;
+    use crate::tools::shell_command::{resolve_shell_cwd, resolve_shell_cwd_with_access};
 
     #[tokio::test]
     async fn run_shell_script_executes_in_workspace_root() {
@@ -198,12 +387,29 @@ mod tests {
         );
     }
 
+    #[test]
+    fn resolve_shell_cwd_allows_workspace_escape_with_full_access() {
+        let tree = TempTree::new();
+
+        let cwd =
+            resolve_shell_cwd_with_access(&tree.root, Some(".."), true).expect("cwd resolves");
+
+        assert_eq!(
+            cwd,
+            tree.root
+                .parent()
+                .expect("temp root has parent")
+                .canonicalize()
+                .expect("canonical parent")
+        );
+    }
+
     #[tokio::test]
     async fn run_shell_script_times_out() {
         let tree = TempTree::new();
         let args = RunShellScriptArgs {
             command: ShellCommandRequest {
-                script: "sleep 1".into(),
+                script: "printf start && sleep 1".into(),
                 cwd: None,
                 intent: "timeout".into(),
             },
@@ -214,6 +420,28 @@ mod tests {
             .await
             .expect_err("must time out");
         assert!(error.to_string().contains("timed out"));
+        assert!(
+            error.to_string().contains("Partial STDOUT")
+                || error.to_string().contains("Output: (empty)")
+        );
+    }
+
+    #[tokio::test]
+    async fn run_shell_script_truncates_large_output() {
+        let tree = TempTree::new();
+        let args = RunShellScriptArgs {
+            command: ShellCommandRequest {
+                script: "for _ in $(seq 1 40000); do printf x; done".into(),
+                cwd: None,
+                intent: "large output".into(),
+            },
+            timeout_ms: Some(5_000),
+        };
+
+        let output = run_shell_script(&tree.root, &args).await.expect("command");
+
+        assert!(output.contains("excerpt truncated"));
+        assert!(output.contains("omitted middle output"));
     }
 
     #[test]
