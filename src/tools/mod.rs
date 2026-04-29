@@ -15,11 +15,14 @@ mod read_files;
 mod run_shell_script;
 mod shell_command;
 mod subagent;
+mod task;
 mod todo;
 mod web_run;
 mod write_file;
 
-pub(crate) use apply_patches::{ApplyPatchesArgs, ApplyPatchesTool, TextPatch};
+pub(crate) use apply_patches::{
+    APPLY_PATCH_TOOL_NAME, ApplyPatchesArgs, ApplyPatchesTool, TextPatch,
+};
 pub(crate) use ask_user::AskUserTool;
 pub(crate) use background_terminal::{
     INSPECT_BACKGROUND_TERMINAL_TOOL_NAME, InspectBackgroundTerminalTool,
@@ -31,7 +34,7 @@ pub(crate) use catalog::{
     ToolContext, is_mutation_tool, tool_names_for_context, tools_for_context,
 };
 pub(crate) use commentary::{CommentaryArgs, CommentaryTool};
-pub(crate) use delete_path::{DeletePathArgs, DeletePathTool};
+pub(crate) use delete_path::{DELETE_PATH_TOOL_NAME, DeletePathArgs, DeletePathTool};
 pub(crate) use grep::GrepTool;
 pub(crate) use list::ListTool;
 pub(crate) use memory::{
@@ -54,6 +57,12 @@ pub(crate) use subagent::{
     INSPECT_SUBAGENT_TOOL_NAME, InspectSubagentTool, SPAWN_SUBAGENT_TOOL_NAME, SpawnSubagentTool,
     WAIT_SUBAGENT_TOOL_NAME, WaitSubagentTool,
 };
+#[allow(unused_imports)]
+pub(crate) use task::CriterionDraft;
+pub(crate) use task::{
+    AddCriterionTool, ClearCurrentTaskTool, RemoveCriterionTool, SetCurrentTaskTool, TaskUpdate,
+    UpdateCriterionTool, is_task_tool_name, parse_task_update,
+};
 pub(crate) use todo::TodoTool;
 pub(crate) use web_run::WebRunTool;
-pub(crate) use write_file::{WriteFileArgs, WriteFileTool};
+pub(crate) use write_file::{WRITE_FILE_TOOL_NAME, WriteFileArgs, WriteFileTool};

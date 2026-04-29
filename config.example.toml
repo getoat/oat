@@ -165,6 +165,20 @@ retained_steps = 1
 model_name = "gpt-5.4-mini"
 reasoning = "medium"
 
+# End-of-turn critic. When a current task has been registered (via the
+# set_current_task tool), the critic runs after each agent turn, checks the
+# turn against the task's acceptance criteria, and can re-enter the agent
+# loop with feedback if the work is incomplete.
+# Set enabled = false to disable entirely; the task/criteria tools remain
+# callable but no automatic verification pass runs.
+[critic]
+enabled = true
+# model_name and reasoning default to the main [model] if omitted.
+# model_name = "gpt-5.4-mini"
+# reasoning = "medium"
+max_retries = 2
+max_tool_steps = 12
+
 [tools]
 # Tool outputs are truncated after approximately this many tokens.
 max_output_tokens = 10000

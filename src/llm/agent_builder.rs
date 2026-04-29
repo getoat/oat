@@ -22,6 +22,13 @@ const OPENROUTER_REFERER: &str = "https://getoat.app";
 const OPENROUTER_TITLE: &str = "oat";
 const OPENAI_BETA_HEADER: &str = "responses=experimental";
 const OPENAI_ORIGINATOR_HEADER_VALUE: &str = "codex_cli_rs";
+const CRITIC_SYSTEM_PROMPT: &str = concat!(
+    "You are a verification critic for oat, an autonomous coding agent.\n",
+    "Your only job is to determine whether the active task is complete against its acceptance criteria.\n",
+    "Use the provided read-only tools to inspect the workspace and run approval-gated verification commands when needed.\n",
+    "Do not modify files, alter task criteria, ask the user questions, or delegate work.\n",
+    "Return only the requested JSON verdict."
+);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct RequestFeatures {
@@ -132,6 +139,10 @@ fn execution_mode_label(access_mode: AccessMode) -> &'static str {
 }
 
 pub(crate) fn mode_preamble(context: &AgentContext) -> String {
+    if matches!(context.role, AgentRole::Critic) {
+        return CRITIC_SYSTEM_PROMPT.to_string();
+    }
+
     let mut preamble = SYSTEM_PROMPT.trim().replace(
         "{{EXECUTION_MODE}}",
         execution_mode_label(context.access_mode),
@@ -148,6 +159,7 @@ pub(crate) fn mode_preamble(context: &AgentContext) -> String {
                 "\n\nYou are running as a subagent on behalf of the main agent. You start with fresh context, so rely on the delegated prompt and your own tool exploration. Focus tightly on the delegated task and return a concise result that the main agent can use directly. You cannot spawn subagents of your own.",
             );
         }
+        AgentRole::Critic => unreachable!("critic preamble is returned before main prompt setup"),
     }
 
     match context.access_mode {

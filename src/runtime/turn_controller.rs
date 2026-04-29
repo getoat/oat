@@ -1,8 +1,11 @@
+use std::sync::Arc;
+
 use tokio::{runtime::Runtime, sync::mpsc};
 
 use crate::{
     Tui,
-    app::{Action, App, Effect, query},
+    agent::AgentContext,
+    app::{Action, App, Effect, PendingReplyKind, query},
     background_terminals::{BackgroundTerminalManager, BackgroundTerminalUiEvent},
     config::AppConfig,
     debug_log::log_debug,
@@ -100,6 +103,7 @@ impl<'a> TurnController<'a> {
         );
         let effect = match runtime_event {
             RuntimeEvent::MainReply { reply_id, event } => {
+                let pending_kind = query::active_reply_kind(self.app.state());
                 let pending_seed = matches!(
                     event,
                     crate::app::StreamEvent::TurnEnded {
@@ -135,7 +139,9 @@ impl<'a> TurnController<'a> {
                 }
 
                 let effect = self.app.apply(Action::StreamEvent { reply_id, event });
-                if let (Some(seed), Some(assistant_response)) = (pending_seed, pending_plain_text) {
+                if let (Some(seed), Some(assistant_response)) =
+                    (pending_seed, pending_plain_text.clone())
+                {
                     let transcript_entries =
                         self.app.state().session.entries[seed.transcript_len_before..].to_vec();
                     let input = CompletedTurnMemoryInput {
@@ -161,12 +167,29 @@ impl<'a> TurnController<'a> {
                         }
                     });
                 }
+                if pending_kind == Some(PendingReplyKind::Normal) && pending_plain_text.is_some() {
+                    self.spawn_critic_if_applicable();
+                }
                 effect
             }
             RuntimeEvent::SideChannel { reply_id, event } => {
                 self.side_channel_task_manager
                     .clear_completed_task(reply_id);
                 self.app.apply(Action::SideChannelEvent { reply_id, event })
+            }
+            RuntimeEvent::CriticFinished { reply_id, result } => {
+                self.reply_driver.clear_completed_task(
+                    reply_id,
+                    &crate::app::StreamEvent::TurnEnded {
+                        reason: crate::app::TurnEndReason::Completed,
+                        history: None,
+                    },
+                );
+                if query::active_reply_id(self.app.state()) == Some(reply_id) {
+                    crate::app::ops::session::clear_pending_reply_only(self.app.state_mut());
+                }
+                self.apply_critic_result(result);
+                None
             }
             RuntimeEvent::CodexLoginStarted { session } => {
                 let prompt = session.prompt().clone();
@@ -196,6 +219,7 @@ impl<'a> TurnController<'a> {
                                 &updated_config,
                                 self.llm,
                                 query::mode(self.app.state()),
+                                query::session_profile(self.app.state()),
                                 self.app.state().session.full_system_access,
                                 self.subagents,
                                 self.terminals,
@@ -298,6 +322,113 @@ impl<'a> TurnController<'a> {
         crate::app::session::submit::dispatch_next_queued_message_if_ready(self.app.state_mut())
     }
 
+    fn spawn_critic_if_applicable(&mut self) {
+        let state = self.app.state();
+        let Some(task) = critic_task_for_state(state) else {
+            return;
+        };
+        if state.session.critic_retry_count >= state.session.critic_max_retries {
+            log_debug(
+                "critic",
+                format!(
+                    "retry_budget_exhausted retries={}",
+                    state.session.critic_retry_count
+                ),
+            );
+            return;
+        }
+        let critic_model = state.session.critic_model_name.clone();
+        let critic_reasoning = state.session.critic_reasoning;
+        let max_tool_steps = self.config.critic.max_tool_steps;
+        let reply_id = crate::app::ops::session::next_reply_id(self.app.state_mut());
+        crate::app::ops::session::set_pending_reply(
+            self.app.state_mut(),
+            reply_id,
+            PendingReplyKind::Critic,
+        );
+        let config = self.config.clone();
+        let stats_hook = self.stats.hook_for_model(critic_model.clone());
+        let stream_tx = self.stream_tx.clone();
+        let llm = {
+            let _guard = self.runtime.enter();
+            crate::llm::LlmService::from_config_with_controllers(
+                &config,
+                AgentContext::critic_with_full_system_access(
+                    Some(critic_model.clone()),
+                    Some(critic_reasoning),
+                    self.app.state().session.full_system_access,
+                ),
+                crate::app::SessionProfile::Normal,
+                self.llm.approvals(),
+                self.llm.shell_approvals(),
+                None,
+                false,
+                None,
+                None,
+                None,
+                self.llm.web_service(),
+            )
+        };
+        let llm = match llm {
+            Ok(llm) => llm,
+            Err(error) => {
+                crate::app::ops::session::clear_pending_reply_only(self.app.state_mut());
+                log_debug("critic", format!("critic_build_failed error={error}"));
+                return;
+            }
+        };
+        let task_handle = self.runtime.spawn(async move {
+            let event_tx = stream_tx.clone();
+            let emit: crate::llm::EventCallback = Arc::new(move |reply_id, event| {
+                let event = match event {
+                    crate::app::StreamEvent::TextDelta(_) => return true,
+                    crate::app::StreamEvent::TurnEnded { .. } => return true,
+                    other => other,
+                };
+                event_tx
+                    .send(RuntimeEvent::MainReply { reply_id, event })
+                    .is_ok()
+            });
+            let result = crate::llm::run_agentic_critic(
+                &llm,
+                reply_id,
+                &task,
+                max_tool_steps,
+                stats_hook,
+                emit,
+            )
+            .await
+            .map_err(|error| error.to_string());
+            let _ = stream_tx.send(RuntimeEvent::CriticFinished { reply_id, result });
+        });
+        self.reply_driver.spawn_task(reply_id, task_handle);
+    }
+
+    fn apply_critic_result(&mut self, result: Result<crate::llm::CriticVerdict, String>) {
+        match result {
+            Ok(crate::llm::CriticVerdict::Done) => {
+                crate::app::ops::session::reset_critic_retry_count(self.app.state_mut());
+                log_debug("critic", "verdict=done");
+            }
+            Ok(crate::llm::CriticVerdict::NotDone { feedback }) => {
+                let attempt =
+                    crate::app::ops::session::increment_critic_retry_count(self.app.state_mut());
+                let banner = format!(
+                    "[critic feedback, retry {}/{}] {}",
+                    attempt,
+                    self.app.state().session.critic_max_retries,
+                    feedback
+                );
+                log_debug("critic", format!("verdict=not_done attempt={attempt}"));
+                crate::app::ops::transcript::push_agent_message(self.app.state_mut(), &banner);
+                crate::app::ops::session::enqueue_queued_message(self.app.state_mut(), banner);
+            }
+            Err(error) => {
+                log_debug("critic", format!("critic_call_failed error={error}"));
+            }
+        }
+    }
+
     fn sync_turn_interrupt_policy(&mut self) {
         match desired_turn_interrupt_request(self.app) {
             Some(request) => self.llm.request_turn_interrupt(request),
@@ -336,6 +467,7 @@ fn runtime_event_label(event: &RuntimeEvent) -> &'static str {
             crate::app::StreamEvent::HostedToolCompleted { .. } => "MainReply:HostedToolCompleted",
             crate::app::StreamEvent::ToolResult { .. } => "MainReply:ToolResult",
             crate::app::StreamEvent::TodoSnapshot(_) => "MainReply:TodoSnapshot",
+            crate::app::StreamEvent::TaskUpdated { .. } => "MainReply:TaskUpdated",
             crate::app::StreamEvent::AskUserRequested { .. } => "MainReply:AskUserRequested",
             crate::app::StreamEvent::WriteApprovalRequested { .. } => {
                 "MainReply:WriteApprovalRequested"
@@ -352,6 +484,7 @@ fn runtime_event_label(event: &RuntimeEvent) -> &'static str {
             crate::app::StreamEvent::SessionTitleGenerated(_) => "MainReply:SessionTitleGenerated",
         },
         RuntimeEvent::SideChannel { .. } => "SideChannel",
+        RuntimeEvent::CriticFinished { .. } => "CriticFinished",
         RuntimeEvent::CodexLoginStarted { .. } => "CodexLoginStarted",
         RuntimeEvent::CodexLoginCompleted { .. } => "CodexLoginCompleted",
     }
@@ -362,10 +495,25 @@ fn desired_turn_interrupt_request(app: &App) -> Option<TurnInterruptRequest> {
         .then_some(TurnInterruptRequest::AtStepBoundary)
 }
 
+fn critic_task_for_state(state: &crate::app::AppState) -> Option<crate::task::ActiveTask> {
+    if !state.session.critic_enabled
+        || query::session_profile(state) != crate::app::SessionProfile::Normal
+    {
+        return None;
+    }
+
+    let task = state.session.current_task.clone()?;
+    (!task.criteria.is_empty()).then_some(task)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::{PendingReply, PendingReplyKind, session::test_support::new_app};
+    use crate::{
+        app::{PendingReply, PendingReplyKind, session::test_support::new_app},
+        features::planning::PlanningStage,
+        task::{AcceptanceCriterion, ActiveTask},
+    };
 
     #[test]
     fn desired_turn_interrupt_request_requires_queued_message_and_active_reply() {
@@ -387,5 +535,25 @@ mod tests {
 
         app.state_mut().session.pending_reply = None;
         assert_eq!(desired_turn_interrupt_request(&app), None);
+    }
+
+    #[test]
+    fn critic_is_disabled_while_planning_is_active() {
+        let mut app = new_app(true);
+        app.state_mut().session.critic_enabled = true;
+        app.state_mut().session.planning.stage = PlanningStage::Conversation;
+        app.state_mut().session.current_task = Some(ActiveTask {
+            description: "Ship the feature".into(),
+            criteria: vec![AcceptanceCriterion {
+                id: 1,
+                text: "Build passes".into(),
+                verification_hint: "run cargo test".into(),
+            }],
+            next_criterion_id: 2,
+            source_messages: Vec::new(),
+            created_at: chrono::Utc::now(),
+        });
+
+        assert_eq!(critic_task_for_state(app.state()), None);
     }
 }

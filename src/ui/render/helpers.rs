@@ -176,6 +176,7 @@ pub(super) fn model_picker_tab_line(active_tab: ModelPickerTab, accent: Color) -
             ),
             ("Safety model", active_tab == ModelPickerTab::SafetyModel),
             ("Memory model", active_tab == ModelPickerTab::MemoryModel),
+            ("Critic model", active_tab == ModelPickerTab::CriticModel),
         ],
         accent,
     )

@@ -97,6 +97,14 @@ impl App {
         self.state.session.memory_model_name = model_name.into();
     }
 
+    pub(crate) fn set_critic_model_name(&mut self, model_name: impl Into<String>) {
+        self.state.session.critic_model_name = model_name.into();
+    }
+
+    pub(crate) fn set_critic_reasoning(&mut self, reasoning: ReasoningSetting) {
+        self.state.session.critic_reasoning = reasoning;
+    }
+
     pub(crate) fn set_planning_agents(
         &mut self,
         planning_agents: Vec<crate::features::planning::PlanningAgentConfig>,

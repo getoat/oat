@@ -21,8 +21,8 @@ pub use ask_user::PendingAskUser;
 pub use effects::Effect;
 pub(crate) use models::compatible_reasoning_setting;
 pub use models::{
-    AccessMode, ApprovalMode, EditorInput, EditorKey, SessionHistoryMessage, SideChannelEvent,
-    SlashCommand, Speaker, StreamEvent, TurnEndReason,
+    AccessMode, ApprovalMode, EditorInput, EditorKey, SessionHistoryMessage, SessionProfile,
+    SideChannelEvent, SlashCommand, Speaker, StreamEvent, TurnEndReason,
 };
 pub(crate) use reducer::apply;
 #[cfg(test)]
@@ -36,6 +36,6 @@ pub use transcript::{
     ActivityDisplayState, BackgroundTerminalStatusEntry, ChatMessage, HostedToolKind,
     HostedToolStatusEntry, MainRequestSeed, MessageStyle, PendingReply, PendingReplyActivity,
     PendingReplyKind, PendingReplyReplaySeed, PendingSideReply, ProposedPlanEntry, SideChannelKind,
-    SubagentStatusEntry, SubagentStatusKind, ToolCall, ToolResultEntry, TranscriptEntry,
-    pending_stream_text_is_visible, startup_banner_message,
+    SubagentStatusEntry, SubagentStatusKind, TaskUpdateEntry, ToolCall, ToolResultEntry,
+    TranscriptEntry, pending_stream_text_is_visible, startup_banner_message,
 };

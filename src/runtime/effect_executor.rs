@@ -54,6 +54,7 @@ pub(crate) fn rebuild_main_llm(
     config: &AppConfig,
     llm: &LlmService,
     access_mode: app::AccessMode,
+    session_profile: app::SessionProfile,
     full_system_access: bool,
     subagents: &SubagentManager,
     terminals: &BackgroundTerminalManager,
@@ -64,6 +65,7 @@ pub(crate) fn rebuild_main_llm(
     LlmService::from_config_with_controllers(
         config,
         AgentContext::main_with_full_system_access(access_mode, full_system_access),
+        session_profile,
         llm.approvals(),
         llm.shell_approvals(),
         llm.ask_user_controller(),
@@ -79,6 +81,7 @@ pub(crate) fn build_fresh_main_llm(
     runtime: &Runtime,
     config: &AppConfig,
     access_mode: app::AccessMode,
+    session_profile: app::SessionProfile,
     approval_mode: app::ApprovalMode,
     full_system_access: bool,
     subagents: &SubagentManager,
@@ -90,6 +93,7 @@ pub(crate) fn build_fresh_main_llm(
     LlmService::from_config(
         config,
         AgentContext::main_with_full_system_access(access_mode, full_system_access),
+        session_profile,
         WriteApprovalController::new(approval_mode),
         Some(AskUserController::default()),
         true,
@@ -100,18 +104,19 @@ pub(crate) fn build_fresh_main_llm(
     )
 }
 
-fn sync_main_llm_access_mode(
+fn sync_main_llm_runtime_context(
     runtime: &Runtime,
     config: &AppConfig,
     llm: &mut LlmService,
     access_mode: app::AccessMode,
+    session_profile: app::SessionProfile,
     full_system_access: bool,
     subagents: &SubagentManager,
     terminals: &BackgroundTerminalManager,
     memory: &MemoryService,
     web: WebService,
 ) -> Result<bool> {
-    if llm.access_mode == access_mode {
+    if llm.access_mode == access_mode && llm.session_profile() == session_profile {
         return Ok(false);
     }
 
@@ -120,6 +125,7 @@ fn sync_main_llm_access_mode(
         config,
         llm,
         access_mode,
+        session_profile,
         full_system_access,
         subagents,
         terminals,
@@ -158,7 +164,10 @@ impl EffectExecutor<'_> {
                     ),
                 );
                 self.refresh_codex_auth_if_needed()?;
-                self.sync_llm_access_mode(query::mode(self.app.state()))?;
+                self.sync_llm_runtime_context(
+                    query::mode(self.app.state()),
+                    query::session_profile(self.app.state()),
+                )?;
                 let model_names = vec![
                     self.config.model.model_name.clone(),
                     self.config.safety.model_name.clone(),
@@ -212,7 +221,10 @@ impl EffectExecutor<'_> {
             } => {
                 let prompt = self.memory.augment_prompt(&prompt)?;
                 self.refresh_codex_auth_if_needed()?;
-                self.sync_llm_access_mode(query::mode(self.app.state()))?;
+                self.sync_llm_runtime_context(
+                    query::mode(self.app.state()),
+                    query::session_profile(self.app.state()),
+                )?;
                 let model_names = vec![
                     self.config.model.model_name.clone(),
                     self.config.safety.model_name.clone(),
@@ -381,6 +393,7 @@ impl EffectExecutor<'_> {
                     self.runtime,
                     self.config,
                     query::mode(self.app.state()),
+                    query::session_profile(self.app.state()),
                     query::approval_mode(self.app.state()),
                     self.app.state().session.full_system_access,
                     self.subagents,
@@ -406,7 +419,11 @@ impl EffectExecutor<'_> {
                     reasoning,
                     &planning_agents,
                 )?;
-                let rebuilt = self.rebuild_llm(&updated_config, query::mode(self.app.state()))?;
+                let rebuilt = self.rebuild_llm(
+                    &updated_config,
+                    query::mode(self.app.state()),
+                    query::session_profile(self.app.state()),
+                )?;
                 self.memory.set_config(updated_config.memory.clone());
                 *self.config = updated_config;
                 *self.llm = rebuilt;
@@ -433,7 +450,11 @@ impl EffectExecutor<'_> {
             }
             Effect::SetReasoning { reasoning } => {
                 let updated_config = AppConfig::set_default_reasoning(reasoning)?;
-                let rebuilt = self.rebuild_llm(&updated_config, query::mode(self.app.state()))?;
+                let rebuilt = self.rebuild_llm(
+                    &updated_config,
+                    query::mode(self.app.state()),
+                    query::session_profile(self.app.state()),
+                )?;
                 self.memory.set_config(updated_config.memory.clone());
                 *self.config = updated_config;
                 *self.llm = rebuilt;
@@ -483,7 +504,11 @@ impl EffectExecutor<'_> {
                 self.ensure_codex_auth_for_model(&model_name)?;
                 let updated_config =
                     AppConfig::set_default_safety_selection(&model_name, reasoning)?;
-                let rebuilt = self.rebuild_llm(&updated_config, query::mode(self.app.state()))?;
+                let rebuilt = self.rebuild_llm(
+                    &updated_config,
+                    query::mode(self.app.state()),
+                    query::session_profile(self.app.state()),
+                )?;
                 self.memory.set_config(updated_config.memory.clone());
                 *self.config = updated_config;
                 *self.llm = rebuilt;
@@ -516,6 +541,26 @@ impl EffectExecutor<'_> {
                     self.app.state_mut(),
                     format!(
                         "Memory model set to `{}` with `{}` reasoning and saved to the active config.",
+                        display_name,
+                        reasoning.as_str()
+                    ),
+                );
+                Ok(())
+            }
+            Effect::SetCriticSelection {
+                model_name,
+                reasoning,
+            } => {
+                self.ensure_codex_auth_for_model(&model_name)?;
+                self.config.critic.model_name = model_name.clone();
+                self.config.critic.reasoning = reasoning;
+                self.app.set_critic_model_name(model_name.clone());
+                self.app.set_critic_reasoning(reasoning);
+                let display_name = crate::codex::display_name(&model_name);
+                app::ops::transcript::push_agent_message(
+                    self.app.state_mut(),
+                    format!(
+                        "Critic model set to `{}` with `{}` reasoning.",
                         display_name,
                         reasoning.as_str()
                     ),
@@ -588,6 +633,7 @@ impl EffectExecutor<'_> {
                                     app::AccessMode::ReadOnly,
                                     false,
                                 ),
+                                app::SessionProfile::Planning,
                                 write_approvals,
                                 shell_approvals,
                                 ask_user,
@@ -645,7 +691,11 @@ impl EffectExecutor<'_> {
                 Ok(())
             }
             Effect::RebuildLlm { access_mode } => {
-                let rebuilt = self.rebuild_llm(self.config, access_mode)?;
+                let rebuilt = self.rebuild_llm(
+                    self.config,
+                    access_mode,
+                    query::session_profile(self.app.state()),
+                )?;
                 *self.llm = rebuilt;
                 Ok(())
             }
@@ -746,12 +796,18 @@ impl EffectExecutor<'_> {
         }
     }
 
-    fn rebuild_llm(&self, config: &AppConfig, access_mode: app::AccessMode) -> Result<LlmService> {
+    fn rebuild_llm(
+        &self,
+        config: &AppConfig,
+        access_mode: app::AccessMode,
+        session_profile: app::SessionProfile,
+    ) -> Result<LlmService> {
         rebuild_main_llm(
             self.runtime,
             config,
             self.llm,
             access_mode,
+            session_profile,
             self.app.state().session.full_system_access,
             self.subagents,
             self.terminals,
@@ -760,13 +816,18 @@ impl EffectExecutor<'_> {
         )
     }
 
-    fn sync_llm_access_mode(&mut self, access_mode: app::AccessMode) -> Result<bool> {
+    fn sync_llm_runtime_context(
+        &mut self,
+        access_mode: app::AccessMode,
+        session_profile: app::SessionProfile,
+    ) -> Result<bool> {
         let web = self.llm.web_service();
-        sync_main_llm_access_mode(
+        sync_main_llm_runtime_context(
             self.runtime,
             self.config,
             self.llm,
             access_mode,
+            session_profile,
             self.app.state().session.full_system_access,
             self.subagents,
             self.terminals,
@@ -793,7 +854,11 @@ impl EffectExecutor<'_> {
     }
 
     fn sync_runtime_config(&mut self, updated_config: AppConfig) -> Result<()> {
-        let rebuilt = self.rebuild_llm(&updated_config, query::mode(self.app.state()))?;
+        let rebuilt = self.rebuild_llm(
+            &updated_config,
+            query::mode(self.app.state()),
+            query::session_profile(self.app.state()),
+        )?;
         self.memory.set_config(updated_config.memory.clone());
         *self.config = updated_config;
         *self.llm = rebuilt;
@@ -821,6 +886,7 @@ impl EffectExecutor<'_> {
             self.runtime,
             &updated_config,
             snapshot.runtime.access_mode,
+            query::session_profile(self.app.state()),
             snapshot.runtime.approval_mode,
             snapshot.runtime.full_system_access,
             self.subagents,
@@ -970,14 +1036,15 @@ impl EffectExecutor<'_> {
 mod tests {
     use tokio::{runtime::Runtime, sync::mpsc};
 
-    use super::sync_main_llm_access_mode;
+    use super::sync_main_llm_runtime_context;
     use crate::{
         agent::AgentContext,
-        app::{AccessMode, ApprovalMode},
+        app::{AccessMode, ApprovalMode, SessionProfile},
         background_terminals::BackgroundTerminalManager,
         config::{
-            AppConfig, AzureConfig, HistoryConfig, MemoryConfig, ModelSelectionConfig,
-            ReasoningEffort, SafetyConfig, SubagentConfig, ToolConfig, UiConfig,
+            AppConfig, AzureConfig, CriticConfig, HistoryConfig, MemoryConfig,
+            ModelSelectionConfig, ReasoningEffort, SafetyConfig, SubagentConfig, ToolConfig,
+            UiConfig,
         },
         features::planning::PlanningConfig,
         llm::{AskUserController, LlmService, WriteApprovalController},
@@ -1007,6 +1074,7 @@ mod tests {
                 model_name: "gpt-5.4-mini".into(),
                 reasoning: ReasoningEffort::Medium.into(),
             },
+            critic: CriticConfig::default(),
             memory: MemoryConfig::default(),
             ui: UiConfig::default(),
             subagents: SubagentConfig::default(),
@@ -1032,6 +1100,7 @@ mod tests {
         let mut llm = LlmService::from_config(
             &config,
             AgentContext::main(AccessMode::ReadOnly),
+            SessionProfile::Normal,
             WriteApprovalController::new(ApprovalMode::Manual),
             Some(AskUserController::default()),
             true,
@@ -1043,11 +1112,12 @@ mod tests {
         .expect("service builds");
         drop(_guard);
 
-        let rebuilt = sync_main_llm_access_mode(
+        let rebuilt = sync_main_llm_runtime_context(
             &runtime,
             &config,
             &mut llm,
             AccessMode::ReadWrite,
+            SessionProfile::Normal,
             false,
             &subagents,
             &terminals,
@@ -1065,5 +1135,54 @@ mod tests {
             !llm.preamble
                 .contains("You are currently in read-only mode.")
         );
+    }
+
+    #[test]
+    fn syncing_session_profile_rebuilds_llm_without_task_tools() {
+        let runtime = Runtime::new().expect("runtime");
+        let config = sample_config();
+        let (subagent_tx, _) = mpsc::unbounded_channel();
+        let subagents = SubagentManager::new(4, subagent_tx, StatsStore::new());
+        let (terminal_tx, _) = mpsc::unbounded_channel();
+        let terminals = BackgroundTerminalManager::new(terminal_tx);
+        let memory =
+            MemoryService::new(config.memory.clone(), std::env::current_dir().expect("cwd"))
+                .expect("memory");
+        let web = WebService::new(config.tools.max_output_tokens).expect("web");
+        let _guard = runtime.enter();
+        let mut llm = LlmService::from_config(
+            &config,
+            AgentContext::main(AccessMode::ReadOnly),
+            SessionProfile::Normal,
+            WriteApprovalController::new(ApprovalMode::Manual),
+            Some(AskUserController::default()),
+            true,
+            Some(memory.clone()),
+            Some(subagents.clone()),
+            Some(terminals.clone()),
+            web.clone(),
+        )
+        .expect("service builds");
+        drop(_guard);
+
+        let rebuilt = sync_main_llm_runtime_context(
+            &runtime,
+            &config,
+            &mut llm,
+            AccessMode::ReadOnly,
+            SessionProfile::Planning,
+            false,
+            &subagents,
+            &terminals,
+            &memory,
+            web,
+        )
+        .expect("runtime profile sync succeeds");
+
+        assert!(rebuilt);
+        assert_eq!(llm.session_profile(), SessionProfile::Planning);
+        assert!(!llm.tool_names.contains(&"SetCurrentTask".to_string()));
+        assert!(!llm.tool_names.contains(&"AddCriterion".to_string()));
+        assert!(llm.tool_names.contains(&"AskUser".to_string()));
     }
 }

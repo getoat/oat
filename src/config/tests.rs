@@ -40,6 +40,7 @@ fn sample_config() -> AppConfig {
             model_name: "gpt-5.4-mini".into(),
             reasoning: ReasoningEffort::Medium.into(),
         },
+        critic: CriticConfig::default(),
         ui: UiConfig::default(),
         subagents: SubagentConfig::default(),
         planning: PlanningConfig::default(),
@@ -108,6 +109,13 @@ fn parses_expected_config_shape() {
 
             [tools.web_search]
             mode = "cached"
+
+            [critic]
+            enabled = true
+            model_name = "gpt-5.4"
+            reasoning = "high"
+            max_retries = 3
+            max_tool_steps = 9
             "#,
     )
     .expect("config parses");
@@ -168,6 +176,14 @@ fn parses_expected_config_shape() {
     assert_eq!(config.tools.search_include_patterns, vec![".research/**"]);
     assert_eq!(config.tools.max_output_tokens, 2048);
     assert_eq!(config.tools.web_search.mode, WebSearchMode::Cached);
+    assert!(config.critic.enabled);
+    assert_eq!(config.critic.model_name, "gpt-5.4");
+    assert_eq!(
+        config.critic.reasoning,
+        ReasoningSetting::Gpt(ReasoningEffort::High)
+    );
+    assert_eq!(config.critic.max_retries, 3);
+    assert_eq!(config.critic.max_tool_steps, 9);
 }
 
 #[test]
@@ -805,6 +821,7 @@ fn validation_requires_chutes_credentials_for_selected_chutes_model() {
             reasoning: ReasoningSetting::Default,
         },
         memory: MemoryConfig::default(),
+        critic: CriticConfig::default(),
         ui: UiConfig::default(),
         subagents: SubagentConfig::default(),
         planning: PlanningConfig::default(),
@@ -834,6 +851,7 @@ fn validation_requires_ollama_credentials_for_selected_ollama_model() {
             reasoning: ReasoningSetting::Default,
         },
         memory: MemoryConfig::default(),
+        critic: CriticConfig::default(),
         ui: UiConfig::default(),
         subagents: SubagentConfig::default(),
         planning: PlanningConfig::default(),
@@ -888,6 +906,7 @@ fn validation_requires_opencode_credentials_for_selected_opencode_model() {
             reasoning: ReasoningSetting::Default,
         },
         memory: MemoryConfig::default(),
+        critic: CriticConfig::default(),
         ui: UiConfig::default(),
         subagents: SubagentConfig::default(),
         planning: PlanningConfig::default(),
@@ -991,6 +1010,7 @@ fn validation_requires_openrouter_credentials_for_selected_openrouter_model() {
             reasoning: ReasoningEffort::Medium.into(),
         },
         memory: MemoryConfig::default(),
+        critic: CriticConfig::default(),
         ui: UiConfig::default(),
         subagents: SubagentConfig::default(),
         planning: PlanningConfig::default(),

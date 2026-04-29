@@ -18,6 +18,7 @@ mod runtime;
 mod session_store;
 mod stats;
 mod subagents;
+mod task;
 mod todo;
 mod token_counting;
 mod tool_policy;

@@ -203,6 +203,7 @@ fn stream_event_label(event: &StreamEvent) -> &'static str {
         StreamEvent::HostedToolCompleted { .. } => "HostedToolCompleted",
         StreamEvent::ToolResult { .. } => "ToolResult",
         StreamEvent::TodoSnapshot(_) => "TodoSnapshot",
+        StreamEvent::TaskUpdated { .. } => "TaskUpdated",
         StreamEvent::AskUserRequested { .. } => "AskUserRequested",
         StreamEvent::WriteApprovalRequested { .. } => "WriteApprovalRequested",
         StreamEvent::ShellApprovalRequested { .. } => "ShellApprovalRequested",

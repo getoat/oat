@@ -5,7 +5,7 @@ use rig::tool::ToolDyn;
 
 use crate::{
     agent::{AgentContext, AgentRole},
-    app::AccessMode,
+    app::{AccessMode, SessionProfile},
     background_terminals::BackgroundTerminalManager,
     config::AppConfig,
     llm::{ShellApprovalController, WriteApprovalController},
@@ -16,14 +16,16 @@ use crate::{
 };
 
 use super::{
-    ApplyPatchesTool, AskUserTool, CommentaryTool, DeletePathTool, GET_MEMORY_TOOL_NAME,
-    GetMemoryTool, GrepTool, INSPECT_BACKGROUND_TERMINAL_TOOL_NAME, INSPECT_SUBAGENT_TOOL_NAME,
+    AddCriterionTool, ApplyPatchesTool, AskUserTool, ClearCurrentTaskTool, CommentaryTool,
+    DeletePathTool, GET_MEMORY_TOOL_NAME, GetMemoryTool, GrepTool,
+    INSPECT_BACKGROUND_TERMINAL_TOOL_NAME, INSPECT_SUBAGENT_TOOL_NAME,
     InspectBackgroundTerminalTool, InspectSubagentTool, KILL_BACKGROUND_TERMINAL_TOOL_NAME,
     KillBackgroundTerminalTool, LIST_BACKGROUND_TERMINALS_TOOL_NAME, ListBackgroundTerminalsTool,
-    ListTool, ReadFileTool, ReadFilesTool, RunShellScriptTool, SEARCH_MEMORIES_TOOL_NAME,
-    SPAWN_SUBAGENT_TOOL_NAME, START_BACKGROUND_TERMINAL_TOOL_NAME, SearchMemoriesTool,
-    SpawnSubagentTool, StartBackgroundTerminalTool, TodoTool, WAIT_SUBAGENT_TOOL_NAME,
-    WaitSubagentTool, WebRunTool, WriteFileTool, output_limit::OutputLimitedTool,
+    ListTool, ReadFileTool, ReadFilesTool, RemoveCriterionTool, RunShellScriptTool,
+    SEARCH_MEMORIES_TOOL_NAME, SPAWN_SUBAGENT_TOOL_NAME, START_BACKGROUND_TERMINAL_TOOL_NAME,
+    SearchMemoriesTool, SetCurrentTaskTool, SpawnSubagentTool, StartBackgroundTerminalTool,
+    TodoTool, UpdateCriterionTool, WAIT_SUBAGENT_TOOL_NAME, WaitSubagentTool, WebRunTool,
+    WriteFileTool, output_limit::OutputLimitedTool,
 };
 
 #[derive(Clone)]
@@ -31,6 +33,7 @@ pub struct ToolContext {
     pub root: PathBuf,
     pub allow_full_system_access: bool,
     pub agent: AgentContext,
+    pub session_profile: SessionProfile,
     pub config: AppConfig,
     pub write_approvals: WriteApprovalController,
     pub shell_approvals: ShellApprovalController,
@@ -53,6 +56,7 @@ impl ToolContext {
 struct ToolDescriptor {
     name: &'static str,
     access_mode: ToolAccess,
+    session_visibility: ToolSessionVisibility,
     role_scope: ToolRoleScope,
     constructor: fn(ToolContext) -> Box<dyn ToolDyn>,
 }
@@ -64,6 +68,12 @@ enum ToolAccess {
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
+enum ToolSessionVisibility {
+    Any,
+    NormalOnly,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
 enum ToolRoleScope {
     Any,
     MainOnly,
@@ -71,55 +81,123 @@ enum ToolRoleScope {
     MainWithTerminalManager,
 }
 
-const TOOL_DESCRIPTORS: [ToolDescriptor; 21] = [
-    ToolDescriptor::read_only(AskUserTool::NAME, ToolRoleScope::MainOnly, |_context| {
-        Box::new(AskUserTool)
-    }),
-    ToolDescriptor::read_only(CommentaryTool::NAME, ToolRoleScope::Any, |_context| {
-        Box::new(CommentaryTool)
-    }),
-    ToolDescriptor::read_only(TodoTool::NAME, ToolRoleScope::MainOnly, |_context| {
-        Box::new(TodoTool)
-    }),
-    ToolDescriptor::read_only(ListTool::NAME, ToolRoleScope::Any, |context| {
-        let search_policy = context.search_policy();
-        Box::new(ListTool::new_with_access(
-            context.root,
-            search_policy,
-            context.allow_full_system_access,
-        ))
-    }),
-    ToolDescriptor::read_only(ReadFileTool::NAME, ToolRoleScope::Any, |context| {
-        Box::new(ReadFileTool::new_with_access(
-            context.root,
-            context.allow_full_system_access,
-        ))
-    }),
-    ToolDescriptor::read_only(ReadFilesTool::NAME, ToolRoleScope::Any, |context| {
-        Box::new(ReadFilesTool::new_with_access(
-            context.root,
-            context.allow_full_system_access,
-        ))
-    }),
-    ToolDescriptor::read_only(GrepTool::NAME, ToolRoleScope::Any, |context| {
-        let search_policy = context.search_policy();
-        Box::new(GrepTool::new_with_access(
-            context.root,
-            search_policy,
-            context.allow_full_system_access,
-        ))
-    }),
-    ToolDescriptor::read_only(WebRunTool::NAME, ToolRoleScope::Any, |context| {
-        Box::new(WebRunTool::new(context.web))
-    }),
-    ToolDescriptor::read_only(RunShellScriptTool::NAME, ToolRoleScope::Any, |context| {
-        Box::new(RunShellScriptTool::new_with_access(
-            context.root,
-            context.allow_full_system_access,
-        ))
-    }),
+const TOOL_DESCRIPTORS: [ToolDescriptor; 26] = [
+    ToolDescriptor::read_only(
+        AskUserTool::NAME,
+        ToolSessionVisibility::Any,
+        ToolRoleScope::MainOnly,
+        |_context| Box::new(AskUserTool),
+    ),
+    ToolDescriptor::read_only(
+        CommentaryTool::NAME,
+        ToolSessionVisibility::Any,
+        ToolRoleScope::Any,
+        |_context| Box::new(CommentaryTool),
+    ),
+    ToolDescriptor::read_only(
+        TodoTool::NAME,
+        ToolSessionVisibility::Any,
+        ToolRoleScope::MainOnly,
+        |_context| Box::new(TodoTool),
+    ),
+    ToolDescriptor::read_only(
+        SetCurrentTaskTool::NAME,
+        ToolSessionVisibility::NormalOnly,
+        ToolRoleScope::MainOnly,
+        |_ctx| Box::new(SetCurrentTaskTool),
+    ),
+    ToolDescriptor::read_only(
+        ClearCurrentTaskTool::NAME,
+        ToolSessionVisibility::NormalOnly,
+        ToolRoleScope::MainOnly,
+        |_ctx| Box::new(ClearCurrentTaskTool),
+    ),
+    ToolDescriptor::read_only(
+        AddCriterionTool::NAME,
+        ToolSessionVisibility::NormalOnly,
+        ToolRoleScope::MainOnly,
+        |_ctx| Box::new(AddCriterionTool),
+    ),
+    ToolDescriptor::read_only(
+        UpdateCriterionTool::NAME,
+        ToolSessionVisibility::NormalOnly,
+        ToolRoleScope::MainOnly,
+        |_ctx| Box::new(UpdateCriterionTool),
+    ),
+    ToolDescriptor::read_only(
+        RemoveCriterionTool::NAME,
+        ToolSessionVisibility::NormalOnly,
+        ToolRoleScope::MainOnly,
+        |_ctx| Box::new(RemoveCriterionTool),
+    ),
+    ToolDescriptor::read_only(
+        ListTool::NAME,
+        ToolSessionVisibility::Any,
+        ToolRoleScope::Any,
+        |context| {
+            let search_policy = context.search_policy();
+            Box::new(ListTool::new_with_access(
+                context.root,
+                search_policy,
+                context.allow_full_system_access,
+            ))
+        },
+    ),
+    ToolDescriptor::read_only(
+        ReadFileTool::NAME,
+        ToolSessionVisibility::Any,
+        ToolRoleScope::Any,
+        |context| {
+            Box::new(ReadFileTool::new_with_access(
+                context.root,
+                context.allow_full_system_access,
+            ))
+        },
+    ),
+    ToolDescriptor::read_only(
+        ReadFilesTool::NAME,
+        ToolSessionVisibility::Any,
+        ToolRoleScope::Any,
+        |context| {
+            Box::new(ReadFilesTool::new_with_access(
+                context.root,
+                context.allow_full_system_access,
+            ))
+        },
+    ),
+    ToolDescriptor::read_only(
+        GrepTool::NAME,
+        ToolSessionVisibility::Any,
+        ToolRoleScope::Any,
+        |context| {
+            let search_policy = context.search_policy();
+            Box::new(GrepTool::new_with_access(
+                context.root,
+                search_policy,
+                context.allow_full_system_access,
+            ))
+        },
+    ),
+    ToolDescriptor::read_only(
+        WebRunTool::NAME,
+        ToolSessionVisibility::Any,
+        ToolRoleScope::Any,
+        |context| Box::new(WebRunTool::new(context.web)),
+    ),
+    ToolDescriptor::read_only(
+        RunShellScriptTool::NAME,
+        ToolSessionVisibility::Any,
+        ToolRoleScope::Any,
+        |context| {
+            Box::new(RunShellScriptTool::new_with_access(
+                context.root,
+                context.allow_full_system_access,
+            ))
+        },
+    ),
     ToolDescriptor::read_only(
         SEARCH_MEMORIES_TOOL_NAME,
+        ToolSessionVisibility::Any,
         ToolRoleScope::MainOnly,
         |context| {
             Box::new(SearchMemoriesTool::new(
@@ -129,15 +207,21 @@ const TOOL_DESCRIPTORS: [ToolDescriptor; 21] = [
             ))
         },
     ),
-    ToolDescriptor::read_only(GET_MEMORY_TOOL_NAME, ToolRoleScope::MainOnly, |context| {
-        Box::new(GetMemoryTool::new(
-            context
-                .memory
-                .expect("memory tools require a memory service"),
-        ))
-    }),
+    ToolDescriptor::read_only(
+        GET_MEMORY_TOOL_NAME,
+        ToolSessionVisibility::Any,
+        ToolRoleScope::MainOnly,
+        |context| {
+            Box::new(GetMemoryTool::new(
+                context
+                    .memory
+                    .expect("memory tools require a memory service"),
+            ))
+        },
+    ),
     ToolDescriptor::read_only(
         START_BACKGROUND_TERMINAL_TOOL_NAME,
+        ToolSessionVisibility::Any,
         ToolRoleScope::MainWithTerminalManager,
         |context| {
             Box::new(StartBackgroundTerminalTool::new_with_access(
@@ -151,6 +235,7 @@ const TOOL_DESCRIPTORS: [ToolDescriptor; 21] = [
     ),
     ToolDescriptor::read_only(
         LIST_BACKGROUND_TERMINALS_TOOL_NAME,
+        ToolSessionVisibility::Any,
         ToolRoleScope::MainWithTerminalManager,
         |context| {
             Box::new(ListBackgroundTerminalsTool::new(
@@ -162,6 +247,7 @@ const TOOL_DESCRIPTORS: [ToolDescriptor; 21] = [
     ),
     ToolDescriptor::read_only(
         INSPECT_BACKGROUND_TERMINAL_TOOL_NAME,
+        ToolSessionVisibility::Any,
         ToolRoleScope::MainWithTerminalManager,
         |context| {
             Box::new(InspectBackgroundTerminalTool::new(
@@ -173,6 +259,7 @@ const TOOL_DESCRIPTORS: [ToolDescriptor; 21] = [
     ),
     ToolDescriptor::read_only(
         KILL_BACKGROUND_TERMINAL_TOOL_NAME,
+        ToolSessionVisibility::Any,
         ToolRoleScope::MainWithTerminalManager,
         |context| {
             Box::new(KillBackgroundTerminalTool::new(
@@ -182,26 +269,42 @@ const TOOL_DESCRIPTORS: [ToolDescriptor; 21] = [
             ))
         },
     ),
-    ToolDescriptor::mutation(ApplyPatchesTool::NAME, ToolRoleScope::Any, |context| {
-        Box::new(ApplyPatchesTool::new_with_access(
-            context.root,
-            context.allow_full_system_access,
-        ))
-    }),
-    ToolDescriptor::mutation(WriteFileTool::NAME, ToolRoleScope::Any, |context| {
-        Box::new(WriteFileTool::new_with_access(
-            context.root,
-            context.allow_full_system_access,
-        ))
-    }),
-    ToolDescriptor::mutation(DeletePathTool::NAME, ToolRoleScope::Any, |context| {
-        Box::new(DeletePathTool::new_with_access(
-            context.root,
-            context.allow_full_system_access,
-        ))
-    }),
+    ToolDescriptor::mutation(
+        ApplyPatchesTool::NAME,
+        ToolSessionVisibility::Any,
+        ToolRoleScope::Any,
+        |context| {
+            Box::new(ApplyPatchesTool::new_with_access(
+                context.root,
+                context.allow_full_system_access,
+            ))
+        },
+    ),
+    ToolDescriptor::mutation(
+        WriteFileTool::NAME,
+        ToolSessionVisibility::Any,
+        ToolRoleScope::Any,
+        |context| {
+            Box::new(WriteFileTool::new_with_access(
+                context.root,
+                context.allow_full_system_access,
+            ))
+        },
+    ),
+    ToolDescriptor::mutation(
+        DeletePathTool::NAME,
+        ToolSessionVisibility::Any,
+        ToolRoleScope::Any,
+        |context| {
+            Box::new(DeletePathTool::new_with_access(
+                context.root,
+                context.allow_full_system_access,
+            ))
+        },
+    ),
     ToolDescriptor::read_only(
         SPAWN_SUBAGENT_TOOL_NAME,
+        ToolSessionVisibility::Any,
         ToolRoleScope::MainWithManager,
         |context| {
             Box::new(SpawnSubagentTool::new(
@@ -219,6 +322,7 @@ const TOOL_DESCRIPTORS: [ToolDescriptor; 21] = [
     ),
     ToolDescriptor::read_only(
         WAIT_SUBAGENT_TOOL_NAME,
+        ToolSessionVisibility::Any,
         ToolRoleScope::MainWithManager,
         |context| {
             Box::new(WaitSubagentTool::new(
@@ -230,6 +334,7 @@ const TOOL_DESCRIPTORS: [ToolDescriptor; 21] = [
     ),
     ToolDescriptor::read_only(
         INSPECT_SUBAGENT_TOOL_NAME,
+        ToolSessionVisibility::Any,
         ToolRoleScope::MainWithManager,
         |context| {
             Box::new(InspectSubagentTool::new(
@@ -244,12 +349,14 @@ const TOOL_DESCRIPTORS: [ToolDescriptor; 21] = [
 impl ToolDescriptor {
     const fn read_only(
         name: &'static str,
+        session_visibility: ToolSessionVisibility,
         role_scope: ToolRoleScope,
         constructor: fn(ToolContext) -> Box<dyn ToolDyn>,
     ) -> Self {
         Self {
             name,
             access_mode: ToolAccess::ReadOnly,
+            session_visibility,
             role_scope,
             constructor,
         }
@@ -257,12 +364,14 @@ impl ToolDescriptor {
 
     const fn mutation(
         name: &'static str,
+        session_visibility: ToolSessionVisibility,
         role_scope: ToolRoleScope,
         constructor: fn(ToolContext) -> Box<dyn ToolDyn>,
     ) -> Self {
         Self {
             name,
             access_mode: ToolAccess::Mutation,
+            session_visibility,
             role_scope,
             constructor,
         }
@@ -282,6 +391,10 @@ impl ToolDescriptor {
         }
         let access_enabled = self.access_mode == ToolAccess::ReadOnly
             || context.agent.access_mode == AccessMode::ReadWrite;
+        let profile_enabled = match self.session_visibility {
+            ToolSessionVisibility::Any => true,
+            ToolSessionVisibility::NormalOnly => context.session_profile == SessionProfile::Normal,
+        };
         let role_enabled = match self.role_scope {
             ToolRoleScope::Any => true,
             ToolRoleScope::MainOnly => context.agent.role == AgentRole::Main,
@@ -293,7 +406,7 @@ impl ToolDescriptor {
             }
         };
 
-        access_enabled && role_enabled
+        access_enabled && profile_enabled && role_enabled
     }
 }
 
@@ -343,6 +456,7 @@ mod tests {
             root: PathBuf::from("."),
             allow_full_system_access: false,
             agent: AgentContext::main(AccessMode::ReadOnly),
+            session_profile: SessionProfile::Normal,
             config: sample_config(),
             write_approvals: WriteApprovalController::default(),
             shell_approvals: ShellApprovalController::default(),
@@ -360,6 +474,11 @@ mod tests {
                 "AskUser",
                 "Commentary",
                 "Todo",
+                "SetCurrentTask",
+                "ClearCurrentTask",
+                "AddCriterion",
+                "UpdateCriterion",
+                "RemoveCriterion",
                 "List",
                 "ReadFile",
                 "ReadFiles",
@@ -383,6 +502,7 @@ mod tests {
             root: PathBuf::from("."),
             allow_full_system_access: false,
             agent: AgentContext::main(AccessMode::ReadWrite),
+            session_profile: SessionProfile::Normal,
             config: sample_config(),
             write_approvals: WriteApprovalController::default(),
             shell_approvals: ShellApprovalController::default(),
@@ -412,6 +532,7 @@ mod tests {
             root: PathBuf::from("."),
             allow_full_system_access: false,
             agent: AgentContext::main(AccessMode::ReadOnly),
+            session_profile: SessionProfile::Normal,
             config: sample_config(),
             write_approvals: WriteApprovalController::default(),
             shell_approvals: ShellApprovalController::default(),
@@ -440,6 +561,7 @@ mod tests {
             root: PathBuf::from("."),
             allow_full_system_access: false,
             agent: AgentContext::subagent(AccessMode::ReadOnly, None),
+            session_profile: SessionProfile::Subagent,
             config: sample_config(),
             write_approvals: WriteApprovalController::default(),
             shell_approvals: ShellApprovalController::default(),
@@ -458,11 +580,73 @@ mod tests {
     }
 
     #[test]
+    fn critic_gets_only_verification_tools() {
+        let tool_names = tool_names_for_context(&ToolContext {
+            root: PathBuf::from("."),
+            allow_full_system_access: false,
+            agent: AgentContext::critic_with_full_system_access(None, None, false),
+            session_profile: SessionProfile::Normal,
+            config: sample_config(),
+            write_approvals: WriteApprovalController::default(),
+            shell_approvals: ShellApprovalController::default(),
+            memory: None,
+            web: test_web_service(),
+            ask_user_available: true,
+            todo_available: true,
+            subagents: Some(test_subagent_manager()),
+            terminals: Some(test_terminal_manager()),
+        });
+
+        for expected in [
+            "Commentary",
+            "List",
+            "ReadFile",
+            "ReadFiles",
+            "Grep",
+            "WebRun",
+            "RunShellScript",
+        ] {
+            assert!(
+                tool_names.contains(&expected.to_string()),
+                "critic should get {expected}"
+            );
+        }
+
+        for forbidden in [
+            "AskUser",
+            "Todo",
+            "SetCurrentTask",
+            "ClearCurrentTask",
+            "AddCriterion",
+            "UpdateCriterion",
+            "RemoveCriterion",
+            "ApplyPatches",
+            "WriteFile",
+            "DeletePath",
+            "SearchMemories",
+            "GetMemory",
+            "SpawnSubagent",
+            "WaitSubagent",
+            "InspectSubagent",
+            "StartBackgroundTerminal",
+            "ListBackgroundTerminals",
+            "InspectBackgroundTerminal",
+            "KillBackgroundTerminal",
+        ] {
+            assert!(
+                !tool_names.contains(&forbidden.to_string()),
+                "critic should not get {forbidden}"
+            );
+        }
+    }
+
+    #[test]
     fn main_agent_without_manager_omits_subagent_tools() {
         let tool_names = tool_names_for_context(&ToolContext {
             root: PathBuf::from("."),
             allow_full_system_access: false,
             agent: AgentContext::main(AccessMode::ReadOnly),
+            session_profile: SessionProfile::Normal,
             config: sample_config(),
             write_approvals: WriteApprovalController::default(),
             shell_approvals: ShellApprovalController::default(),
@@ -478,6 +662,11 @@ mod tests {
             tool_names,
             vec![
                 "Commentary",
+                "SetCurrentTask",
+                "ClearCurrentTask",
+                "AddCriterion",
+                "UpdateCriterion",
+                "RemoveCriterion",
                 "List",
                 "ReadFile",
                 "ReadFiles",
@@ -486,6 +675,33 @@ mod tests {
                 "RunShellScript"
             ]
         );
+    }
+
+    #[test]
+    fn planning_profile_hides_task_tools_but_keeps_planning_helpers() {
+        let tool_names = tool_names_for_context(&ToolContext {
+            root: PathBuf::from("."),
+            allow_full_system_access: false,
+            agent: AgentContext::main(AccessMode::ReadOnly),
+            session_profile: SessionProfile::Planning,
+            config: sample_config(),
+            write_approvals: WriteApprovalController::default(),
+            shell_approvals: ShellApprovalController::default(),
+            memory: None,
+            web: test_web_service(),
+            ask_user_available: true,
+            todo_available: true,
+            subagents: Some(test_subagent_manager()),
+            terminals: Some(test_terminal_manager()),
+        });
+
+        assert!(tool_names.contains(&"AskUser".to_string()));
+        assert!(tool_names.contains(&"Todo".to_string()));
+        assert!(!tool_names.contains(&"SetCurrentTask".to_string()));
+        assert!(!tool_names.contains(&"ClearCurrentTask".to_string()));
+        assert!(!tool_names.contains(&"AddCriterion".to_string()));
+        assert!(!tool_names.contains(&"UpdateCriterion".to_string()));
+        assert!(!tool_names.contains(&"RemoveCriterion".to_string()));
     }
 
     fn sample_config() -> AppConfig {
@@ -508,6 +724,7 @@ mod tests {
                 model_name: "gpt-5.4-mini".into(),
                 reasoning: crate::config::ReasoningEffort::Medium.into(),
             },
+            critic: crate::config::CriticConfig::default(),
             memory: crate::config::MemoryConfig::default(),
             ui: crate::config::UiConfig::default(),
             subagents: crate::config::SubagentConfig { max_concurrent: 4 },

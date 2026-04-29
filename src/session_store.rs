@@ -18,6 +18,7 @@ use crate::{
     config::{HistoryMode, ReasoningSetting},
     features::planning::{PlanningAgentConfig, PlanningFeatureState},
     model_registry,
+    task::ActiveTask,
     todo::TodoSnapshot,
 };
 
@@ -64,8 +65,24 @@ pub struct PersistedSessionRuntimeState {
     pub last_history_model_name: Option<String>,
     pub planning: PlanningFeatureState,
     pub current_todo: Option<TodoSnapshot>,
+    #[serde(default)]
+    pub critic_enabled: bool,
+    #[serde(default)]
+    pub critic_model_name: String,
+    #[serde(default = "default_persisted_reasoning")]
+    pub critic_reasoning: ReasoningSetting,
+    #[serde(default)]
+    pub critic_max_retries: u8,
+    #[serde(default)]
+    pub critic_retry_count: u8,
+    #[serde(default)]
+    pub current_task: Option<ActiveTask>,
     pub next_reply_id: u64,
     pub next_side_channel_label_id: u64,
+}
+
+fn default_persisted_reasoning() -> ReasoningSetting {
+    ReasoningSetting::Default
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -125,6 +142,12 @@ impl PersistedSessionSnapshot {
                 last_history_model_name: state.session.last_history_model_name.clone(),
                 planning: state.session.planning.clone(),
                 current_todo: state.session.current_todo.clone(),
+                critic_enabled: state.session.critic_enabled,
+                critic_model_name: state.session.critic_model_name.clone(),
+                critic_reasoning: state.session.critic_reasoning,
+                critic_max_retries: state.session.critic_max_retries,
+                critic_retry_count: state.session.critic_retry_count,
+                current_task: state.session.current_task.clone(),
                 next_reply_id: state.session.next_reply_id,
                 next_side_channel_label_id: state.session.next_side_channel_label_id,
             },
@@ -138,11 +161,15 @@ impl PersistedSessionSnapshot {
         initial_approval_mode: ApprovalMode,
     ) -> AppState {
         let current_todo = self.runtime.current_todo.clone();
-        let sanitized_history = crate::app::ops::session::apply_current_todo_to_history(
-            crate::app::ops::session::sanitize_session_history_messages(
-                self.runtime.session_history.clone(),
+        let current_task = self.runtime.current_task.clone();
+        let sanitized_history = crate::app::ops::session::apply_current_task_to_history(
+            crate::app::ops::session::apply_current_todo_to_history(
+                crate::app::ops::session::sanitize_session_history_messages(
+                    self.runtime.session_history.clone(),
+                ),
+                current_todo.as_ref(),
             ),
-            current_todo.as_ref(),
+            current_task.as_ref(),
         );
         let mut session = SessionState::with_startup(
             self.runtime.show_thinking,
@@ -172,6 +199,18 @@ impl PersistedSessionSnapshot {
         session.safety_reasoning = self.runtime.safety_reasoning;
         session.memory_model_name = self.runtime.memory_model_name;
         session.memory_reasoning = self.runtime.memory_reasoning;
+        session.critic_enabled = self.runtime.critic_enabled;
+        if !self.runtime.critic_model_name.is_empty() {
+            session.critic_model_name = self.runtime.critic_model_name;
+        }
+        if !matches!(self.runtime.critic_reasoning, ReasoningSetting::Default) {
+            session.critic_reasoning = self.runtime.critic_reasoning;
+        }
+        if self.runtime.critic_max_retries > 0 {
+            session.critic_max_retries = self.runtime.critic_max_retries;
+        }
+        session.critic_retry_count = self.runtime.critic_retry_count;
+        session.current_task = self.runtime.current_task;
         session.planning_agents = self.runtime.planning_agents;
         session.planning = self.runtime.planning;
         session.next_reply_id = self.runtime.next_reply_id;
@@ -733,9 +772,13 @@ fn sanitize_persisted_snapshot(snapshot: &mut PersistedSessionSnapshot) {
         snapshot.runtime.history_retained_steps,
         true,
     );
-    snapshot.runtime.session_history = crate::app::ops::session::apply_current_todo_to_history(
+    let with_todo = crate::app::ops::session::apply_current_todo_to_history(
         history,
         snapshot.runtime.current_todo.as_ref(),
+    );
+    snapshot.runtime.session_history = crate::app::ops::session::apply_current_task_to_history(
+        with_todo,
+        snapshot.runtime.current_task.as_ref(),
     );
 }
 

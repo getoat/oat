@@ -13,10 +13,10 @@ pub use session::{
     ChatMessage, CommandRisk, EditorInput, EditorKey, Effect, HostedToolKind,
     HostedToolStatusEntry, MainRequestSeed, MessageStyle, PendingAskUser, PendingReply,
     PendingReplyKind, PendingReplyReplaySeed, PendingShellApproval, PendingSideReply,
-    PendingWriteApproval, SessionHistoryMessage, SessionState, ShellApprovalDecision,
-    SideChannelEvent, SideChannelKind, SlashCommand, Speaker, StreamEvent, SubagentStatusEntry,
-    SubagentStatusKind, ToolCall, ToolResultEntry, TranscriptEntry, TurnEndReason,
-    WriteApprovalDecision,
+    PendingWriteApproval, SessionHistoryMessage, SessionProfile, SessionState,
+    ShellApprovalDecision, SideChannelEvent, SideChannelKind, SlashCommand, Speaker, StreamEvent,
+    SubagentStatusEntry, SubagentStatusKind, TaskUpdateEntry, ToolCall, ToolResultEntry,
+    TranscriptEntry, TurnEndReason, WriteApprovalDecision,
 };
 pub use shell::App;
 pub use state::AppState;

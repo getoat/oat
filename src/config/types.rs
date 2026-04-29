@@ -19,6 +19,7 @@ pub struct AppConfig {
     pub openrouter: Option<OpenRouterConfig>,
     pub model: ModelSelectionConfig,
     pub safety: SafetyConfig,
+    pub critic: CriticConfig,
     pub ui: UiConfig,
     pub subagents: SubagentConfig,
     pub planning: PlanningConfig,
@@ -323,6 +324,27 @@ impl ProviderConfigRef<'_> {
 pub struct SafetyConfig {
     pub model_name: String,
     pub reasoning: ReasoningSetting,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CriticConfig {
+    pub enabled: bool,
+    pub model_name: String,
+    pub reasoning: ReasoningSetting,
+    pub max_retries: u8,
+    pub max_tool_steps: usize,
+}
+
+impl Default for CriticConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_critic_enabled(),
+            model_name: "gpt-5.4-mini".into(),
+            reasoning: ReasoningEffort::Medium.into(),
+            max_retries: default_critic_max_retries(),
+            max_tool_steps: default_critic_max_tool_steps(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -677,6 +699,18 @@ pub(super) fn default_history_retained_steps() -> usize {
 
 pub(super) fn default_command_history_limit() -> usize {
     20
+}
+
+pub(super) fn default_critic_enabled() -> bool {
+    true
+}
+
+pub(super) fn default_critic_max_retries() -> u8 {
+    2
+}
+
+pub(super) fn default_critic_max_tool_steps() -> usize {
+    12
 }
 
 pub(super) fn default_max_concurrent_subagents() -> usize {

@@ -1,5 +1,6 @@
 use crate::{
-    features::planning::pending_plain_text_is_visible, todo::TodoSnapshot, tools::MutationPreview,
+    features::planning::pending_plain_text_is_visible, task::ActiveTask, todo::TodoSnapshot,
+    tools::MutationPreview,
 };
 use std::collections::{HashSet, VecDeque};
 
@@ -108,6 +109,12 @@ pub enum SubagentStatusKind {
     Planning,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct TaskUpdateEntry {
+    pub summary: String,
+    pub snapshot: Option<ActiveTask>,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub enum ActivityDisplayState {
     Running,
@@ -143,6 +150,7 @@ pub enum TranscriptEntry {
     ToolResult(ToolResultEntry),
     HostedToolStatus(HostedToolStatusEntry),
     TodoSnapshot(TodoSnapshot),
+    TaskUpdate(TaskUpdateEntry),
     SubagentStatus(SubagentStatusEntry),
     BackgroundTerminalStatus(BackgroundTerminalStatusEntry),
 }
@@ -212,6 +220,7 @@ pub enum PendingReplyKind {
     Normal,
     Planning,
     Compacting,
+    Critic,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

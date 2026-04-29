@@ -7,7 +7,9 @@ use crate::{
     ask_user::AskUserRequest,
     config::{ReasoningEffort, ReasoningSetting},
     model_registry,
+    task::ActiveTask,
     todo::TodoSnapshot,
+    tools::TaskUpdate,
 };
 
 use super::CommandRisk;
@@ -156,6 +158,13 @@ impl AccessMode {
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
+pub enum SessionProfile {
+    Normal,
+    Planning,
+    Subagent,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub enum ApprovalMode {
     Manual,
     Disabled,
@@ -278,6 +287,10 @@ pub enum StreamEvent {
         output: String,
     },
     TodoSnapshot(TodoSnapshot),
+    TaskUpdated {
+        update: TaskUpdate,
+        snapshot: Option<ActiveTask>,
+    },
     AskUserRequested {
         request_id: String,
         request: AskUserRequest,

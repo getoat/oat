@@ -30,17 +30,17 @@ use super::{
 };
 use crate::{
     agent::AgentContext,
-    app::{AccessMode, ApprovalMode, CommandRisk, WriteApprovalDecision},
+    app::{AccessMode, ApprovalMode, CommandRisk, SessionProfile, WriteApprovalDecision},
     ask_user::{
         AskUserAnswer, AskUserAnsweredQuestion, AskUserQuestion, AskUserRequest, AskUserResponse,
         AskUserSelectedAnswer,
     },
     completion_request::CompletionRequestSnapshot,
     config::{
-        AppConfig, AzureConfig, CodexAuthMode, CodexConfig, HistoryConfig, KimiThinkingMode,
-        MemoryConfig, ModelSelectionConfig, OllamaConfig, OpenRouterConfig, OpencodeConfig,
-        ReasoningEffort, ReasoningSetting, SafetyConfig, SubagentConfig, ToolConfig, UiConfig,
-        WebSearchMode,
+        AppConfig, AzureConfig, CodexAuthMode, CodexConfig, CriticConfig, HistoryConfig,
+        KimiThinkingMode, MemoryConfig, ModelSelectionConfig, OllamaConfig, OpenRouterConfig,
+        OpencodeConfig, ReasoningEffort, ReasoningSetting, SafetyConfig, SubagentConfig,
+        ToolConfig, UiConfig, WebSearchMode,
     },
     features::planning::PlanningConfig,
     web::WebService,
@@ -66,6 +66,7 @@ fn sample_config() -> AppConfig {
             model_name: "gpt-5.4-mini".into(),
             reasoning: ReasoningEffort::Low.into(),
         },
+        critic: CriticConfig::default(),
         memory: MemoryConfig::default(),
         ui: UiConfig {
             show_thinking: true,
@@ -230,10 +231,18 @@ fn opencode_openai_compatible_models_use_go_v1_base_url() {
         api_key: "opencode-secret".into(),
     });
 
-    assert_eq!(
-        openai_base_url_for_model(&config, "opencode-go/glm-5.1").expect("base url"),
-        "https://opencode.ai/zen/go/v1"
-    );
+    for model_name in [
+        "opencode-go/glm-5.1",
+        "opencode-go/kimi-k2.6",
+        "opencode-go/deepseek-v4-pro",
+        "opencode-go/mimo-v2.5-pro",
+        "opencode-go/qwen3.5-plus",
+    ] {
+        assert_eq!(
+            openai_base_url_for_model(&config, model_name).expect("base url"),
+            "https://opencode.ai/zen/go/v1"
+        );
+    }
 
     let headers = http_headers_for_model(&config, "opencode-go/glm-5.1").expect("headers");
     assert!(headers.get("HTTP-Referer").is_none());
@@ -603,6 +612,7 @@ async fn read_write_mode_registers_mutation_tools() {
     let service = LlmService::from_config(
         &sample_config(),
         AgentContext::main(AccessMode::ReadWrite),
+        SessionProfile::Normal,
         WriteApprovalController::default(),
         Some(AskUserController::default()),
         true,
@@ -656,6 +666,7 @@ async fn read_only_mode_omits_mutation_tools() {
     let service = LlmService::from_config(
         &sample_config(),
         AgentContext::main(AccessMode::ReadOnly),
+        SessionProfile::Normal,
         WriteApprovalController::default(),
         Some(AskUserController::default()),
         true,
@@ -901,6 +912,7 @@ async fn write_mode_preamble_is_the_same_for_both_approval_modes() {
     let manual = LlmService::from_config(
         &sample_config(),
         AgentContext::main(AccessMode::ReadWrite),
+        SessionProfile::Normal,
         WriteApprovalController::new(ApprovalMode::Manual),
         Some(AskUserController::default()),
         true,
@@ -914,6 +926,7 @@ async fn write_mode_preamble_is_the_same_for_both_approval_modes() {
     let disabled = LlmService::from_config(
         &sample_config(),
         AgentContext::main(AccessMode::ReadWrite),
+        SessionProfile::Normal,
         WriteApprovalController::new(ApprovalMode::Disabled),
         Some(AskUserController::default()),
         true,
@@ -937,6 +950,7 @@ async fn todo_tool_can_be_disabled_independently_of_ask_user() {
     let service = LlmService::from_config(
         &sample_config(),
         AgentContext::main(AccessMode::ReadOnly),
+        SessionProfile::Normal,
         WriteApprovalController::default(),
         Some(AskUserController::default()),
         false,

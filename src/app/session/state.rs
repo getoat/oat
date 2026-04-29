@@ -7,6 +7,7 @@ use crate::{
     config::{HistoryMode, ReasoningSetting},
     features::planning::{PlanningAgentConfig, PlanningFeatureState},
     stats::StatsTotals,
+    task::{ActiveTask, TurnEvidence},
     todo::TodoSnapshot,
 };
 
@@ -50,12 +51,19 @@ pub struct SessionState {
     pub safety_reasoning: ReasoningSetting,
     pub memory_model_name: String,
     pub memory_reasoning: ReasoningSetting,
+    pub critic_enabled: bool,
+    pub critic_model_name: String,
+    pub critic_reasoning: ReasoningSetting,
+    pub critic_max_retries: u8,
+    pub critic_retry_count: u8,
     pub planning_agents: Vec<PlanningAgentConfig>,
     pub session_stats: StatsTotals,
     pub active_background_terminal_count: usize,
     pub planning: PlanningFeatureState,
     pub pending_ask_user: Option<PendingAskUser>,
     pub current_todo: Option<TodoSnapshot>,
+    pub current_task: Option<ActiveTask>,
+    pub current_turn_evidence: TurnEvidence,
     pub queued_messages: VecDeque<String>,
     pub active_main_request_seed: Option<MainRequestSeed>,
     pub pending_side_replies: HashMap<u64, PendingSideReply>,
@@ -96,6 +104,7 @@ impl SessionState {
         let reasoning = reasoning.into();
         let safety_model_name = model_name.clone();
         let memory_model_name = model_name.clone();
+        let critic_model_name = model_name.clone();
         Self {
             workspace_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             full_system_access,
@@ -134,12 +143,19 @@ impl SessionState {
             safety_reasoning: reasoning,
             memory_model_name,
             memory_reasoning: reasoning,
+            critic_enabled: true,
+            critic_model_name,
+            critic_reasoning: reasoning,
+            critic_max_retries: 2,
+            critic_retry_count: 0,
             planning_agents,
             session_stats: StatsTotals::default(),
             active_background_terminal_count: 0,
             planning: PlanningFeatureState::default(),
             pending_ask_user: None,
             current_todo: None,
+            current_task: None,
+            current_turn_evidence: TurnEvidence::default(),
             queued_messages: VecDeque::new(),
             active_main_request_seed: None,
             pending_side_replies: HashMap::new(),

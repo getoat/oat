@@ -9,7 +9,7 @@ use ratatui::{
 use crate::app::session::ProposedPlanEntry;
 use crate::app::{
     App, BackgroundTerminalStatusEntry, ChatMessage, HostedToolStatusEntry, MessageStyle,
-    SubagentStatusEntry, ToolCall, ToolResultEntry, TranscriptEntry, query,
+    SubagentStatusEntry, TaskUpdateEntry, ToolCall, ToolResultEntry, TranscriptEntry, query,
 };
 use crate::todo::TodoSnapshot;
 
@@ -47,6 +47,7 @@ enum VisibleEntry<'a> {
     ToolResult(&'a ToolResultEntry),
     HostedToolStatus(&'a HostedToolStatusEntry),
     TodoSnapshot(&'a TodoSnapshot),
+    TaskUpdate(&'a TaskUpdateEntry),
     SubagentStatus(&'a SubagentStatusEntry),
     BackgroundTerminalStatus(&'a BackgroundTerminalStatusEntry),
 }
@@ -414,6 +415,7 @@ fn visible_entries(app: &App) -> Vec<(usize, VisibleEntry<'_>)> {
             TranscriptEntry::TodoSnapshot(snapshot) => {
                 Some((index, VisibleEntry::TodoSnapshot(snapshot)))
             }
+            TranscriptEntry::TaskUpdate(task) => Some((index, VisibleEntry::TaskUpdate(task))),
             TranscriptEntry::SubagentStatus(status) => {
                 Some((index, VisibleEntry::SubagentStatus(status)))
             }
@@ -462,9 +464,34 @@ fn push_visible_entry_lines(
         VisibleEntry::TodoSnapshot(snapshot) => {
             push_todo_snapshot_lines(lines, snapshot, width, accent)
         }
+        VisibleEntry::TaskUpdate(task) => push_task_update_lines(lines, task, width, accent),
         VisibleEntry::SubagentStatus(status) => push_subagent_status_lines(lines, status, width),
         VisibleEntry::BackgroundTerminalStatus(status) => {
             push_background_terminal_status_lines(lines, status, width)
+        }
+    }
+}
+
+fn push_task_update_lines(
+    lines: &mut Vec<Line<'static>>,
+    task: &TaskUpdateEntry,
+    width: usize,
+    accent: Color,
+) {
+    let _ = width;
+    lines.push(Line::from(Span::styled(
+        format!("⚑ {}", task.summary),
+        Style::default().fg(accent).add_modifier(Modifier::BOLD),
+    )));
+    if let Some(snapshot) = task.snapshot.as_ref() {
+        for criterion in &snapshot.criteria {
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "  #{} {} — verify: {}",
+                    criterion.id, criterion.text, criterion.verification_hint
+                ),
+                Style::default().fg(Color::Gray),
+            )));
         }
     }
 }
@@ -502,6 +529,9 @@ fn push_tool_activity_run_lines(
             }
             VisibleEntry::TodoSnapshot(_) => {
                 unreachable!("todo snapshots are rendered outside tool activity runs")
+            }
+            VisibleEntry::TaskUpdate(_) => {
+                unreachable!("task updates are rendered outside tool activity runs")
             }
             VisibleEntry::SubagentStatus(status) => {
                 push_subagent_status_lines(lines, status, width)

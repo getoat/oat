@@ -13,6 +13,7 @@ impl SubagentManager {
             | StreamEvent::HostedToolCompleted { .. }
             | StreamEvent::ToolResult { .. }
             | StreamEvent::TodoSnapshot(_)
+            | StreamEvent::TaskUpdated { .. }
             | StreamEvent::AskUserRequested { .. }
             | StreamEvent::PlanningFinalizationStarted
             | StreamEvent::CompactionFinished { .. }

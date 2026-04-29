@@ -11,7 +11,7 @@ use crate::{
 use super::{
     AccessMode, AppState, ApprovalMode, PendingAskUser, PendingReplyKind, PendingReplyReplaySeed,
     PendingShellApproval, PendingWriteApproval, SelectionPicker, SessionHistoryMessage,
-    SessionState, SlashCommand, TranscriptEntry, UiState,
+    SessionProfile, SessionState, SlashCommand, TranscriptEntry, UiState,
     session::{
         history_pending_status_label, next_request_context_percent,
         should_show_history_busy_indicator, shows_startup_banner, supported_reasoning_settings,
@@ -62,6 +62,14 @@ pub fn memory_model_name(state: &AppState) -> &str {
 
 pub fn memory_reasoning(state: &AppState) -> ReasoningSetting {
     state.session.memory_reasoning
+}
+
+pub fn critic_model_name(state: &AppState) -> &str {
+    &state.session.critic_model_name
+}
+
+pub fn critic_reasoning(state: &AppState) -> ReasoningSetting {
+    state.session.critic_reasoning
 }
 
 pub fn pending_write_approval(state: &AppState) -> Option<&PendingWriteApproval> {
@@ -138,6 +146,14 @@ pub fn plan_active(state: &AppState) -> bool {
             .pending_reply
             .as_ref()
             .is_some_and(|pending| pending.kind == PendingReplyKind::Planning)
+}
+
+pub fn session_profile(state: &AppState) -> SessionProfile {
+    if plan_active(state) {
+        SessionProfile::Planning
+    } else {
+        SessionProfile::Normal
+    }
 }
 
 pub fn should_quit(state: &AppState) -> bool {
@@ -566,6 +582,7 @@ mod tests {
             planning_selected_model: "gpt-5.4".into(),
             safety_selected_model: "gpt-5.4-mini".into(),
             memory_selected_model: "gpt-5.4-mini".into(),
+            critic_selected_model: "gpt-5.4-mini".into(),
         });
         assert_eq!(input_context(&state), InputContext::Picker);
 

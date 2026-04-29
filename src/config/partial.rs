@@ -8,12 +8,14 @@ use crate::{
 };
 
 use super::types::{
-    AppConfig, AzureConfig, ChutesConfig, CodexConfig, HistoryConfig, HistoryMode, MemoryConfig,
-    MemoryExtractionConfig, MemoryRetrievalConfig, MemoryRetrievalModeConfig, ModelSelectionConfig,
-    OllamaConfig, OpenRouterConfig, OpencodeConfig, RawReasoningSetting, SafetyConfig,
-    SubagentConfig, ToolConfig, ToolWebSearchConfig, UiConfig, WebSearchMode, default_api_version,
-    default_command_history_limit, default_history_mode, default_history_retained_steps,
-    default_max_concurrent_subagents, default_show_thinking, default_web_search_mode,
+    AppConfig, AzureConfig, ChutesConfig, CodexConfig, CriticConfig, HistoryConfig, HistoryMode,
+    MemoryConfig, MemoryExtractionConfig, MemoryRetrievalConfig, MemoryRetrievalModeConfig,
+    ModelSelectionConfig, OllamaConfig, OpenRouterConfig, OpencodeConfig, RawReasoningSetting,
+    SafetyConfig, SubagentConfig, ToolConfig, ToolWebSearchConfig, UiConfig, WebSearchMode,
+    default_api_version, default_command_history_limit, default_critic_enabled,
+    default_critic_max_retries, default_critic_max_tool_steps, default_history_mode,
+    default_history_retained_steps, default_max_concurrent_subagents, default_show_thinking,
+    default_web_search_mode,
 };
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -26,6 +28,7 @@ pub(super) struct PartialAppConfig {
     openrouter: Option<PartialOpenRouterConfig>,
     model: Option<PartialModelSelectionConfig>,
     safety: Option<PartialSafetyConfig>,
+    critic: Option<PartialCriticConfig>,
     ui: Option<PartialUiConfig>,
     subagents: Option<PartialSubagentConfig>,
     planning: Option<PartialPlanningConfig>,
@@ -88,6 +91,12 @@ impl PartialAppConfig {
             self.safety
                 .get_or_insert_with(PartialSafetyConfig::default)
                 .merge(safety);
+        }
+
+        if let Some(critic) = other.critic {
+            self.critic
+                .get_or_insert_with(PartialCriticConfig::default)
+                .merge(critic);
         }
 
         if let Some(subagents) = other.subagents {
@@ -161,6 +170,7 @@ impl PartialAppConfig {
             openrouter,
             model,
             safety,
+            critic,
             ui,
             subagents,
             planning,
@@ -190,6 +200,7 @@ impl PartialAppConfig {
                 .transpose()?,
             model: model.clone(),
             safety: safety.unwrap_or_default().finalize(&model)?,
+            critic: critic.unwrap_or_default().finalize(&model)?,
             ui: ui.unwrap_or_default().finalize(),
             subagents: subagents.unwrap_or_default().finalize(),
             planning: planning.unwrap_or_default().finalize(),
@@ -926,6 +937,81 @@ impl PartialSafetyConfig {
         Ok(SafetyConfig {
             model_name,
             reasoning,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct PartialCriticConfig {
+    enabled: Option<bool>,
+    model_name: Option<String>,
+    reasoning: Option<String>,
+    max_retries: Option<u8>,
+    max_tool_steps: Option<usize>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct RawPartialCriticConfig {
+    enabled: Option<bool>,
+    model_name: Option<String>,
+    max_retries: Option<u8>,
+    max_tool_steps: Option<usize>,
+    #[serde(flatten)]
+    reasoning_fields: RawReasoningSetting,
+}
+
+impl<'de> Deserialize<'de> for PartialCriticConfig {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = RawPartialCriticConfig::deserialize(deserializer)?;
+        Ok(Self {
+            enabled: raw.enabled,
+            model_name: raw.model_name,
+            reasoning: raw.reasoning_fields.resolve(),
+            max_retries: raw.max_retries,
+            max_tool_steps: raw.max_tool_steps,
+        })
+    }
+}
+
+impl PartialCriticConfig {
+    fn merge(&mut self, other: Self) {
+        if other.enabled.is_some() {
+            self.enabled = other.enabled;
+        }
+        if other.model_name.is_some() {
+            self.model_name = other.model_name;
+        }
+        if other.reasoning.is_some() {
+            self.reasoning = other.reasoning;
+        }
+        if other.max_retries.is_some() {
+            self.max_retries = other.max_retries;
+        }
+        if other.max_tool_steps.is_some() {
+            self.max_tool_steps = other.max_tool_steps;
+        }
+    }
+
+    fn finalize(self, model: &ModelSelectionConfig) -> Result<CriticConfig> {
+        let model_name = self.model_name.unwrap_or_else(|| model.model_name.clone());
+        let reasoning = self
+            .reasoning
+            .map(|value| {
+                parse_reasoning_value("critic.model_name", "critic.reasoning", &model_name, value)
+            })
+            .transpose()?
+            .unwrap_or(model.reasoning);
+        Ok(CriticConfig {
+            enabled: self.enabled.unwrap_or_else(default_critic_enabled),
+            model_name,
+            reasoning,
+            max_retries: self.max_retries.unwrap_or_else(default_critic_max_retries),
+            max_tool_steps: self
+                .max_tool_steps
+                .unwrap_or_else(default_critic_max_tool_steps),
         })
     }
 }

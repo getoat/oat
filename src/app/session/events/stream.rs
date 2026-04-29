@@ -72,6 +72,7 @@ pub(crate) fn on_stream_event(
         }
         StreamEvent::ToolResult { name, output } => {
             ops::session::set_pending_reply_activity(state, PendingReplyActivity::Responding);
+            ops::session::record_tool_evidence(state, &name, &output);
             ops::transcript::push_tool_result(state, name.clone(), output.clone());
             ops::session::push_pending_reply_history_tool_result(state, &name, &output);
             None
@@ -80,6 +81,13 @@ pub(crate) fn on_stream_event(
             ops::session::set_pending_reply_activity(state, PendingReplyActivity::Responding);
             ops::session::set_current_todo(state, snapshot.has_list.then_some(snapshot.clone()));
             ops::transcript::push_todo_snapshot(state, snapshot);
+            ops::session::sync_pending_reply_history(state);
+            None
+        }
+        StreamEvent::TaskUpdated { update, .. } => {
+            ops::session::set_pending_reply_activity(state, PendingReplyActivity::Responding);
+            let (summary, snapshot) = ops::session::apply_task_update(state, update);
+            ops::transcript::push_task_update(state, summary, snapshot);
             ops::session::sync_pending_reply_history(state);
             None
         }

@@ -5,7 +5,7 @@ use tokio::sync::oneshot;
 
 use crate::{
     agent::AgentContext,
-    app::StreamEvent,
+    app::{SessionProfile, StreamEvent},
     llm::{CompletionCapture, LlmService, PromptRunResult},
 };
 
@@ -68,6 +68,7 @@ impl SubagentManager {
         let service = LlmService::from_config_with_controllers(
             &request.config,
             context,
+            SessionProfile::Subagent,
             request.write_approvals.clone(),
             request.shell_approvals.clone(),
             None,

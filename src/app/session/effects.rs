@@ -64,6 +64,10 @@ pub enum Effect {
         model_name: String,
         reasoning: ReasoningSetting,
     },
+    SetCriticSelection {
+        model_name: String,
+        reasoning: ReasoningSetting,
+    },
     RunPlanningWorkflow {
         reply_id: u64,
         description: String,

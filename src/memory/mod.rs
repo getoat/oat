@@ -1714,6 +1714,11 @@ fn transcript_entry_to_evidence(entry: &TranscriptEntry) -> MemoryTranscriptEvid
             label: None,
             content: truncate(&serde_json::to_string(todo).unwrap_or_default(), 1_200),
         },
+        TranscriptEntry::TaskUpdate(task) => MemoryTranscriptEvidence {
+            kind: "task_update".into(),
+            label: None,
+            content: truncate(&task.summary, 1_200),
+        },
         TranscriptEntry::SubagentStatus(status) => MemoryTranscriptEvidence {
             kind: "subagent_status".into(),
             label: Some(status.display_label.clone()),

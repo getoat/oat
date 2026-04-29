@@ -152,6 +152,7 @@ fn planning_conversation_prompt_with_mode(description: &str, allow_ask_user: boo
             "## Runtime instructions\n\n",
             "- You are starting this planning session before oat runs its automatic planning phase.\n",
             "- Stay in PHASE 1 and PHASE 2 until intent is stable.\n",
+            "- During Plan Mode, the task/criteria tools are unavailable and the end-of-turn critic is disabled.\n",
             "{ambiguity_instructions}",
             "- Do not output a {plan_start} block before oat has completed PHASE 3.\n",
             "- Once intent is solidified, reply with a single {ready_start} block containing a normalized planning brief and no {plan_start} block.\n",
@@ -241,6 +242,7 @@ fn planning_finalization_prompt_with_mode(
             "## Runtime instructions\n\n",
             "- oat has already completed PHASE 3 automatically.\n",
             "- Continue in PHASE 4.\n",
+            "- During Plan Mode, the task/criteria tools are unavailable and the end-of-turn critic is disabled.\n",
             "- Review the planner outputs, resolve conflicts using your judgment, and produce the final plan.\n",
             "{ambiguity_instructions}",
             "- Do not emit {ready_start} again.\n",
@@ -268,6 +270,7 @@ pub fn accepted_plan_implementation_prompt(accepted_plan: &str) -> String {
         concat!(
             "You are no longer in Plan Mode. The plan has been accepted for implementation.\n",
             "Do not say that you still need a developer or system transition out of plan mode.\n",
+            "Before making edits, call SetCurrentTask and register acceptance criteria that reflect the accepted plan. Refine them with the criterion tools as needed while implementing.\n",
             "Use the accepted plan below as the implementation brief, explore the workspace as needed, and begin implementation now.\n\n",
             "Accepted plan:\n",
             "{accepted_plan}\n"
@@ -423,6 +426,8 @@ mod tests {
         assert!(prompt.contains("Once intent is solidified"));
         assert!(prompt.contains(PLANNING_READY_START_TAG));
         assert!(prompt.contains("You may use AskUser multiple times across the planning session"));
+        assert!(prompt.contains("task/criteria tools are unavailable"));
+        assert!(prompt.contains("critic is disabled"));
         assert!(
             prompt
                 .contains("Do not output a <proposed_plan> block before oat has completed PHASE 3")
@@ -455,8 +460,20 @@ mod tests {
         assert!(prompt.contains("Continue in PHASE 4"));
         assert!(prompt.contains("Do a targeted read-only verification pass"));
         assert!(prompt.contains("Do not emit <planning_ready> again"));
+        assert!(prompt.contains("task/criteria tools are unavailable"));
+        assert!(prompt.contains("critic is disabled"));
         assert!(prompt.contains("use AskUser when the clarification can be represented"));
         assert!(prompt.contains("wrap the final answer in a <proposed_plan> block"));
+    }
+
+    #[test]
+    fn accepted_plan_implementation_prompt_requires_re_registering_task_and_criteria() {
+        let prompt =
+            accepted_plan_implementation_prompt("<proposed_plan>\n# Ship it\n</proposed_plan>");
+
+        assert!(prompt.contains("You are no longer in Plan Mode"));
+        assert!(prompt.contains("Before making edits, call SetCurrentTask"));
+        assert!(prompt.contains("Refine them with the criterion tools"));
     }
 
     #[test]

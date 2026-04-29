@@ -1,5 +1,6 @@
 mod agent_builder;
 mod compaction;
+mod critic;
 mod hooks;
 mod responses_search;
 mod resume;
@@ -20,6 +21,9 @@ pub(crate) type ResponsesAgent = rig::agent::Agent<
 >;
 
 pub(crate) use crate::app::StreamEvent;
+#[allow(unused_imports)]
+pub(crate) use critic::parse_critic_verdict;
+pub(crate) use critic::{CriticVerdict, run_agentic_critic};
 pub(crate) use hooks::{AskUserController, ShellApprovalController, WriteApprovalController};
 pub(crate) use responses_search::{
     OAT_INTERACTION_SCOPE_HEADER, ResponsesHostedToolEvent, ResponsesHostedToolKind,

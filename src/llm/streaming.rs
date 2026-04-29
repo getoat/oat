@@ -20,7 +20,7 @@ use crate::{
     stats::StatsHook,
     todo::parse_snapshot,
     tool_result_status::tool_result_is_failure_text,
-    tools::{AskUserTool, CommentaryTool, TodoTool},
+    tools::{AskUserTool, CommentaryTool, TodoTool, is_task_tool_name, parse_task_update},
 };
 
 use super::{
@@ -234,6 +234,9 @@ where
                 } else if name == TodoTool::NAME {
                     partial_tool_calls.remove(&internal_call_id);
                     None
+                } else if is_task_tool_name(&name) {
+                    partial_tool_calls.remove(&internal_call_id);
+                    None
                 } else if name == CommentaryTool::NAME {
                     match resolve_commentary_message(
                         &mut partial_tool_calls,
@@ -303,6 +306,14 @@ where
                 } else if name == TodoTool::NAME {
                     match parse_snapshot(&output) {
                         Ok(snapshot) => Some(StreamEvent::TodoSnapshot(snapshot)),
+                        Err(_) => Some(StreamEvent::ToolResult { name, output }),
+                    }
+                } else if is_task_tool_name(&name) {
+                    match parse_task_update(&output) {
+                        Ok(update) => Some(StreamEvent::TaskUpdated {
+                            update,
+                            snapshot: None,
+                        }),
                         Err(_) => Some(StreamEvent::ToolResult { name, output }),
                     }
                 } else if commentary_calls.contains(&internal_call_id) {

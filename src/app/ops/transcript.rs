@@ -3,8 +3,9 @@ use crate::{
     app::{
         ActivityDisplayState, AppState, BackgroundTerminalStatusEntry, ChatMessage, HostedToolKind,
         HostedToolStatusEntry, MessageStyle, Speaker, SubagentStatusEntry, SubagentStatusKind,
-        ToolCall, ToolResultEntry, TranscriptEntry,
+        TaskUpdateEntry, ToolCall, ToolResultEntry, TranscriptEntry,
     },
+    task::ActiveTask,
     todo::TodoSnapshot,
     tools::mutation_preview,
 };
@@ -115,6 +116,25 @@ pub(crate) fn push_todo_snapshot(state: &mut AppState, snapshot: TodoSnapshot) {
         .session
         .entries
         .push(TranscriptEntry::TodoSnapshot(snapshot));
+    bump_transcript_revision(state);
+}
+
+pub(crate) fn push_task_update(
+    state: &mut AppState,
+    summary: String,
+    snapshot: Option<ActiveTask>,
+) {
+    if let Some(pending) = state.session.pending_reply.as_mut() {
+        pending.reset_active_stream_segment();
+        pending.has_visible_content = true;
+    }
+    state
+        .session
+        .entries
+        .push(TranscriptEntry::TaskUpdate(TaskUpdateEntry {
+            summary,
+            snapshot,
+        }));
     bump_transcript_revision(state);
 }
 

@@ -104,8 +104,12 @@ fn render_model_picker_normal_tab_keeps_selected_item_visible_on_small_screens()
         .iter()
         .position(|model| model.name == "xiaomi/mimo-v2-flash")
         .expect("target model in picker");
+    let current_index = selectable_models_for_tab(ModelPickerTab::NormalAgent, "gpt-5.4")
+        .iter()
+        .position(|model| model.name == "gpt-5.4")
+        .expect("current model in picker");
 
-    for _ in 0..target_index {
+    for _ in current_index..target_index {
         app.apply(Action::SelectNextCommand);
     }
 
@@ -145,8 +149,12 @@ fn render_model_picker_safety_tab_keeps_selected_item_visible_on_small_screens()
         .iter()
         .position(|model| model.name == "xiaomi/mimo-v2-flash")
         .expect("target model in picker");
+    let current_index = selectable_models_for_tab(ModelPickerTab::SafetyModel, "gpt-5.4")
+        .iter()
+        .position(|model| model.name == "gpt-5.4")
+        .expect("current model in picker");
 
-    for _ in 0..target_index {
+    for _ in current_index..target_index {
         app.apply(Action::SelectNextCommand);
     }
 

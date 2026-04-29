@@ -22,6 +22,8 @@ use crate::{
 use partial::PartialAppConfig;
 pub(crate) use paths::default_config_locations;
 use paths::{default_config_update_path, default_home_config_path};
+#[allow(unused_imports)]
+pub(crate) use types::CriticConfig;
 #[cfg(test)]
 use types::default_api_version;
 pub(crate) use types::{

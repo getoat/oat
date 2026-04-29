@@ -135,7 +135,7 @@ pub(super) fn handle(state: &mut AppState, action: Action) -> Option<Effect> {
 mod tests {
     use crate::{
         app::{
-            Action, SlashCommand,
+            Action, ModelPickerTab, SlashCommand, selectable_models_for_tab,
             session::test_support::{new_app, registry_app},
         },
         config::ReasoningEffort,
@@ -262,6 +262,15 @@ mod tests {
         let mut app = registry_app(true);
         app.open_model_picker();
         app.apply(Action::PickerTabRight);
+
+        let target_index =
+            selectable_models_for_tab(ModelPickerTab::PlanningAgents, "gpt-5.4-mini")
+                .iter()
+                .position(|model| model.name == "gpt-5.4")
+                .expect("target model in picker");
+        for _ in 0..target_index {
+            app.apply(Action::SelectNextCommand);
+        }
 
         let effect = app.apply(Action::TogglePickerSelection);
 

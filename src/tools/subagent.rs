@@ -256,8 +256,8 @@ mod tests {
     use super::*;
     use crate::{
         config::{
-            AzureConfig, HistoryConfig, MemoryConfig, ModelSelectionConfig, ReasoningEffort,
-            SafetyConfig, SubagentConfig, ToolConfig, UiConfig,
+            AzureConfig, CriticConfig, HistoryConfig, MemoryConfig, ModelSelectionConfig,
+            ReasoningEffort, SafetyConfig, SubagentConfig, ToolConfig, UiConfig,
         },
         features::planning::PlanningConfig,
         stats::StatsStore,
@@ -284,6 +284,7 @@ mod tests {
                 model_name: "gpt-5.4-mini".into(),
                 reasoning: ReasoningEffort::Medium.into(),
             },
+            critic: CriticConfig::default(),
             memory: MemoryConfig::default(),
             ui: UiConfig::default(),
             subagents: SubagentConfig { max_concurrent: 4 },

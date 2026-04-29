@@ -10,6 +10,7 @@ pub enum ModelPickerTab {
     PlanningAgents,
     SafetyModel,
     MemoryModel,
+    CriticModel,
 }
 
 impl ModelPickerTab {
@@ -19,6 +20,7 @@ impl ModelPickerTab {
             Self::PlanningAgents,
             Self::SafetyModel,
             Self::MemoryModel,
+            Self::CriticModel,
         ];
         let current = tabs.iter().position(|tab| *tab == *self).unwrap_or(0);
         let next = (current as isize + direction).rem_euclid(tabs.len() as isize) as usize;
@@ -32,6 +34,7 @@ pub enum ReasoningPickerTarget {
     PlanningAgent,
     SafetyModel,
     MemoryModel,
+    CriticModel,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -50,6 +53,7 @@ pub enum SelectionPicker {
         planning_selected_model: String,
         safety_selected_model: String,
         memory_selected_model: String,
+        critic_selected_model: String,
     },
     Session {
         entries: Vec<SessionPickerEntry>,
@@ -169,6 +173,10 @@ pub enum PickerSelection {
         reasoning: ReasoningSetting,
     },
     MemorySelection {
+        model_name: String,
+        reasoning: ReasoningSetting,
+    },
+    CriticSelection {
         model_name: String,
         reasoning: ReasoningSetting,
     },

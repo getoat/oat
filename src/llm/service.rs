@@ -6,7 +6,7 @@ use std::{
     },
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use rig::{
     completion::Message as RigMessage,
     providers::{anthropic, openai},
@@ -16,7 +16,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::{
     agent::AgentContext,
     app::{
-        AccessMode, HostedToolKind, PendingReplyReplaySeed, SessionHistoryMessage,
+        AccessMode, HostedToolKind, PendingReplyReplaySeed, SessionHistoryMessage, SessionProfile,
         ShellApprovalDecision, SideChannelEvent, TurnEndReason, WriteApprovalDecision,
     },
     ask_user::AskUserResponse,
@@ -58,6 +58,7 @@ use super::{
 // `max_turns + 1`, so `usize::MAX` would overflow. Use the largest safe value
 // to avoid imposing an application-level turn cap.
 const UNBOUNDED_TOOL_STEPS_PER_TURN: usize = usize::MAX - 1;
+const TOOL_STEP_LIMIT_EXCEEDED_ERROR: &str = "tool step limit exceeded";
 const SESSION_TITLE_PROMPT_PREFIX: &str = concat!(
     "Write a concise title for this session based on the user's first request.\n",
     "Respond with only the title.\n",
@@ -278,6 +279,7 @@ pub struct LlmService {
     reasoning: ReasoningSetting,
     interactive_features: RequestFeatures,
     pub(crate) access_mode: AccessMode,
+    pub(crate) session_profile: SessionProfile,
     role: crate::agent::AgentRole,
     pub(crate) approvals: WriteApprovalController,
     pub(crate) shell_approvals: ShellApprovalController,
@@ -297,6 +299,7 @@ impl LlmService {
     pub fn from_config(
         config: &AppConfig,
         context: AgentContext,
+        session_profile: SessionProfile,
         approvals: WriteApprovalController,
         ask_user: Option<AskUserController>,
         todo_available: bool,
@@ -309,6 +312,7 @@ impl LlmService {
         Self::from_config_with_controllers(
             config,
             context,
+            session_profile,
             approvals,
             shell_approvals,
             ask_user,
@@ -323,6 +327,7 @@ impl LlmService {
     pub fn from_config_with_controllers(
         config: &AppConfig,
         context: AgentContext,
+        session_profile: SessionProfile,
         approvals: WriteApprovalController,
         shell_approvals: ShellApprovalController,
         ask_user: Option<AskUserController>,
@@ -337,6 +342,7 @@ impl LlmService {
             .model_name_override
             .clone()
             .unwrap_or_else(|| config.model.model_name.clone());
+        let reasoning = context.reasoning_override.unwrap_or(config.model.reasoning);
         let interaction_scope = next_interaction_scope_id();
         let interactive_features = if context.role == crate::agent::AgentRole::Main {
             interactive_request_features(config, &model_name)
@@ -349,6 +355,7 @@ impl LlmService {
             root: workspace_root,
             allow_full_system_access: context.allow_full_system_access,
             agent: context.clone(),
+            session_profile,
             config: config.clone(),
             write_approvals: approvals.clone(),
             shell_approvals: shell_approvals.clone(),
@@ -364,7 +371,7 @@ impl LlmService {
             config,
             &model_name,
             &preamble,
-            config.model.reasoning,
+            reasoning,
             interactive_features,
             &interaction_scope,
             tool_context,
@@ -377,9 +384,10 @@ impl LlmService {
             agent,
             client,
             model_name,
-            reasoning: config.model.reasoning,
+            reasoning,
             interactive_features,
             access_mode: context.access_mode,
+            session_profile,
             role: context.role,
             approvals,
             shell_approvals,
@@ -409,6 +417,10 @@ impl LlmService {
     #[cfg(test)]
     pub(crate) fn tool_names(&self) -> &[String] {
         &self.tool_names
+    }
+
+    pub(crate) fn session_profile(&self) -> SessionProfile {
+        self.session_profile
     }
 
     pub(crate) fn interaction_scope(&self) -> &str {
@@ -665,6 +677,7 @@ impl LlmService {
                 emit.clone(),
                 Some(ResumeOverrideController::new(override_action)),
                 replay_seed,
+                UNBOUNDED_TOOL_STEPS_PER_TURN,
             )
             .await
         {
@@ -704,9 +717,58 @@ impl LlmService {
             .await?;
 
         self.run_prompt_from_state(
-            reply_id, prompt, history, stats_hook, capture, emit, None, None,
+            reply_id,
+            prompt,
+            history,
+            stats_hook,
+            capture,
+            emit,
+            None,
+            None,
+            UNBOUNDED_TOOL_STEPS_PER_TURN,
         )
         .await
+    }
+
+    pub async fn run_prompt_with_tool_step_limit(
+        &self,
+        reply_id: u64,
+        prompt: String,
+        history: Vec<SessionHistoryMessage>,
+        history_model_name: Option<String>,
+        stats_hook: StatsHook,
+        capture: Option<CompletionCapture>,
+        emit: EventCallback,
+        max_tool_steps: usize,
+    ) -> Result<PromptRunResult> {
+        let (prompt, history) = self
+            .prepare_prompt_state(
+                reply_id,
+                prompt,
+                history,
+                history_model_name,
+                stats_hook.clone(),
+                emit.clone(),
+                false,
+            )
+            .await?;
+
+        self.run_prompt_from_state(
+            reply_id,
+            prompt,
+            history,
+            stats_hook,
+            capture,
+            emit,
+            None,
+            None,
+            max_tool_steps,
+        )
+        .await
+    }
+
+    pub(crate) fn is_tool_step_limit_error(error: &anyhow::Error) -> bool {
+        error.to_string() == TOOL_STEP_LIMIT_EXCEEDED_ERROR
     }
 
     async fn run_side_channel(
@@ -828,6 +890,7 @@ impl LlmService {
         emit: EventCallback,
         resume: Option<ResumeOverrideController>,
         mut replay_seed: Option<PendingReplyReplaySeed>,
+        max_tool_steps: usize,
     ) -> Result<PromptRunResult> {
         loop {
             let replay_seed = replay_seed.take();
@@ -844,7 +907,7 @@ impl LlmService {
                         emit.clone(),
                         resume.clone(),
                         replay_seed.clone(),
-                        UNBOUNDED_TOOL_STEPS_PER_TURN,
+                        max_tool_steps,
                     )
                     .await?
                 }
@@ -860,7 +923,7 @@ impl LlmService {
                         emit.clone(),
                         resume.clone(),
                         replay_seed.clone(),
-                        UNBOUNDED_TOOL_STEPS_PER_TURN,
+                        max_tool_steps,
                     )
                     .await?
                 }
@@ -876,7 +939,7 @@ impl LlmService {
                         emit.clone(),
                         resume.clone(),
                         replay_seed,
-                        UNBOUNDED_TOOL_STEPS_PER_TURN,
+                        max_tool_steps,
                     )
                     .await?
                 }
@@ -887,6 +950,9 @@ impl LlmService {
                     return Ok(result);
                 }
                 PromptStepOutcome::Continue(next) => {
+                    if max_tool_steps != UNBOUNDED_TOOL_STEPS_PER_TURN {
+                        return Err(anyhow!(TOOL_STEP_LIMIT_EXCEEDED_ERROR));
+                    }
                     let reduced_history = reduce_history(
                         &next.history,
                         self.config.history.mode,

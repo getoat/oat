@@ -59,6 +59,10 @@ pub(crate) fn bootstrap_tui(config: AppConfig, startup: StartupOptions) -> Resul
     app.set_safety_reasoning(config.safety.reasoning);
     app.set_memory_model_name(config.memory.extraction.model_name.clone());
     app.set_memory_reasoning(config.memory.extraction.reasoning);
+    app.set_critic_model_name(config.critic.model_name.clone());
+    app.set_critic_reasoning(config.critic.reasoning);
+    app.state_mut().session.critic_enabled = config.critic.enabled;
+    app.state_mut().session.critic_max_retries = config.critic.max_retries;
     app.state_mut().session.history_mode = config.history.mode;
     app.state_mut().session.history_retained_steps = config.history.retained_steps;
     let stats = StatsStore::new();
@@ -95,6 +99,7 @@ pub(crate) fn bootstrap_tui(config: AppConfig, startup: StartupOptions) -> Resul
                 query::mode(app.state()),
                 app.state().session.full_system_access,
             ),
+            query::session_profile(app.state()),
             WriteApprovalController::new(startup.approval_mode),
             Some(AskUserController::default()),
             true,
@@ -133,6 +138,7 @@ pub(crate) struct HeadlessBootstrap {
     pub(crate) runtime: Runtime,
     pub(crate) config: AppConfig,
     pub(crate) stats: StatsStore,
+    pub(crate) memory: MemoryService,
     pub(crate) llm: LlmService,
     pub(crate) subagents: SubagentManager,
     #[allow(dead_code)]
@@ -161,6 +167,7 @@ pub(crate) fn bootstrap_headless(
                 startup.access_mode,
                 startup.full_system_access(),
             ),
+            crate::app::SessionProfile::Normal,
             WriteApprovalController::new(startup.approval_mode),
             None,
             true,
@@ -175,6 +182,7 @@ pub(crate) fn bootstrap_headless(
         runtime,
         config: config.clone(),
         stats,
+        memory,
         llm,
         subagents,
         terminals,

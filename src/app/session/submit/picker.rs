@@ -23,6 +23,13 @@ pub(super) fn submit_picker_selection(state: &mut AppState) -> Option<Effect> {
             model_name,
             reasoning,
         }),
+        PickerSelection::CriticSelection {
+            model_name,
+            reasoning,
+        } => Some(Effect::SetCriticSelection {
+            model_name,
+            reasoning,
+        }),
     }
 }
 
